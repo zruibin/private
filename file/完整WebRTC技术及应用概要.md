@@ -1,0 +1,547 @@
+
+<!--BEGIN_DATA
+{
+    "create_date": "2020-12-16 10:00", 
+    "modify_date": "2020-12-16 10:00", 
+    "is_top": "0", 
+    "summary": "完整WebRTC技术及应用概要", 
+    "tags": "WebRTC", 
+    "file_name": "完整WebRTC技术及应用概要.md"
+}
+END_DATA-->
+
+#### <p>原文出处：<a href='https://mp.weixin.qq.com/s?__biz=MzA4NjU0NTIwNQ==&mid=2656445323&idx=1&sn=62882b00fe4435d21a6e451c5452b902&chksm=846585d1b3120cc7aa2e810cfb5c9f712402712990c03bc21636d619766f095873514ad234de&token=1085690380&lang=zh_CN&scene=21#wechat_redirect' target='blank'>完整WebRTC技术及应用概要</a></p>
+
+Web Real-Time Communication(WebRTC)是最近几年非常热门的一项新的基于浏览器的技术，很多VoIP的厂家和应用集成厂家的解决方案中都逐渐支持了WebRTC技术。WebRTC技术通过对浏览器或者移动终端应用，结合API接口，实现了视频，语音功能。当然，WebRTC受到如此多重视，当然也离不开主要的推动者Google，微软，Mozilla等大牌厂家的鼎力支持，以及几个著名的协议组织，例如，W3C和IETF的协助。
+
+虽然，网络上有很多关于WebRTC的文章，这些文章通过不同的角度对WebRTC做了非常详细的介绍，WebRTC官方网站也发布了有很多的文档。但是，很多网上的文章比较零散，讨论的角度都不一样。另外，很多权威的文档和纸质书基本上都是以英文出版，一些读者的英文阅读能力没有那么高的话，可能影响对技术的消化吸收。为了给中国读者提供一个比较全面的完整的关于WebRTC的技术以及应用概要，笔者希望通过一个完整的篇幅，对WebRTC技术做一个比较系统，完整地描述介绍，其内容包括从WebRTC背景知识，媒体流，相关的协议栈，NAT处理，安全以及隐身设置，WebRTC当前的问题以及未来的提升，WebRTC用户使用场景，和开源WebRTC媒体服务器以及视频会议，WebRTC测试工具等知识点，让普通读者能够通过一篇文章就对WebRTC技术有一个非常清晰的思路，为进一步学习WebRTC技术做一个有效铺垫，读者可以快速进入到真正的WebRTC技术应用开发中。在十一个章节中，笔者会根据WebRTC技术的架构以及相关的应用做一个完整的介绍。
+
+## 01 WebRTC的技术背景介绍
+
+首先让我们简单了解一下基本的通信背景知识。如果从实时通信和语音协议的发展来看，最早的语音通信协议应该发生在1977年，人们把实时通信技术通过Network Voice Protocol（NVP-rfc741）在网络上应用，并且演示了其技术的可用性。在语音发展过程中，实时通信开始也经历了多个历史阶段，并且结合其他的技术逐渐实现了突破。以下是一个关于语音技术的部分阶段的发展进程。
+
+![](./image/20201216-100000-1.png)
+
+如下图示例所示，最初的工作模型也相对比较简单，随着技术的不断完善和协议的修改，今天的语音技术已经出现了很大的突破。具体关于NVP的规范，读者可以查阅rfc741获得详情。
+
+![](./image/20201216-100000-2.png)
+
+![](./image/20201216-100000-3.png)
+
+在提到实时通信技术或者WebRTC技术，我们还要简单介绍一下实时传输协议RTP，此技术最早在1992年左右开始使用，1996年作为一个标准发布。目前RTP是VoIP，SIP或者WebRTC的其中一个部分。  
+
+![](./image/20201216-100000-4.png)
+
+除了RTP协议以外，H323和SIP协议也是我们进入讨论WebRTC之前需要介绍的背景知识。H323在1996年有ITU发布，SIP在1999年由IETF发布。在最近几十年的语音视频领域，这两种协议在语音和视频技术扮演者非常重要的角色。当然，现在被用户和市场认可的是SIP协议，H323用户逐渐变少。
+
+![](./image/20201216-100000-5.png)
+
+![](./image/20201216-100000-6.png)
+
+WebRTC受到青睐原因很多，我们会在下面的章节中加以介绍。其主要原因是它的易用性，并且可以借用当前用户浏览器的其他媒体设备，例如麦克风和摄像头，通过浏览器的API接口直接访问这些网络资源，用户无需再安装下载其他的插件来获得对网络资源的支持。WebRTC也可以实现点对点的网络互动，可以避免远程服务器的网络访问问题。特别是VoLTE网络环境中，语音可以通过数据通道来实现，这样就会极大方便终端用户的语音视频通信。另外，现在很多的在线游戏也可以通过浏览器的形式展现游戏场景，用户实现了和同学，朋友通过语音，数据和视频同时进行互动交流。
+
+![](./image/20201216-100000-7.png)
+
+现在，我们简单介绍一下WebRTC的功能实现。WebRTC的功能包括以上几个核心的模块和API接口。用户浏览器通过和HTML，其他的脚本语言和客户端的接口进行调用。特别注意，在浏览器的RTC功能中，特别包括了传输的编码，回声处理等功能。其他的媒体数据可以通过RTC功能和WebRTC实现通信。
+
+WebRTC受到市场的认可有很多原因。它主要包括以下几个方面的原因：
+
+  * 平台和设备的独立。开发人员可以通过支持WebRTC的浏览器开发基于WebRTC的各种应用，无需担心终端和操作系统层面的兼容性问题。另外，WebRTC也提供了标准的API（W3C）和其标准的协议支持（IETF）避免了平台兼容性的问题。
+  * 语音和视频的安全处理, WebRTC通过SRTP对语音和视频进行加密处理。用户使用浏览器登录访问语音和视频需要比较安全的设置要求，满足了用户场景的安全要求（例如，在无安全保障的wifi环境下的语音和视频），其他人不能对其进行监听。
+  * 支持高级语言和视频处理，WebRTC支持了最新的编码，语音支持了Opus，视频支持了VP8。内置的编码排除了其他第三方下载的安全隐患，同时能够支持网络环境的调整，实现了比较好的语音或视频质量。
+  * 支持可靠性传输创建，WebRTC提供了可靠性传输方式，包括了在NAT环境下仍然可以实现传输的稳定性。
+  * 支持多媒体流处理，WebRTC提供了多媒体和多资源的聚和，提供了RTP和SDP的拓展。
+  * 支持不同网络环境调节，因为WebRTC在网络平台执行，所以对网络环境和带宽非常敏感。它可以自己检测，调整网络环境和带宽需求，避免网络拥塞。它通过RTCP和SAVPF来保障此功能。
+  * 和VoIP语音视频有比较好的兼容性，WebRTC实现了和其他媒体的兼容性操作，包括了SIP，Jingle和XMPP对接。同时，如果需要和传统的其他协议对接的话，可以通过WebRTC 网关来实现兼容性的流畅性，保证和传统协议的兼容性。
+
+使用WebRTC对开发人员和用户有以下几个方面的好处：
+
+  * 开发人员可以无需担心平台的兼容性，实现无缝集成。
+  * 开发人员可以使用简单的API接口就可以实现应用开发。
+  * 开发人员无需担心NAT带来的问题。
+  * 开发人员可以使用比较高级的编码资源，无需承担商业许可证费用。
+  * 用户无需安装即可使用。
+  * 用户所有通信都是加密的。
+  * 用户可以实现可靠性传输。
+  * 用户可以使用高清语音和视频。
+  * 用户可以选择更多的实时通信手段。
+
+接下来，我们简单介绍一下WebRTC的著名三角形拓扑示例：  
+
+![](./image/20201216-100000-8.png)
+
+以上示例是一个非常普遍的应用流程示意图，用户可以到官方网站获得其流程的其他说明。特别指出的是，在语音通信环境中，可能很多用户关心的是如何实现和SIP，PSTN的网络聚合。我们再列举几个和语音环境相关的集成方案示例。
+
+![](./image/20201216-100000-9.png)
+
+![](./image/20201216-100000-10.png)
+
+如果WebRTC实现对PSTN呼叫的话，事实上还是经过SIP/PSTN网关的转换，可以支持FXO/FXS或者E1接入方式。
+
+![](./image/20201216-100000-11.png)
+
+如果一些IPPBX（旧版本的IPPBX）没有支持WebRTC的话，或者为了避免WebRTC对接带来的问题，也可以通过WebRTC网关来对接传统的SIP/IP PBX，然后实现IPPBX+WebRTC网关+浏览器WebRTC应用的应用场景。笔者在两年前使用FreePBX-2.5 结合portSIP WebRTC 网关实现的一个案例。
+
+![](./image/20201216-100000-12.png)
+
+![](./image/20201216-100000-13.png)
+
+在以上示例中，IPPBX使用的是FreePBX开源的企业IPPBX，PSTN接入可以使用语音板卡或者PSTN语音网关或者无线网关来实现，通过portsip WebRTC网关实现和浏览器终端的对接。因为客户端要求，接入方使用了鼎信通达的无线网关实现，使用了SIM卡直接呼叫。
+
+## 02 WebRTC 媒体流处理
+
+在WebRTC环境中，每个终端都不同，它们具有各自的访问方式。以下示例说明了各种终端进行WebRTC媒体流处理的流程。有的终端可能在家庭网络环境，有的终端可能在公司内网环境，有的终端可能在咖啡馆使用wifi上网。应用服务器则在公网环境中。
+
+![](./image/20201216-100000-14.png)
+
+如果在网络一般正常的网络环境中，如果没有WebRTC的话，两个终端之间的通信只能通过页面服务器来做一个路由处理和交换。但是，如果服务器和终端之间存在网络稳定性问题或者距离比较远的话，那终端之间的实时通信就很难得到保证。
+
+如果浏览器支持了WebRTC的话，两个终端之间可以不通过服务器端进行路由，同时可以解决NAT问题，终端之间可以直接实现点对点通信，这样就保证了实时通信的稳定性。
+
+![](./image/20201216-100000-15.png)
+
+在上面的介绍中，我们讨论了WebRTC中的NAT问题。关于NAT问题，我们在前面的很多章节中已经多次提及，这里不再过多对NAT做说明。今天，我们重点讨论WebRTC中的NAT问题。WebRTC内置的策略机制（**Interactive Connectivity Establishment** ）用来解决NAT问题。在点对点的通信中，ICE通过打洞的方式实现了点对点的通信。这里，ICE的主要目的是通过不同服务器之间的中转，找到两个终端之间连接的最佳路径。大部分情况下，ICE使用STUN就可以实现点对点的互通，有时也需要借助TURN服务器实现转发来实现。ICE对Peers的检测配对需要经过六个步骤，rfc5245对ICE 检测有如下定义：
+
+> 1.  Sort the candidate pairs in priority order.
+> 2.  Send checks on each candidate pair in priority order.
+> 3.  Acknowledge checks received from the other agent.
+
+在第五步时，需要浏览器同时检查STUN数据。如下图所示：
+
+![](./image/20201216-100000-16.png)
+
+STUN 服务器的查询过程如下：
+
+![](./image/20201216-100000-17.png)
+
+当STUN 服务器查询不到两个终端的话，需要借助于TURN服务器来实现。这里读者一定要注意，NAT的场景不同，使用的策略可能是不同的，我们这里仅说明symmetric的NAT场景。
+
+![](./image/20201216-100000-18.png)
+
+以下是用户使用STUN和TURN的一个简单的对比，帮助读者能够更加清晰了解这两个服务器的作用和部署成本。关于ICE的使用和具体参数属性，笔者将在后续的章节中做非常详细的介绍，用户也可以查阅历史文档来做进一步学习。笔者这里再次提醒，在WebRTC的呼叫过程中，大部分的呼叫失败都是因为ICE协商问题，以上六个步骤是排查时需要特别注意到地方。
+
+![](./image/20201216-100000-19.png)
+
+## 03 WebRTC 相关协议
+
+WebRTC支持了很多RFC标准，这些组织完成了关于WebRTC的标准起草，API定义和一些相关的拓展协议。其中，三个组织需要读者去关注，它们分别是IETF，W3C和RTCWEB。它们都有自己的官方网站，读者可以查阅。WebRTC技术所使用的协议栈包括以下几种，读者可以仅关注应用层和传输层即可。这些协议在RFC中都有各自的规范定义。比较重要的是ICE规范，关于ICE的规范，用户可以查阅rfc5245。
+
+![](./image/20201216-100000-20.png)
+
+因为融合通信的不断发展，WebRTC和SIP互通也变得非常重要，而且在企业融合通信中，需要接入PSTM或者企业UC的功能。因此，我们会花更多时间在讨论WebRTC和SIP之间的关系及应用中。  
+
+![](./image/20201216-100000-21.png)
+
+## 04 WebRTC相关草案
+
+任何技术的发展都离不开一些组织的推动，这些组织完成了对技术规范的标准化制定。在上面的章节中，我们提到了RTCWEB工作组，这个组织对WEBRTC的一些功能正在起草一些新的草案（draft），还没有形成正式的rfc规范。这些草案分别是：
+
+> Real Time Protocols for Browser-based Applications
+>
+> Web Real-Time Communication Use-cases and Requirements
+>
+> Web Real-Time Communication (WebRTC): Media Transport and Use of RTP
+>
+> WebRTC Security Architecture
+>
+> Security Considerations for WebRTC
+>
+> WebRTC Data Channels
+>
+> WebRTC Data Channel Establishment Protocol
+>
+> JavaScript Session Establishment Protocol
+>
+> WebRTC Audio Codec and Processing Requirements
+>
+> STUN Usage for Consent Freshness
+>
+> Transports for RTCWEB
+
+除了以上草案以外，RTCWEB还和其他的组织合作编写了其他的协议标准，目前这些标准包括：
+
+  * MMUSIC，此草案定义了SDP拓展和ICE拓展支持。
+  * AVTCORE，此草案定义了RTP拓展支持。
+  * RMCAT，此草案定义了RTP拥塞的控制支持。
+  * TRAM，此草案定义了STUN，TURN的拓展支持。
+
+在RTCWEB的草案中，列举了多种用户场景和其定义，分别列举了浏览器对浏览器之间的用户场景和浏览器对网关测的用户使用场景：
+
+  *     Simple Video Communication Service
+  *     Simple Video Communication Service, NAT/Firewall that blocks UDP  
+  *     Simple Video Communication Service, Firewall that only allows traffic via a HTTP Proxy
+  *     Simple Video Communication Service, global service provider
+  *     Simple Video Communication Service, enterprise aspects
+  *     Simple Video Communication Service, access change
+  *     Simple Video Communication Service, QoS
+  *     Simple Video Communication Service with screen sharing 
+  *     Simple Video Communication Service with file exchange
+  *     Hockey Game Viewer
+  *     Multiparty video communication
+  *     Multiparty on-line game with voice communication
+  *     Telephony terminal
+  *     Fedex Call
+  *     Video conferencing system with central server  
+
+## 05 WebRTC媒体协议栈拓展功能
+
+在本章节中，我们会分别介绍WebRTC的媒体协议拓展功能中的几个比较关键的概念。首先，我们介绍一下第一个比较重要的概念RTP的header。
+
+![](./image/20201216-100000-22.png)
+
+在header中，大家需要注意红色标注的部分以及相关的数值。例如，Sequence Num检测错误的序列号，如果检测到错误的或者超出的号码，则表示发生错误。如果语音播放不顺畅或者没有连贯性则可能Timestamp时间戳不同步或者发生错误。SSRC来确认发送到数据包数据，如果数据包丢失的会，CC会累计加以计数。关于RTP header的具体语法结构，用户可以查阅rfc来做进一步学习。  
+
+RTCP是另外一个比较重要的协议概念。RTCP是针对每个RTP 媒体会话进行控制管理的协议。很多情况下，RTCP端口可以在SDP中设置（a=），如果不能设置的话，RTCP使用高于RTP端口的奇数端口（RTP端口+1）。例如，如果RTP端口是7000，则RTCP使用7001 端口。
+
+![](./image/20201216-100000-23.png)
+
+这里，RTP和RTCP都会绑定自己的对应的媒体会话，发生数据的双方通过RTCP来发送语音质量的数据。CNMAE中包括了发送方的数据。当然，RTCP数据包的大小也是有限制的，一般限制在RTP数据包的5%。每个RTP的profile中设置了RTCP的发送频率，发送时间以及RTCP发送的规则要求。通过这样的策略设置，RTP就可以保证在一定的网络带宽中，不会过多耗费网络资源。
+
+![](./image/20201216-100000-24.png)
+
+RTP使用profile来进行双方通信的协商处理，WebRTC使用了拓展的profile来支持WebRTC的协商和RTCP的机制处理。以下是一个简单示例来说明WebRTC的数据协商。
+
+![](./image/20201216-100000-25.png)
+
+在上面的介绍中，在实际的每个媒体流中，事实上RTP和RTCP分别使用了不同的端口来处理自己本身的业务。但是，有时用户可能也会遇到这样的事情。RTP端口之间的互发都没有问题，RTCP端口可能有问题。在WebRTC中，为了避免刚才说的问题，WebRTC使用了多路重用的方式（rtcp mux），它使用了一个端口实现了RTP和RTCP的端口共用，减少了端口占用的数量。当然，这样可能会导致WebRTC呼叫和SIP呼叫之间的连接问题，用户在实际使用场景中可能需要排查浏览器端设置或者服务器端设置状态。例如，在Asterisk 平台中，pjsip支持了 rtcp_mux=yes来支持WebRTC的端口协商。
+
+![](./image/20201216-100000-26.png)
+
+多路复用在WebRTC中的影响也是非常明显的。通常情况下，语音和视频通过不同的RTP端口互相发送。在WebRTC环境中，WebRTC使用了多路复用的技术，把所有的媒体流都通过一个RTP端口来发送。它可能会带来其他的影响。
+
+![](./image/20201216-100000-27.png)
+
+WebRTC使用单个RTP端口处理媒体的方式其优劣都非常明显，具体表现在：
+
+  * 降低了ICE Candidates收集数量
+  * 缩短了ICE运行时间
+  * 因为会话减少，降低了会话失败的几率
+  * 可能增加了QoS保障的难度，因为接收方也需要对其语音和视频的SSRC和Payload做不同的处理。
+
+![](./image/20201216-100000-28.png)
+
+接下来，我们讨论一下关于RTP和NAT在WebRTC中的问题。大家知道，RTP并不是直接使用自己RTP本身，它需要UDP来做传输。但是UDP端口都是动态的。为了减少NAT端口映射，在WebRTC中要求使用Symmetric RTP和Symmetric RTCP，这样比较容易解决NAT问题。SymmetricRTP要求收发都使用同一RTP端口。具体规范大家可以查阅rfc4961的第三章节，此章节对两种端口做了定义说明。
+
+媒体流拥塞也是一个非常大的问题，它直接影响媒体流的质量。大家知道，TCP中可以对拥塞进行处理，但是UDP不支持这样的机制。如果UDP不支持的话，RTP也就不可能支持拥塞处理机制。不过，RTCP可以对其拥塞进行监控和反馈，这样就解决了RTP拥塞机制的支持问题。如果是视频会议的呼叫中，其带宽更是比较敏感的问题，在RTCP的数据交互中，如果发生网络拥塞，发送方可以降低带宽来避免拥塞。在WebRTC中通过类似的机制来处理:
+
+  * Circuit Breaker, 如果发生网络拥塞时，RTP应该停止发送数据包。具体的设置策略可以通过RTP/AVP profile来实现。
+  * RMCAT方式，其方式借助于TCP的TRFC的机制。  
+
+## 06 WebRTC 信令/传输/协议
+
+在本章节中，我们重点介绍WebRTC的信令，传输方式和其使用的几个协议。现在我们简单讨论一下信令的主要作用：
+
+  * 媒体能力的协商创建
+  * 会话中的签权和认证服务
+  * 控制媒体会话，指示会话进程，修改或结束会话过程
+  * 粘结双方的创建和同时修改双方会话
+
+以上四种作用，第一项是必须的功能，其他都是可选功能。在WebRTC中，简单来说，没有所谓的标准的信令，浏览器和服务器之间通过脚本语言来实现交互。对于WebRTC开发人员来说，最小的要求是支持HTTP，支持HTML和WebRTC。其余的完全依赖于开发人员自己的需要。  
+
+在WebRTC环境中，因为浏览器都是基于JavaScript运行。服务器端使用何种信令都可以保证用户之间的兼容性。在以下的示例中，A，B和C服务器端选择不同的信令都能保证用户侧的兼容。
+
+![](./image/20201216-100000-29.png)
+
+但是，一些信令确实也需要保持一个标准的互通方式，否则会出现会话协商错误。这就需要浏览器之间的协商机制必须是统一的，浏览器之间的协商能够正常工作，互相理解对方的媒体能力。因此，无论服务器端采用何种信令，对于终端之间的每个会话来说，编码，媒体，设置结果必须标准，ICE 必须能够互通，SRTP密钥必须能够互通。在信令的传输方式中，WebRTC支持三种信令传输方式：WebSocket，HTTP和Data Channel。
+
+![](./image/20201216-100000-30.png)
+
+在上面的图例中，服务器端使用了WebSocket进行信令传输。事实上，WebSocket是以一个新的HTTP的方式进行访问，浏览器更新请求，在这个新的请求中，HTTP连接转成了WebSocket的访问。这里大家注意一下，WebSocket协议是有IETF定义的，但是WebSocket的API是由W3C定义的。另外，两个浏览器之间不能直接打开一个WebSocket来访问对方。  
+
+WebRTC的信令也可以通过HTTP的方式来进行传输。每个浏览器通过XML HTTP请求对服务器端发送数据。HTTP使用GET或者POST对Web服务器发送信令消息数据。
+
+![](./image/20201216-100000-31.png)
+
+一旦初始的信令通过WebSocket或者HTTP成功创建以后，接下来Data通道就成功创建，然后点对点的媒体交互开始启动。Data通道就会承载语音和视频的信令。因为语音视频信令都是通过加密的Data 通道实现的点对点通信，所以安全性也大大增强。  
+
+![](./image/20201216-100000-32.png)
+
+上面我们提到了HTTP的信令交互问题，我们通过以下示例说明如何通过HTTP Pooling实现SDP的媒体简单交互：  
+
+![](./image/20201216-100000-33.png)
+
+下面这个图例说明了Web服务器和信令服务器各自独立的服务器之间的HTTP Pooling的交互：  
+
+![](./image/20201216-100000-34.png)
+
+以下图例演示了不使用Pooling，而使用WebSocket Proxy的处理方式：  
+
+![](./image/20201216-100000-35.png)
+
+在WebRTC的信令传输方式中，我们也可以使用SIP来进行交互传输。这里的SDP媒体协商使用的rfc3264。浏览器终端，SIP终端都可以实现互通互联。
+
+![](./image/20201216-100000-36.png)
+
+对于SIP语音环境来说，在运行WebRTC时，WebSocket是一个新的传输方式。现在很多SIP终端软电话通过JavaScript来实现。脚本可以下载到浏览器端支持了浏览器的SIP API，浏览器通过WebSocket打开端口实现SIP注册，通过WSS方式实现对WebSocket的加密传输。以下示例演示了一个SIP在WebRTC中的流程机制（包括SIP终端注册和呼叫）：
+
+![](./image/20201216-100000-37.png)
+
+开源语音通信解决方案越来越受到用户的欢迎。这里我们列出几个比较受欢迎的开源项目，既包括媒体服务器和SIP终端产品，大家可以测试它们的功能。说明一下，列表中漏掉了FreeSWITCH。
+
+![](./image/20201216-100000-38.png)
+
+Jingle是XMPP的拓展，客户端支持JavaScript，它也支持了WebSocket的信令传输。因为Jingle是XMPP的拓展，这里的信令服务器还是XPMM服务器端。  
+
+![](./image/20201216-100000-39.png)
+
+通过我们以上介绍，大概说明了各种传输方式的过程，以下图例汇总了各种方式的利弊：  
+
+![](./image/20201216-100000-40.png)
+
+WebRTC中使用了JSEP（Javascript Session Establishment Protocol）来定义媒体会话的协商和DATA通道的协商。它仍然使用SDP对象实体作为会话描述和Offer/Answer协商协议。必须注意到是，JSEP没有设置任何特别的信令模式或者状态机模式，它提供了一种机制来创建Offers和Anwers，并且把它们应用在会话中。因此，浏览器终端需要自己对其发送到数据进行解析。
+
+![](./image/20201216-100000-41.png)
+
+以下是JSEP的状态机图例，JSEP提供了六种状态机状态，用户可以到JSEP的规范中做进一步的研究。
+
+![](./image/20201216-100000-42.png)
+
+在WebRTC的SDP拓展中支持了三个比较新的功能，它们分别是BUNDLE，MSID和任意CNAME。用户可以到官方网站查阅。
+
+下面，我们看一下ICE的处理流程。根据上面章节中所介绍的，ICE检测需要经过五个步骤（如果双方其中一方IP地址发生改变，需要重新启动ICE，因此也可以算是六个步骤）。  
+
+![](./image/20201216-100000-43.png)
+
+## 07 WebRTC NAT和ICE
+
+WebRTC支持了NAT处理机制。在WebRTC中，ICE用来支持NAT处理。我们前面已经做过简单介绍，ICE需要STUN和TURN服务器的支持。[关于NA
+T和STUN使用，笔者在历史文档有过讨论，用户可以查阅](http://mp.weixin.qq.com/s?__biz=MzA4NjU0NTIwNQ==&mid=2656444027&idx=1&sn=3a5236c3bdff4e411db0f3a3a0d8cded&chksm=8465b821b3123137e21d15d510757b9a344294ab9e53a17975bcca0e351f917daa4793723a4c&scene=21#wechat_redirect)。
+
+ICE英文全名是Interactive Connectivity Establishment。RFC5245(更新的RFC6336)对ICE做了规定。一般简单的定义是：ICE=STUN+TURN+协商机制+协商路径。以下图例中表示了ICE的架构。
+
+![](./image/20201216-100000-44.png)
+
+以下是一个Candidate的消息架构体，关于结构体中每个参数的含义，请参阅RFC3245的第三部分（Terminology)。
+
+![](./image/20201216-100000-45.png)
+
+前面的章节中，笔者结合很多图例，已经简单说明了ICE创建的六个步骤。这里再次详细强调一下。ICE所执行的六个步骤分别是：
+
+1. 发现收集申请终端信息。收集到终端可通信的地址，终端申请者的类型（host, Reflexive和Relay candidate)。这四个地址分别表示了呼叫方内网地址，呼叫方公网地址，被呼叫方公网地址和relay地址。
+
+![](./image/20201216-100000-46.png)
+
+以下是一个SDP的示例，表示了三个不同的IP地址。
+
+![](./image/20201216-100000-47.png)
+
+2. 根据优先级对candidate 进行处理，大部分情况下，首先使用Relay candidate
+
+3. 解析candidate信息，发送到对端candidate
+
+4. 对candidate进行配对处理，保证双方匹配
+
+5. 检查配对的candidated的连接性
+
+6. 检查ICE是否可以连接成功，如果成功，则发送确认消息
+
+在以上的步骤中，笔者先介绍一下执行步骤中一些比较重要的概念和内容，然后结合具体的场景做详细分析。在以上的步骤中，STUN服务器首先需要获得candidate地址。关于STUN的具体细节，读者可以在其他权威网站获得学习资料。
+
+![](./image/20201216-100000-48.png)
+
+除了STUN以为，ICE使用了STURN的拓展服务器TURN来获得一个relay地址。
+
+![](./image/20201216-100000-49.png)
+
+具体的TURN呼叫流程包括了以下几个步骤，开始创建连接，创建连接后媒体的互通，定时刷新超时设置和结束会话等步骤。  
+
+![](./image/20201216-100000-50.png)
+
+STUN和TURN都本身具有自己的method，属性设置，安全设置和错误码管理等细节规范，用户可以参考历史文档来做进一步的学习，这里不再介绍。
+
+通过STUN和TURN获得地址以后，接下来ICE需要开始SDP的交换。在SDP交换中，读者需要注意其安全设置，例如密码设置和几个主要的参数地址：
+
+![](./image/20201216-100000-51.png)
+
+特别说明，在以上的图例中，用户使用了ice-ufrag和ice-pwd对STUN进行安全认证。这两个密码是自动生成的任意密码，用户名称最小四个字符，密码最小22个字符。SDP中的几个主要参数用来实现对SDP的协商交换，我们会在接下来的部分做细节说明。
+
+![](./image/20201216-100000-52.png)
+
+ICE获得双方的SDP消息以后，需要对其进行配对检查。ICE检查是否具有同样的Component ID，通过配对以后，结合呼叫方和被呼叫方生成Foundation配对。Foundation配对通过本地的Foundation和远端Foundation结合生成。大家注意a=candidate的变化，如果本地Foundation是1，收到的远端的是2，最后，配对的Foundation就是1 2。
+
+![](./image/20201216-100000-53.png)
+
+在ICE的检查中，双方终端需要通知对方谁是控制方和被控制方。当ICE检查正式开始以后，根据实际状态的不同，每个candidate陪对组会进入五种状态检查：
+
+  1. Frozen，还没有开始执行检查
+  2. Waiting，等待状态，还没有执行
+  3. In Progress，在处理状态
+  4. Suceeded/Failed，检查完成，处于成功状态，或检查设备，处于失败状态。  
+
+在candidate check完成以后，ICE控制方仍然可以通过USE-Candidate属性参数来通知ICE被控制方改变candidate pair支持媒体发送。ICE被控制方回复USE-Candidate确认这个配对修改。
+
+ICE检查完成以后，为了保持状态存活，双方需要通过Keepalives发送刷新消息保证连接正常，NAT映射不会超时等问题。这个时间周期是15秒。
+
+在目前的ICE协议标准中，目前一个比较尴尬的问题是终端响应消息的处理。STURN会发送响应消息，但是终端不会处理响应消息。这也是目前需要ICE拓展协议需要进一步支持的功能，例如，如果没有收到响应消息，ICE是否需要重启；如果收到了响应消息，如何进行下一步的响应处理流程。关于ICE响应消息处理，读者可以查阅（draft-muthu-behave-consent-freshness-01）。
+
+在双方终端处于运行状态时，如果ICE发现其中一个candidate的地址发生改变时，ICE就会重新启动ICE，重新配对。以上是关于ICE创建，检查，配对和时间刷新的简单介绍。为了更加详细说明ICE的协商流程，我们通过一个SIP/ICE的流程来说明这些具体的步骤：
+
+![](./image/20201216-100000-54.png)
+
+![](./image/20201216-100000-55.png)
+
+通过priority oder，结合两个pair check the ICE开始测试。如果双方测试成功，则进行下一步的信令交互，例如SIP 2 发送180消息，发送200 OK消息。如果开始发送到消息和收到的消息不一致，则需要SIP Phone 1 重新发送Re-INVITE消息，然后进行测试验证，最后收到200 OK消息。
+
+![](./image/20201216-100000-56.png)
+
+ICE 测试成功以后，则双方开始发送RTP语音。
+
+![](./image/20201216-100000-57.png)
+
+关于ICE的支持问题，在我们很多常见的环境中，有的SIP终端可以支持ICE，但是有一些终端可能不支持。用户可以检查各种软电话的ICE配置功能。以下SIP消息中表示终端支持ICE:sip.ice。
+
+![](./image/20201216-100000-58.png)
+
+如果对端终端不支持ICE的话，终端只能有两种选择：1）继续连接，但是不使用ICE，ICE支持一个自动检测返回的机制，通知对端不支持ICE。2）或者继续执行一个可选授权支持的方式使用ICE，根据RFC5768对Mandating Support的规定,SIP终端可以在INVITE请求的Require中添加一个ice option。
+
+另外，用户可能有时看到这样的例子，在终端的SIP INVITE头中没有sip.ice, 但是在SDP中确实有ICE candidate的信息，这也是互相不兼容导致的结果，但是最终这是一种不支持ICE的标识。
+
+![](./image/20201216-100000-59.png)
+
+因为SIP技术本身的快速发展，其实ICE的版本也在不断更新。我们简单介绍两个ICE的“升级”版本。这里，我称之为升级版本仅是对ICE的一种优化，它们并不是在ICE本身的升级或者更新：
+
+  1. ICE-lite主要功能是简化了ICE的复杂性，例如，我们看到的SBC。
+  2. Trickle ICE主要目的是缩短了ICE的协商处理时间，避免重新分配已被转发的candidate，如果需要则开启。不像ICE的标准处理流程，标准的ICE需要收集candidate的信息状态信息，它则一开始就和host candidate检查连接状态，同时并行处理其他的交换机制。所以，Trickle ICE相对较低了处理流程花费的时间。
+
+## 08 WebRTC 安全和隐私
+
+安全问题和隐私是互联网通信中非常重要的话题。在WebRTC中，安全方面的内容涉及了很多技术。当然，在浏览器使用过程中，很多厂家提供了一些安全机制，个人也应该具有一定的安全意识，这里我们不再花费时间介绍。在WebRTC中，比较重要的两个终端资源就是摄像头和麦克风。所以，用户需要一定的安全设置或者权限设置来保护这些媒体资源。WebRTC的使用导致浏览器必须支持更多的协议和更多的服务器端配置，因此也必然会带来更多的安全风险和被攻击的可能性。下面，笔者列举几个和安全相关的建议希望读者注意：
+
+  * 攻击者可能通过WebRTC，通过JavaScript API接口进行攻击。
+  * 浏览器用户可能需要经常更新浏览器来防止被攻击。
+  * WebRTC的信令也可能被攻击，完全取决于使用的信令和端口。例如，使用了WebSocket，SIP的话，攻击者可能通过这些接口的安全设置来进行攻击。
+  * WebRTC的媒体可能被攻击，例如，是否可能被监听，被录音。
+  * SRTP不能对RTP header进行加密，因此两个浏览器之间的媒体可能仍然不会得到安全保护。
+
+虽然，SRTP还有一定的局限性，但是SRTP仍然是WebRTC中主要的安全协议。现在，我们看一下SRTP的处理流程，它主要经过以下四个步骤。  
+
+![](./image/20201216-100000-60.png)
+
+在这四个过程中，前面已经介绍过1，2的步骤，这里，我们重点介绍3，4的步骤。在DTLS的安全认证过程中，它使用的是client/server协议来处理。它可以使用CA证书和自我授权的证书来进行证书验证。因为DTLS是一种client/server的工作方式，因此，浏览器一端必须是客户，另外一端必须是服务器。在WebRTC中，双方浏览器必须选择其角色。角色选择通过SDP消息中设置（a=setup）, Offer中包含a=setup:actpass,Answer可能包含a=setup:active或者passive。  
+
+![](./image/20201216-100000-61.png)
+
+TLS使用的是X.509，是CA签发的证书，但是浏览器一般没有这些证书。DTLS-SRTP可以使用public/private key生成的证书。
+
+WebRTC使用场景很多，我们这里比较关注的是在企业办公环境中的安全问题。因此，对于企业用户来说，部署WebRTC需要考虑以下几个方面的问题：
+
+  * 企业网络的防火墙设置，ACL访问设置和点对点的数据流动问题导致的安全隐患
+  * 浏览器之间的录音录像，系统日志，企业安全策略的制定是否影响WebRTC的部署
+  * 是否可以和目前的企业网络能够完美融合集成  
+
+## 09 WebRTC 使用场景
+
+WebRTC的使用场景很多，因为WebRTC是一个比较新的技术，因此可能现在仍然有很多新的应用场景不断出现。现在的使用场景大致分为两个部分：一种是**通信状态下**的WebRTC使用场景，另外一种是**非通信状态下**的WebRTC使用场景。通信状态下的WebRTC使用场景包括以下几种：
+
+  * 基于页面的电话/视频会议
+  * 和客户之间的通信服务，包括UC融合通信，客户沟通
+  * 企业融合通信/IPPBX/呼叫中心，支持SIP/HTML实现和SIP/PSTN的呼叫
+  * 分布式的通信方式/公共服务等
+  * 移动端的WebRTC支持，WebRTC不仅仅支持桌面浏览器，也支持了安卓/IOS原生态的API接口
+  * 简单代码的WebRTC应用场景
+  * 通过对摄像头和麦克风控制实现其他的操作
+  * 远程医疗/家庭护理
+  * 在线客服/现场支持
+  * 在线一对一培训
+  * 媒体直播
+  * 智能家庭
+  * 工业制造  
+
+非通信状态下的WebRTC应用场景包括：  
+
+  * 游戏应用包括聊天，共享文件等
+  * Overlay 网络应用
+  * 机器学习
+  * 物联网
+  * 文件共享
+  * 虚拟现实游戏  
+
+## 10 WebRTC当前状态和发展趋势
+
+虽然WebRTC技术目前应用场景很多，技术发展也非常迅速。但是，其技术更新也非常快，读者需要经常查阅官方网站的技术发展和趋势。
+
+![](./image/20201216-100000-62.png)
+
+几个比较重要链接如下：
+
+> https://www.w3.org/TR/webrtc/
+>
+> https://w3c.github.io/webrtc-pc/
+>
+> https://www.w3.org/TR/mediacapture-streams/
+
+因为WebRTC依赖于浏览器的支持，目前，大部分浏览器支持了WebRTC的功能和部分功能，所以读者要检查这些浏览器的支持状态来开发自己的应用：  
+
+![](./image/20201216-100000-63.png)
+
+未来会有更多的浏览器支持WebRTC。尽管WebRTC应用有着非常广的前景，但是目前仍然面对很多挑战：
+
+  * 各种平台的兼容性问题，特别是视频编码的兼容性
+  * 标准化部署的问题
+  * 移动平台的迁移仍然很少
+  * 移动端电池寿命的影响
+  * 缺乏政府和行业的标准的支持
+
+根据官方的计划和市场的要求，未来WebRTC技术仍然需要做的工作很多，几个主要的工作需要在不久的将来来完成：
+
+  * W3C和IETF规范和协议的最终版本形成，因为这些建议很多都是草案，需要形成最终的规范，未来需要更多时间来完成。
+  * 浏览器需要支持更多的WebRTC功能和最新的版本
+  * 视频编码在WebRTC中广泛使用，但是需要形成一个最终的版本
+  * 在企业应用中，WebRTC的应用仍然不是很多，需要更多的应用中增加WebRTC的使用比例。
+
+## 11 WebRTC服务器和开源项目示例
+
+我们在前面的技术中已经提到，WebRTC支持了很多中应用场景。其中可能读者比较感兴趣的是视频会议的一些解决方案。目前，开源的WebRTC服务器都比较受欢迎：
+
+  * Jitsi
+  * Kurento
+  * Janus WebRTC 网关
+  * Mediasoup
+
+下面的示例是一个Kurento和Asterisk集成的示例，通过Asterisk对SIP终端实现管理，这里，Kurento作为WebRTC的媒体服务器来实现视频会议的混频功能。  
+
+![](./image/20201216-100000-64.png)
+
+具体的安装配置，读者可查阅官方链接：
+
+> https://webrtc.ventures/2017/02/kurento-asterisk-powerful-couple/
+
+因为WebRTC的发展，测试工具也慢慢增加。网络上很多关于WebRTC的测试工具。测试工具的作用也完全不同。今天，笔者为大家介绍一个关于WebRTC的压力测试工具（Jattack: a WebRTC load testing tool），其论文包括了技术架构，测试流程，测试结果，主要对系统资源做了测试分析。
+
+![](./image/20201216-100000-65.png)
+
+具体的测试方式和测试结果，读者可以查阅参考资料的链接，通过作者论文来进一步的研究。WebRTC的商业测试工具也很多，可以检测WebRTC的执行状态，压力测试等功能。比较有名的如testRTC，读者可以购买或者试用其demo版本。
+
+因为浏览器兼容性的问题导致很多WebRTC应用不能成功部署，测试不同浏览器的兼容性也是一个非常头疼的问题。谷歌发布了对不同浏览器兼容性测试的工具（KITE），读者可以做进一步的了解。这个工具测试也非常方便。它可以测试不同的项目：
+
+![](./image/20201216-100000-66.png)
+
+![](./image/20201216-100000-67.png)
+
+读者可以访问以下链接来访问操作面板：  
+
+> https://kiteboard.herokuapp.com/public?testname=IceConnectionTest
+
+## 12 总结
+
+在WebRTC技术概要中，笔者从十一个方面对WebRTC的技术做了比较完整全面的介绍。这些章节包括：背景知识，媒体的流程，WebRTC组织ITEF/W3C，信令协议，媒体协议，NAT/ICE创建流程，安全隐私支持，WebRTC用户场景，未来WebRTC技术方面需要增进的部分，同时也列举了几个在WebRTC部署时需要面对的问题。最后，笔者为读者提供了几个基于开源的解决方案，基于开源的WebRTC测试方案，以及对WebRTC测试的工具。
+
+笔者尽量在每一个章节中把主要的技术节点做了相对比较详细全面的介绍，因为篇幅所限，一些相关的技术细节需要读者自己做进一步的学习，读者可以根据这些参考链接访问其学习资源，也可以通过rfc规范和一些草案了解这些技术的流程。
+
+最后，因为作者水平有限和学习资源受限，另外，考虑到本书的目标读者是通信行业或者互联网开发的技术人员，不是针对WebRTC开发人员的开发资料。因此，本技术概要虽然相对比较比较全面，但是没有太多关于WebRTC开发代码和demo等技术细节。还有，因为目前的WebRTC技术仍然在不断完善的过程中，读者的解释或者引用也可能出现错误或者比较陈旧，很多技术或观点也不一定非常准确及时，难免有很多错误的地方，希望读者谅解。
+
+### 参考资料：
+
+* [https://www.zhihu.com/question/50277029?sort=created](https://www.zhihu.com/question/50277029?sort=created)
+* [https://en.wikipedia.org/wiki/WebRTC_Gateway](https://en.wikipedia.org/wiki/WebRTC_Gateway)
+* [http://knowledge.santanu.net/what-is-webrtc-current-scenario-and-why-we-should-follow/](http://knowledge.santanu.net/what-is-webrtc-current-scenario-and-why-we-should-follow/)
+* [https://www.rfc-editor.org/rfc/rfc741.txt](https://www.rfc-editor.org/rfc/rfc741.txt)
+* [https://www.avaya.com/blogs/archives/2014/08/understanding-webrtc-media-connections-ice-stun-and-turn.html](https://www.avaya.com/blogs/archives/2014/08/understanding-webrtc-media-connections-ice-stun-and-turn.html)
+* [https://www.rfc-editor.org/info/rfc5245](https://www.rfc-editor.org/info/rfc5245)
+* [https://tools.ietf.org/id/draft-ietf-mmusic-ice-sip-sdp-24.txt](https://tools.ietf.org/id/draft-ietf-mmusic-ice-sip-sdp-24.txt)
+* [https://tools.ietf.org/id/draft-ietf-avtcore-cc-feedback-message-03.txt](https://tools.ietf.org/id/draft-ietf-avtcore-cc-feedback-message-03.txt)
+* [https://www.ietf.org/id/draft-ietf-rmcat-eval-criteria-08.txt](https://www.ietf.org/id/draft-ietf-rmcat-eval-criteria-08.txt)
+* [https://tools.ietf.org/html/draft-ietf-tram-turnbis-20](https://tools.ietf.org/html/draft-ietf-tram-turnbis-20)
+* [https://tools.ietf.org/html/draft-muthu-behave-consent-freshness-01](https://tools.ietf.org/html/draft-muthu-behave-consent-freshness-01)
+* [https://zh.wikipedia.org/wiki/%E8%A6%86%E7%9B%96%E7%BD%91%E7%BB%9C](https://zh.wikipedia.org/wiki/%E8%A6%86%E7%9B%96%E7%BD%91%E7%BB%9C)
+* [https://www.researchgate.net/publication/322100933_Jattack_a_WebRTC_load_testing_tool](https://www.researchgate.net/publication/322100933_Jattack_a_WebRTC_load_testing_tool)

@@ -1,0 +1,136 @@
+ 
+<!--BEGIN_DATA
+{
+    "create_date": "2021-11-07 15:00", 
+    "modify_date": "2021-11-07 15:00", 
+    "is_top": "0", 
+    "summary": "在VVC中实现胶片颗粒技术", 
+    "tags": "音视频", 
+    "file_name": "在VVC中实现胶片颗粒技术.md"
+}
+END_DATA-->
+
+#### <p>原文出处：<a href='https://mp.weixin.qq.com/s/05DzmpaGLAs5knrrTnvuiw' target='blank'>在VVC中实现胶片颗粒技术</a></p>
+
+> 本次演讲将介绍在 VVC 中实现胶片颗粒技术，胶片颗粒通常是一种理想的、有助于表达创作意图的噪声，然而，胶片颗粒在现在视频压缩标准中不能很好保留。在各种滤波和有损压缩步骤中，胶片颗粒被抑制，没有恢复的可能。缓解这个问题的一种方法是使用较低的量化参数，但这会大大增加比特率；另一种方法是使用 SEI 消息传递胶片颗粒元数据。在新的 VVC 标准的背景下，可以使用频率滤波的解决方案来参数化和合成胶片颗粒。
+
+**译者补充：**
+
+  * 胶片颗粒 SEI 消息在解码器中的支持性：H.264/AVC 与 H.265/HEVC 标准中也支持可选的胶片颗粒 SEI 消息，但是他们在解码器中的支持性较差（SEI 消息并不强制处理），胶片颗粒合成工具在 AV1 中也有定义，由于直接定义在标准中，在解码器中支持程度较高，我们期待在 VVC 中 FGC SEI 消息可以得到广泛支持。
+  * FGC SEI 规范只提供了将模型参数传输到解码器端的语法，但没有提供估计参数的方法，也没有提供如何合成胶片颗粒的方法，二者或许都值得进一步研究。
+  * 本文提出的第二个观点比较有趣：胶片颗粒可以用作掩盖压缩伪影的特征，或许在未来的视频编码框架中可以更好使用这个特性。
+
+## 背景介绍
+
+### 胶片颗粒
+
+胶片颗粒（Film grain）是一种令人愉悦的噪音，可增强视频内容的自然外观。它是在摄影胶片曝光和显影的物理过程中产生的。然而，数字传感器没有经过这样的过程，因此没有胶片颗粒。这会生成无噪声的数字视频，其完美、清晰和明显的边缘和单调的区域会恶化观看者的主观体验。因此，对视频重新添加胶片噪声可以改善视觉体验，内容创作者经常在分发内容之前使用它。这一点尤其被电影行业所接受，许多创作者转向在视频内容中添加电影颗粒的技术，为他们的视频添加质感和温暖，或者有时会产生一种怀旧感。
+
+另一方面，内容在分发之前需要进行编码压缩，在压缩之前，视频要经过各种预处理步骤。在滤波和有损压缩的各个步骤中，胶片颗粒被抑制而无法重建。在解码器端保留重建内容中的胶片颗粒的一种方法是使用较低的量化参数 (QP) 以更好地保留精细细节，但是，这将会大大提高比特率。另一种解决方案是在编码前对胶片颗粒进行建模。
+
+### 视频编解码框架中的胶片颗粒合成
+
+由于胶片颗粒被认为是一种理想的噪声，因此应在整个视频传输链中保留它。图1 说明了在视频编解码框架中使用胶片颗粒的简化框图。首先对输入视频进行预处理，将胶片颗粒滤波，并对胶片颗粒进行建模，随后对去除胶片颗粒的视频进行编码，同时，胶片颗粒 (FG) 参数被插入到胶片颗粒特性 (FGC) SEI 消息中。解码器解码比特流以及 FGC SEI 消息，在生成解码视频时可以通过 FG 合成胶片颗粒进一步增强。FGC SEI 的胶片颗粒合成步骤是可选的，可以跳过，只生成解码视频而不添加胶片颗粒。
+
+![](./image/20211107-150000-1.png)图1: 视频编解码框架中的胶片颗粒参数化与合成框图
+
+## FGC SEI 消息介绍
+
+VVC 的 FGC SEI 规范只提供了将模型参数传输到解码器端的语法，但没有提供估计参数的方法，也没有提供如何合成胶片颗粒的方法。它为编码器提供了使用FGC SEI 消息来表征源视频材料中存在并通过预处理滤波或有损压缩去除的胶片颗粒的能力。此外，即使在原始源视频材料中不存在胶片颗粒时，编码器也可以使用FGC SEI 消息在解码图像上合成胶片颗粒。在这种情况下，即使原始内容中没有胶片颗粒，也可以使用专门调整的参数来掩盖压缩伪影。
+
+FGC SEI 消息支持不同胶片颗粒模拟模型、混合模式、位深度、传输特性以及色度处理选项和模型特定参数的信号传输。下表是 SMPTE-RDD5 模型规定的 FGC SEI 语法参数和语义。
+
+![](./image/20211107-150000-2.png)表1: SMPTE-RDD5 中的 FGC SEI消息语法参数原语
+
+FGC 消息的设计方式支持两种不同的合成方法：胶片颗粒的**自回归建模**和**频率滤波建模**。
+
+  * `film_grain_model_id`表示使用的合成方法，0表示使用频率滤波模型。
+  * `separate_colour_description_present_flag`表示胶片颗粒颜色空间（类似于编码颜色空间）。
+  * `blending_mode_id`用于标识将模拟胶片颗粒与解码图像混合的混合模式，设置为0时使用加法混合。
+  * `log2_scale_factor`用于缩放胶片颗粒缩放参数（由`comp_model_value[c][i][0]`给出）。它限制了纹理强度的范围并鼓励使用有意义的值。
+  * 胶片颗粒合成过程仅适用于存在标志`comp-model_present_flag[c]`设置为 1 的分量，（例如亮度和两个色度分量`c={0,1,2}`）。表明 SEI 中存在指定对颜色分量 c 的胶片颗粒建模的语法元素信息。否则，将跳过特定分量的胶片颗粒合成和混合。
+  * 对于调用合成过程的每个颜色分量，它定义强度间隔数`num_intensity_intervals_minus1[c]`和模型值数`num_model_values_minus1[c]`。由于**胶片颗粒依赖于图像的局部特征**，因此可以**对输入图像的不同强度或强度间隔应用不同的胶片颗粒缩放，以便在最终将其混合到输入图像之前获得适当的胶片颗粒强度**。根据频率滤波模型创建胶片颗粒图案后，将根据缩放因子 (SF) 缩放到适当的强度，它决定了最终图像中胶片颗粒的感知级别，确保以正确的比例模拟胶片颗粒。目前，VVC 中定义的 SMPTE-RDD5 和 FGC SEI 消息包括以下参数，这些参数定义了应用于解码器/合成端的胶片颗粒缩放功能：
+    * 强度间隔上下界，`intensity_interval_upper_bound[c][i]`, `intensity_interval_lower_bound[c][i]`
+    * 缩放因子 SF `comp_model_value[c][i][0]`，分别为每个颜色分量 c 和强度间隔间隔i 定义。给定的表示导致分段常数缩放函数（又名逐步缩放函数）。
+
+图2 给出了缩放函数的一个示例. 请注意，在给定的示例中，我们定义了七个强度区间。如果边缘间隔的 SF 为零，则不计算它们，并且间隔定义从第一个非零间隔开始。鉴于 SMPTE-RDD5 规范，强度间隔不能重叠（SMPTE-RDD5 中不允许多代胶片颗粒），尽管 VSEI 中的一般 FGC SEI 消息设计不会阻止使用多代胶片颗粒。
+
+![](./image/20211107-150000-3.png)图2: 缩放函数示例
+
+通过 SMPTE-RDD5，FGC SEI 消息被插入到每一帧，这通过将`film_grain_characteristics_persistence_flag`设置为 0 来表示。这也意味着**FGC SEI 消息仅应用于当前解码的帧**。在每一帧上插入 SEI 消息具有确保在棘手的模式（例如快进显示模式）下的安全和比特精确的优点。
+
+在许多情况下，熟悉胶片颗粒建模和胶片颗粒特性的专家会提供**一组手动选择的胶片颗粒参数**。可以调整这些参数以模拟特定的胶片颗粒图案、模拟不同的胶片颗粒强度、更好地掩盖压缩伪影等。通常，根据来自配置文件的输入将手动调整的参数提供给编码器，编码器封装提供的参数并将其编码到比特流中。
+
+## 频域滤波模型
+
+在 SMPTE-RDD5 中提供了对胶片颗粒合成部分（位于视频分发链的解码器端）的更深入的介绍。尽管它是为 H.264 标准定义的，但 VVC不需要修改，因为两者都支持相同的元数据。只需稍作修改即可支持高于 8 位的位深度，它使用比 VSEI 规范中描述的更精确的胶片颗粒合成过程规范。此处描述的模型基于频域滤波，包括随机噪声的滤波以模拟胶片颗粒图案。通过该模型，胶片颗粒图案通过使用定义低通滤波器的一对截止频率在频域中建模，图案随后被缩放到适当的强度，然后最终将其混合到图像中。
+
+![](./image/20211107-150000-4.png)图3: SMPTE-RDD5 胶片颗粒合成和混合的简化流程图
+
+SMPTE-RDD5 的胶片颗粒模拟和混合工作流程如图 3 所示。它通过指定：
+
+  * 胶片颗粒图案数据库；
+  * 一个统一的伪随机数发生器；
+  * 精确的操作过程，例如去块和选择胶片颗粒参数。
+
+在建议的实现中，为所有截止频率组合离线**创建胶片颗粒数据库**，但这不是严格要求（胶片颗粒图案也可以实时计算）。该过程首先为所有截止频率对创建胶片颗粒图案（64×64 像素块）。图4 的简化框图说明了创建 FG 模式的过程. 它首先定义遵循归一化高斯分布  的 64×64 伪随机数块。然后将伪随机数块输入到变换过程，在这种情况下是离散余弦变换 (DCT)，以便接收变换后的伪随机系数块。通常，这两个步骤可以跳过，因为 SMPTE-RDD5 定义了预先计算的转换伪随机数集，这些伪随机数是先验定义的（在 SMPTE-RDD5 内），并存储以供进一步使用。预先计算的集合是通过使用浮点 DCT 的整数近似获得的，这也在规范中定义。
+
+![](./image/20211107-150000-5.png)
+图4: FG模式块生成过程的简化框图
+
+![](./image/20211107-150000-6.png)
+图5: 截止频率下逆DCT变换
+
+创建胶片颗粒数据库后，接收到 FGC SEI 消息后，可以进行胶片颗粒的模拟。为了从胶片颗粒数据库中选择一个特定的模式，可以利用 8×8 块的平均值，找到当前处理的 8×8 块的平均值所属的区间，基于块的平均值和 FGC SEI 接收的强度间隔，执行 FGC 参数的选择，**选定的截止频率用于访问胶片颗粒数据库**。
+
+此后，在 8×8 的基础上将胶片颗粒添加到图像中。因此，从上一步创建的 FG 块（大小为 64×64）中随机选择 8×8 块。伪随机数生成器用于定义距 64×64 FG 块原点的偏移量，以确保位精确模拟。**在 8×8 块的基础上向图像添加胶片颗粒而不是使用完整的 64×64 FG 块直接添加胶片颗粒的原因是为了确保添加到图像时胶片颗粒的随机性**（因为胶片颗粒是随机噪声和重复图像中的图案会导致主观视觉表现的质量降低）。
+
+## 实验
+
+### 实验配置
+
+完整的过程在 VTM12.0 参考软件中实现，`film_grain_characteristics.cfg` 被更新为可以添加新的用户定义配置参数。使用FGC SEI 消息格式定义的所有参数都可以在配置文件中提供。编码命令的示例如下：
+
+    
+    EncoderApp.exe \  
+    –c encoder_randomaccess_vtm.cfg \  
+    –c fg characterstics.cfg \  
+    –c per_sequence_configuration.cfg  
+    
+
+解码命令行的一个例子是：
+
+    
+    DecoderApp.exe \  
+    –b str.bin –o decoded.yuv \  
+    –SEIFGSFilename=decoded_fg.yuv  
+    
+
+实验在 RandomAccess 编码配置和 QP=[22,27,32,37] 下进行，使用下表的具有胶片颗粒的测试序列。
+
+<table><thead><tr style="border-width: 1px 0px 0px;border-right-style: initial;border-bottom-style: initial;border-left-style: initial;border-right-color: initial;border-bottom-color: initial;border-left-color: initial;border-top-style: solid;border-top-color: rgb(204, 204, 204);background-color: white;"><th style="border-top-width: 1px;border-color: rgb(204, 204, 204);text-align: left;background-color: rgb(240, 240, 240);font-size: 14px;min-width: 85px;">胶片颗粒测试序列</th></tr></thead><tbody style="border-width: 0px;border-style: initial;border-color: initial;"><tr style="border-width: 1px 0px 0px;border-right-style: initial;border-bottom-style: initial;border-left-style: initial;border-right-color: initial;border-bottom-color: initial;border-left-color: initial;border-top-style: solid;border-top-color: rgb(204, 204, 204);background-color: white;"><td style="border-color: rgb(204, 204, 204);font-size: 14px;min-width: 85px;">Market3_1920x1080p_50_10_709.yuv</td></tr><tr style="border-width: 1px 0px 0px;border-right-style: initial;border-bottom-style: initial;border-left-style: initial;border-right-color: initial;border-bottom-color: initial;border-left-color: initial;border-top-style: solid;border-top-color: rgb(204, 204, 204);background-color: rgb(248, 248, 248);"><td style="border-color: rgb(204, 204, 204);font-size: 14px;min-width: 85px;">AutoWelding_1920x1080p_24_10_709</td></tr><tr style="border-width: 1px 0px 0px;border-right-style: initial;border-bottom-style: initial;border-left-style: initial;border-right-color: initial;border-bottom-color: initial;border-left-color: initial;border-top-style: solid;border-top-color: rgb(204, 204, 204);background-color: white;"><td style="border-color: rgb(204, 204, 204);font-size: 14px;min-width: 85px;">MagicHourFountainToTable_1920x1080p_24_10_709_420.yuv</td></tr><tr style="border-width: 1px 0px 0px;border-right-style: initial;border-bottom-style: initial;border-left-style: initial;border-right-color: initial;border-bottom-color: initial;border-left-color: initial;border-top-style: solid;border-top-color: rgb(204, 204, 204);background-color: rgb(248, 248, 248);"><td style="border-color: rgb(204, 204, 204);font-size: 14px;min-width: 85px;">BikeSparklers_1920x1080p_24_10_709.yuv</td></tr><tr style="border-width: 1px 0px 0px;border-right-style: initial;border-bottom-style: initial;border-left-style: initial;border-right-color: initial;border-bottom-color: initial;border-left-color: initial;border-top-style: solid;border-top-color: rgb(204, 204, 204);background-color: white;"><td style="border-color: rgb(204, 204, 204);font-size: 14px;min-width: 85px;">WarmNightTorchToTable_1920x1080p_24_10_709_420.yuv</td></tr><tr style="border-width: 1px 0px 0px;border-right-style: initial;border-bottom-style: initial;border-left-style: initial;border-right-color: initial;border-bottom-color: initial;border-left-color: initial;border-top-style: solid;border-top-color: rgb(204, 204, 204);background-color: rgb(248, 248, 248);"><td style="border-color: rgb(204, 204, 204);font-size: 14px;min-width: 85px;">ShowGirl2Teaser_1920x1080p_25_10_709.yuv</td></tr><tr style="border-width: 1px 0px 0px;border-right-style: initial;border-bottom-style: initial;border-left-style: initial;border-right-color: initial;border-bottom-color: initial;border-left-color: initial;border-top-style: solid;border-top-color: rgb(204, 204, 204);background-color: white;"><td style="border-color: rgb(204, 204, 204);font-size: 14px;min-width: 85px;">CrowdRun_1920x1080p_24_8_709_420.yuv</td></tr><tr style="border-width: 1px 0px 0px;border-right-style: initial;border-bottom-style: initial;border-left-style: initial;border-right-color: initial;border-bottom-color: initial;border-left-color: initial;border-top-style: solid;border-top-color: rgb(204, 204, 204);background-color: rgb(248, 248, 248);"><td style="border-color: rgb(204, 204, 204);font-size: 14px;min-width: 85px;">InToTree_1920x1080p_24_8_709_420.yuv</td></tr></tbody></table>
+
+### 实验结果
+
+第一个测试，我们对测试集中的颗粒序列进行编码，确认了初始假设：**对于大多数序列，即使使用 QP=22 和关闭 MCTF，胶片颗粒也没有得到很好的保留。**在不显着降低视觉质量的情况下对胶片颗粒进行编码所需的比特率非常高，不适合典型的视频应用。
+
+我们还禁用了 VVC 使用的其他可能会损害胶片颗粒的功能，例如自适应环路滤波器、去块滤波器和具有色度缩放的亮度映射 (LMCS)。然而，关于胶片颗粒保存的性能没有改变。此外，当这些工具被禁用并且更多的压缩伪影变得可见时，比特率会显着增加。
+
+![](./image/20211107-150000-7.png)图6: 编码前后胶片颗粒效果展示
+
+我们测试了提出的算法，观察是否可以重建接近胶片颗粒原始外观的可能性。例如，参见图7a、7c 和 7e 上的天空区域。**实验表明，对于胶片颗粒的相同感知视觉外观，使用胶片颗粒建模而不是直接编码胶片颗粒时,需要的比特率显著降低。** 在测试中，我们还观察到所提算法能够通过修改截止频率对（水平和垂直截止）来模拟不同的胶片颗粒模式，例如形状和大小。**随着截止频率变大，胶片颗粒尺寸变小**。此外，通过使用不同的强度间隔，**可以为图像的不同局部强度采用胶片颗粒强度**。因此，所提出的算法非常适合对不同形状和强度的胶片颗粒进行建模。
+
+在另一组测试中，我们旨在展示**胶片颗粒掩盖压缩伪影的能力**，例如，参见图7b、7d 和 7f。众所周知，VVC 倾向于通过过滤掉高频细节来平滑视频帧（导致主观质量降低）。胶片颗粒可用于对视频进行轻微的重新噪声处理，从而掩盖某些压缩伪影，增加对视频质量的主观评估并增强视觉外观。因此，图7 还说明了胶片颗粒在视觉上掩盖了在没有胶片颗粒的重建图像中存在的强压缩伪影的能力。例如，注意树上的平滑区域（图7d），胶片颗粒能够掩盖细节的损失并掩盖平坦的平滑区域（图7f）。据观察，胶片颗粒能够恢复非常失真的画面的鲜艳度。
+
+![](./image/20211107-150000-8.png)图7: 原始胶片颗粒与合成胶片颗粒对比
+
+## 总结
+
+胶片颗粒对视频压缩社区特别有趣，我们探索了它在视频压缩框架中的应用。表明**当前的压缩技术并没有将胶片颗粒区分为有价值的特征**。通常使用的比特率范围不足以保留在高频域中发现并被量化抑制的胶片颗粒。本文工作表明，**鉴于当前的压缩技术，如果不使用高比特率，就不可能保留胶片颗粒**。因此，重要的是在视频分发链中提供保存它的方法，这是通过使用参数化模型来完成的。我们提供了对建议在 VVC 中使用的一种可能的建模和合成方法。
+
+更重要的是，我们的实验表明，**胶片颗粒可以提高重建视频的视觉质量，它可以用作掩盖压缩伪影的有价值的特征**。由于社区可能对胶片颗粒感兴趣，我们计划在 VVC 和 VTM 中进一步开发胶片颗粒技术。我们进一步将工作重点放在胶片颗粒分析和胶片颗粒参数估计上。
+
+附上演讲视频：
+
+<video src="http://mpvideo.qpic.cn/0bc3byaa4aaa4uanxyvfozqvadwdbyhaadqa.f10002.mp4?dis_k=190f4d27fc29dae645877fbe2fef4d7f&amp;dis_t=1638325889&amp;vid=wxv_2158655331223076871&amp;format_id=10002&amp;support_redirect=0&amp;mmversion=false" poster="http://mmbiz.qpic.cn/mmbiz_jpg/hxkvY4ZM9YmBfhPicbaVliabyCvdh00zmdlnC6mq6bLU9CsOUnEQ8hR4a8oq79WoNQm9YUicciafOibSXnOCTibIp36A/0?wx_fmt=jpeg" webkit-playsinline="isiPhoneShowPlaysinline" playsinline="isiPhoneShowPlaysinline" preload="metadata" crossorigin="anonymous" controlslist="nodownload" class="video_fill">您的浏览器不支持 video 标签</video>
+

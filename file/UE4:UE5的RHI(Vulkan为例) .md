@@ -1,0 +1,347 @@
+
+<!--BEGIN_DATA
+{
+    "create_date": "2022-12-16 18:13", 
+    "modify_date": "2022-12-16 18:13", 
+    "is_top": "0", 
+    "summary": "UE4/UE5的RHI(Vulkan为例) ", 
+    "tags": "Game", 
+    "file_name": "UE4/UE5的RHI(Vulkan为例) .md"
+}
+END_DATA-->
+
+#### <p>原文出处：<a href='https://zhuanlan.zhihu.com/p/417561163' target='blank'>UE4/UE5的RHI(Vulkan为例) </a></p>
+
+RHI是Render Hardware Interface的缩写，虚幻引擎通过RHI把各个平台的图形API包装成统一接口，供上层渲染来使用，让业务不用过多的关注API细节（实际还得关注RHI细节）。从代码结构上来看，RHI封装的比较贴合于现代的图形API(vulkan, metal, DX12)，也支持opengl/ opengles。这个接口是广义上的概念，不仅指C++的纯虚基类，也包括一些全局变量，全局函数等，具体形式就像下面RHI.h头文件这样：  
+
+![](./image/20221216-1813-0.jpg)
+
+为什么UE需要封装RHI这么一层接口呢？原因我也不是很清楚，但是从我自己的感受来看这么封装相比于让上层直接调用API还是有一些好处的：各个平台比较通用的实现，在RHI层面就可能是一套，而比较专用的实现，用不同接口区分开。内部也可以在对外接口不变的情况下，做一些优化或适配方面的工作，同时还可以把调用原始API时候非常复杂的参数，缓存，多线程调度等细节都隐藏起来，让上层的渲染线程专心和RHI提供的接口打交道。总的来看对于使用者来说是更简单了，毕竟复杂又头疼的事情虚幻都做了。虽然官方说RHI封装的层次尽可能低，但其实底层还是隐藏了一大堆细节，比如贴图缓存池，着色器缓存池，RT缓存池，多线程提交等。对于引擎开发者来说，在原始的RHI接口函数不符合要求时，或者想做一些跟业务绑定的专有逻辑时，这一套非常深的封装反而是一个非常重的负担，因此我就根据自己阅读源码后的理解和开发经验，尝试总结梳理了一下RHI的脉络，方便大家能够更容易的了解源码背后的原理，当然本文也仅仅是RHI相关的内容，不涉及到上层各种渲染技术。
+
+## Vulkan API
+
+在开始具体说RHI怎么封装的之前，还是先介绍一下平台API具体都是什么样子的，这样后面在说RHI对应封装时，就能够清楚为什么这样做了。对比DX12，Metal，Vulkan这3种API，其中我自己感觉Vulkan在接口上应该算是包装的最全也最复杂的，虽然用起来很麻烦，但基本能覆盖Metal和DX12这两个的功能，而且跨平台能力很强（除了苹果不支持，其他平台比如安卓，windows，switch都支持）。另外多说一点，Vulkan自带Portability库可以把对应API转调用到实际的Metal或DX12的API，虽然我没用过Portability库。因为安卓和PC上都能用，而且看国内趋势，手游开发Vulkan肯定会普及，毕竟比gles性能好太多，因此我这里就选了Vulkan的API来做主要的讲解，如果已经很了解了这一部分可以跳过。
+
+先简单说下vulkanAPI的规则，大部分都是下面这样的形式：
+
+```c
+// 这是调用API需要传入的参数结构体
+typedef struct VkCommandBufferAllocateInfo {
+    VkStructureType         sType;  // 这个结构体的名字
+    const void*             pNext;  // 扩展字段，一般为0，以后参数不够用，用这个扩展
+    // 每个结构体从这里开始才是真正的参数，前面两个算是参数结构的基类
+    VkCommandPool           commandPool;   // CommandBuffer的对象池
+    VkCommandBufferLevel    level;
+    uint32_t                commandBufferCount;  // 一次可以创建多个
+} VkCommandBufferAllocateInfo;
+
+// 这是实际的API
+VkResult vkAllocateCommandBuffers(
+    VkDevice                                    device,        // 实际对象，类似于C++的this
+    const VkCommandBufferAllocateInfo*          pAllocateInfo, // 这个函数的参数
+    VkCommandBuffer*                            pCommandBuffers); // 输出的对象，这是个数组，大小是commandBufferCount
+
+// 所有创建的对象，都要主动销毁，比如上面的CommandBuffer用完要用下面这个函数回收
+void vkFreeCommandBuffers(
+    VkDevice                                    device,
+    VkCommandPool                               commandPool,
+    uint32_t                                    commandBufferCount,
+    const VkCommandBuffer*                      pCommandBuffers);
+```
+
+![](./image/20221216-1813-1.jpg)
+
+Vulkan全貌如上图所示，基本覆盖了Vulkan中比较重要的对象。下面从上到下具体来介绍一下，这里要注意，实际API会有个Vk前缀，比如图里Instance，在代码中是VkInstance，CommandBuffer在代码中是VkCommandBuffer
+
+**Instance**：全局的Vulkan实例，类似于lua的globalState之类，有一些全局设置存在这个对象上。正常情况一个游戏就创建一个。
+
+**SurfaceKHR：**窗口，这个应该不算Vulkan内部的，属于扩展，因为毕竟Vulkan要显示到实际的系统窗口里，这个对象主要处理和系统窗口之间的关系，各种设置之类。
+
+**PhysicalDevice**：物理设备，这个就是实际的硬件，比如显卡，集成显卡就算两个设备，可以通过全局函数枚举出来所有设备。这里Queue Family，Memory Heap就是物理上提供的队列或者显存之类
+
+**Device**：这个是逻辑设备的封装，一个物理设备可能有多种功能，可以把一种功能归为一个逻辑设备。一个物理设备可以对应多个逻辑设备。
+
+**Queue**：这个是设备提供的队列，提交给硬件的命令，硬件设备也不是马上执行的，而是放在自己队列里再慢慢执行，当然有的设备也提供多个队列。
+
+**CommandBuffer**：这个就是具体业务提交的命令缓冲区，drawcall就是先交到这里。CommandPool是创建CommandBuffer的对象池，因为CommandBuffer创建销毁都比较耗，所以有个池子可以重用提高性能，另外池子本身是绑定DeviceFamily的，所以多个设备的命令没法混一起交。CommandBuffer是先收集一大堆命令，然后用vkQueueSubmit提交给设备的Queue。这个CommandBuffer是可以创建多个，BeginRenderPass调用时候传的CommandBuffer一般就是主CommandBuffer，而没传到RenderPass的都是子CommandBuffer，这样在多个线程上可以分别处理自己的命令到自己的子CommandBuffer上，最后都做完后通过ExecuteCommands把子CommandBuffer都合并到主CommandBuffer上，然后提交主CommandBuffer。CommandBuffer是有状态的，官网的CommandBuffer状态流转图：
+
+![](./image/20221216-1813-2.jpg)
+
+**Buffer/Image**：Buffer可以理解为一段一维的内存数据，就像我们平常代码里写的char*指针加一个大小表示的区域，也可以说是一维数组，Image可以理解为一段多维的内存数据，也可以说是多维数组，贴图一般都是二维的，所以要用这个表示，当然也能表示一维的，最高三维，这里都是纯数据。Vulkan本身没有VertexBuffer或IndexBuffer这样的概念，他们都是Buffer。UE5的RHI里也像Vulkan一样，把顶点或索引Buffer这样的说法废弃了，他们本质上都是一维数据，所以也用统一个类型表示就足够了。如下图：
+
+![](./image/20221216-1813-3.jpg)
+
+实际shader中，如果顶点范围不大不会出现精度问题的情况下，可以做把索引Buffer硬解成顶点，就可以不用顶点Buffer了，毕竟int比较小。
+
+**BufferView/ImageView**：这两个就是对应Buffer和Image的视图，本身没存数据，相当于是Buffer和Image的解读说明书，让Vulkan知道具体怎么解释一段内存，就类似C++的range和底下的各种数组，vector关系一样，或ue的TArray和TArrayView的这种关系，很灵活。
+
+**Sampler**：采样器，就是个数据的壳，也是告诉Vulkan具体怎么解读数据的。但和ImageView不一样，他不需要绑定到Image上。
+
+**DescriptorSet**：描述符集，shader没法直接访问资源，要通过DescriptorSet来访问，其实就是个内存到shader的映射器。DX12里叫描述符堆DescriptorHeap。这个名字很抽象，不太好解释具体是什么，我觉得就是类似于UE4反射时用到的UStruct/UClass这种概念相似，定义了内部结构布局的描述信息。为什么要搞一个这东西呢？主要是为了让shader复用资源，把需要的资源接口定义好，当贴图或Buffer什么的发生了变化，只要还符合接口格式要求，那么就还是能复用相同shader。假如没有这一层，直接让shader绑死资源，当换一个贴图就要一个新的shader，这样就太不灵活了。还是用个官方的例子来具体说明吧：
+
+比如3个DescriptorSet，是下面这样的：
+
+![](./image/20221216-1813-4.jpg)
+
+然后Shader里需要的资源是下面这样的：
+
+![](./image/20221216-1813-5.jpg)
+
+这里layout表示布局set的数字是读第几个DescriptorSet，binding是读DescriptorSet内的同binding的Descriptor，uniform表示只读，buffer表示可以读写，sampler2D是个预定义的类型，这个是给贴图专用的，不用自己写结构体，会自动转格式。
+
+另外有几个要注意的点
+
+  1. sampler也是只读的，所以前面只能是uniform或者作为函数输入参数
+  2. 顶点shader可以有输入，可以不用绑DescriptorSet，但也类似要定义输入的结构体和属性列表，另外如果是一些比较小的数据绑uniform，在C++可以直接vkCmdPushConstants也可以直接传过来(用这个性能更好，layout要声明`push_constant`结构，如下面代码)，其他shader的输入就都只能通过绑DescriptorSet了
+  3. 在使用Subpass时，如果要fetch上一个Subpass的结果，shader里的参数类型要写成subpassInput(layout里用`input_attachment_index`指定第几个)，而不是samplerXXX。Subpass是什么后面会说
+
+```c
+layout (push_constant) uniform XXX_T
+{
+    int index;
+    vect2 xy;
+} XXX;
+```
+
+当绘制前，需要绑定资源到shader上，代码是这样写的：
+
+![](./image/20221216-1813-6.jpg)
+
+像上面这样一通操作后，就把shader和资源关联了起来，DescriptorSet就起了这个桥梁的作用：
+
+![](./image/20221216-1813-7.jpg)
+
+可以看到，即使贴图换了，但shader完全可以复用。
+
+DescriptorSet也是通过池来创建的，需要先指定布局DescriptorSetLayout，相当于是个模板。多个DescriptorSet可以通过PipelineLayout绑定到CommandBuffer上。
+
+**FrameBuffer**：就是最后要画到屏幕的那个RT。BeginRenderPass的时候，就要带上FrameBuffer这个参数，这样vulkan才知道往哪画。每个RenderPass都对应一个FrameBuffer，这也就是说可以创建多个FrameBuffer，然后多个线程同时画，除了上面说的在CommandBuffer上能多线程，这里也能多线程。vkCmdBeginRenderPass和vkCmdEndRenderPass之间的代码，就是真正绘制的代码。默认RenderPass只有一个Subpass，创建RenderPass时候的参数里可以设多个Subpass，绘制时候通过vkCmdNextSubpass切换。
+
+特别要提的是，Subpass可以不用把渲染结果回写回内存，直接利用设备的存储，这样就能很快。尤其是手机上，一般都是分Tile绘制的，比如3个pass，如果不用Subpass绘制，可能就要先画每个Tile的pass1，再画每个Tile的pass2，再画每个Tile的pass3。如果pass2要利用pass1的绘制结果，pass1会先把结果拷回内存，pass2要再从内存上拷到显存里，这样两次来回读写就有额外的带宽开销。而如果使用Subpass，会先把第一个tile的pass1~pass3执行完，再执行第二个tile的pass1~pass3，直到所有tile执行完，如果pass2要复用pass1的结果，不需要拷回内存，直接fetch就可以了，这样就不会有额外的开销，就像是有了免费的GBuffer一样，但缺点就是只能复用Tile内的结果。
+
+**Pipeline**：就是最外层的一个大壳，设置整个渲染管线每一步的流程的。分两种，一个图形管线，一个计算管线。计算管线就一个阶段，而图形管线有很多个阶段，是从上到下执行的。下面官网这个图有具体流程，下面红框都是支持shader的阶段，我们经常写的顶点shader和像素shader，就是下面VertexShader和FragmentShader这两个阶段要执行的代码。vulkan和GL里的Attachments差不多对应别的平台上的RenderTarget。
+
+![](./image/20221216-1813-8.jpg)
+
+因为特别复杂，所以Pipeline创建要填一大堆的参数：
+
+![](./image/20221216-1813-9.jpg)
+
+这里成员变量的每个CreateInfo又是一大堆的参数，而且每一项都很重要，这里就不细说了，想吐槽非得一个函数搞定，写起来巨麻烦，当然也有好处，只用一个函数就执行完，就能避免像opengl那样内部维护一套状态机。
+
+**Event、Semaphore、Fence：**这几个就是处理多线程同步的对象，跟操作系统提供的类似，毕竟vulkan多线程是一大优势，所以有些API就需要这些同步用的对象作为参数来处理同步问题，这里就不细说了。
+
+vulkan官网也有个对照信息，可以方便对比各个API，我把这个拷到了图里：
+
+![](./image/20221216-1813-10.jpg)
+
+比如上面说的RenderTarget，在vulkan和GL里叫做color attachments，CommandBuffer在DX12上叫做CommandList，CommandPool在Metal上CommandQueue，UniformBuffer在DX12上叫做CBV(ConstantBufferViews)。因为虚幻引擎的RHI里面封装的类名，也是这些名字在混着用的，看代码时候可以根据命名，对照着表格就大概知道底下到底是什么了
+
+知道了API的大概原理，下面就好讲RHI具体是怎么封装了。
+
+## RHI总体结构
+
+![](./image/20221216-1813-11.jpg)
+
+我根据RHI的代码，大概画了一下整体的结构，如上图所示。
+
+**绿色部分：**这部分是各个实际的图形API封装层，从命名上可以看到都叫做XXXDynamicRHI，他们统一继承FDynamicRHI。这里大部分函数都是管线流程控制或者RHI资源的创建销毁等函数。比如创建各种Buffer，贴图，State，Shader之类的封装都在这里。
+
+**蓝色部分：**当然因为C++本身支持多继承，其中有几个平台的DynamicRHI直接或间接继承了IRHICommandContext，而对于Vulkan，D3D12这两个虽然没有直接继承，但也单独实现了对应的CommandContext子类。对于Vulkan和DX12，本身API有提供自己的CommandBuffer或CommandList，但本身逻辑会比较复杂，所以也单独封装了一个Context或CommandListContext类可能会更好管理一些，然后UE本身也自己实现了对应的CommandList。这里存的就是收集起来的RHI命令（drawcall以及一些设置调用的参数等）
+
+**红色部分：**最后因为最终的命令还是要执行的，同时RHI支持独立的线程，有的管线也支持多线程提交，所以红色部分会跟TaskGraph关联起来，负责执行对应的CommandList。因为多个线程执行的不同的命令列表之间可能互相还有依赖关系，所以这里也封装了一些间接提交的Task。
+
+## DynamicRHI
+
+全局的那些函数和变量，基本上是一些功能特性的开关查询。而DynamicRHI是各种图形API提供的功能的封装，UE中有不同实现，通过继承实现对应的子类，放在不同的module里，如下图所示：
+
+![](./image/20221216-1813-12.jpg)
+
+比如DX12，对应的Module就是D3D12RHI：
+
+![](./image/20221216-1813-13.jpg)
+
+就会找到这个Module下面的
+
+![](./image/20221216-1813-14.jpg)
+
+通过继承，并实现对应接口。
+
+![](./image/20221216-1813-15.jpg)
+
+为什么是Dynamic的？我猜是因为这个RHI可以在运行时才决定用哪个，不是编译时候确定的，比如启动时传个参数vulkan，那么就创建不是DX12了，而是vulkan的RHI
+
+![](./image/20221216-1813-16.jpg)
+
+在上面有说Vulkan的流程，在绘制前需要准备各种资源，如Buffer，贴图，Shader，State等。而这些准备工作，就都封装在DynamicRHI中，里面有一堆这样的纯虚函数：
+
+![](./image/20221216-1813-17.jpg)
+
+比如创建Buffer或UniformBuffer，如下，内部是new了一个FVulkanResourceMultiBuffer这样的对象。
+
+![](./image/20221216-1813-18.jpg)
+
+![](./image/20221216-1813-19.jpg)
+
+构造函数内部的内部很复杂，会从BufferPool中获取对应的VkBuffer，当然在池中没有的时候，就会调用vkCreateBuffer，如下图
+
+![](./image/20221216-1813-20.jpg)
+
+还有Lock/UnLock Buffer，Texture等这样的资源操作封装。实际最终调用的是vkCopyBufferXXX等API。因为牵扯到内存和显存的交互，为了保证访问安全，以及拿到设备上的数据，所以CPU在写这部分数据时需要先调用lock，写完后调用unlock，具体Lock/UnLock做了什么，后面RHIResource部分有说。
+
+再比如创建vs和ps，最终调用的是UE自己实现的ShaderFactory，内部维护了一个ShaderCache，如果没有对应缓存UE就会创建TVulkan BaseShader对应的对象，调用Setup序列化出头部一些参数和实际的Spirv代码，填充好UniformBuffer的布局Slot等。
+
+这里只是简单的介绍一下这些API都是在做什么，就不具体说内部实现了，有兴趣可以自己阅读源码。可见基本上这部分内容对应的都是RenderPass之外的一些准备资源相关的调用。
+
+## RHICommandList
+
+这部分就是RenderPass内的调用了。先看最基本的RHICommandContext，这些就是封装了drawcall和更新参数等函数。
+
+![](./image/20221216-1813-21.jpg)
+
+如上图所示红色是设参数，黄色就是绘制调用，蓝色是取结果或者流程控制，或者更新数据等操作，当然这个也只是我自己随意划分一下为了说起来方便，并不是严格的分类。
+
+看下红色部分的内部实现：
+
+![](./image/20221216-1813-22.jpg)
+
+最终调用的vkCmdDraw/vkCmdDrawIndirect/vkCmdDrawIndexed/vkCmdDrawIndexedIndirect
+
+因为vulkan默认就是instance绘制，画一个数量填1，画多个填大于1的数字就好，不像gl需要区分开，所以drawcall函数还是比较简单的。带Indexed是顶点+索引Buffer，不带的就只是顶点Buffer绘制。而Indirect后缀的，就和glDrawInstancedIndirect差不多，可以间接绘制。
+
+这里特别说一下间接绘制。可以不用在提交这个drawcall的时候就准备好顶点和索引数据，而是只要在真正执行前把实际顶点和索引数据填到vkBuffer里就好，也就是说需要绘制的drawcall可以提前准备好不变，每次只更新Buffer内容，甚至可以在之前的某个shader里写对应Buffer。另外这个函数还有个参数drawCount，当大于1的时候相当于调用了多次drawcall，又因为Buffer是动态准备的，所以可以让shader来做，shader里可以做一些剔除之类工作，把结果回写到Buffer上，如果某次instance数为0还会跳过对应某次drawcall。因此在绘制多个种类，每个种类有多个Instance的情景时候，用这个函数一次就搞定了，也能省很多提交的带宽（因为Buffer可以是显存，不用和内存来回拷贝了），甚至说极端一些，理论上整个游戏只要这一个draw call就够了。当然为了用好这个函数，配套要做的工作也是相当的多。也就是因为这个函数的性质，用Compute Shader来输出对应参数Buffer，可以实现GPUDriven渲染管线。有一些这么做的具体案例：比如刺客信条大革命NPC万人同屏，整个城市的一大堆建筑群，僵尸世界大战里的尸潮，都是这么搞出来的。可以看到这里就是多种类多规格的Mesh，每种Mesh多Instance的情况。
+
+![](./image/20221216-1813-23.jpg)
+
+这里简单的drawcall API，但渲染线程并不是直接调用过来的，而是通过先收集到CommandList里，再统一提交的方式处理的。当然也可以简单的直接调用。就比如上面的DrawPrimitive，其实是由RHICommandList对应的函数调用过来的：
+
+![](./image/20221216-1813-24.jpg)
+
+可以看到如果是Bypass就是直接调用，否则会走到ALLOC_COMMAND，这个其实就是把参数都收集到一个结构体里保存到CommandList队列上，之后统一执行。每个命令都是下面这样的结构，而上面的宏就是继承这个类。
+
+![](./image/20221216-1813-25.jpg)
+
+![](./image/20221216-1813-26.jpg)
+
+![](./image/20221216-1813-27.jpg)
+
+真正执行的时候，还是调用的RHIContext的RHIDrawPrimitive函数。可以看到每个命令有个Next，所以这些命令本身就是个链表组成的队列。下面来看CommandList具体执行的地方，也就是FRHICommandListExecutor
+
+![](./image/20221216-1813-28.jpg)
+
+这里的执行函数，有两种类型的参数，一个是CommandListBase，还有一个是CommandListImmediate。这里Immediate结尾的，可以认为是主队列，而其他的CommandList可以通过各种方式执行，就类似于上面vulkan的CommandBuffer有父子关系类似性质，这样多个队列就可以通过并行的方式执行。这个主队列也就是全局变量GRHICommandList。
+
+如果有开单独的RHI线程，那么就RHI就会在下面这个单独的线程上执行，可以看到，这个线程就是一直从TaskGraph的任务列表中取，直到发送了Quit消息才会退出。
+
+![](./image/20221216-1813-29.jpg)
+
+有一点特别要注意的，这里虽然写成了Execute，但其实这里只是CPU把命令提交给GPU，真正是由GPU执行的，所以这里在准备一些数据的时候，我们感觉因为线程安全问题，资源是多个线程不能同时访问的，但其实不一定。举个例子：比如RT，因为这里只是收集命令，并不是真正读写RT，所以即使多个线程同时组装写RT的CommandList也不会出问题。
+
+![](./image/20221216-1813-30.jpg)
+
+可以看到这个函数就是并行提交CommandList。因为RHI本身使用的TaskGraph，牵扯到多线程提交，以及等待渲染结果等问题，那么肯定就有线程等待这些操作。这些操作就封装在了ImmediateFlush这个函数中，可以看到参数是个枚举
+
+![](./image/20221216-1813-31.jpg)
+
+![](./image/20221216-1813-32.jpg)
+
+先看最基本的两个：
+
+![](./image/20221216-1813-33.jpg)
+
+其中最基本的是都要执行ExecuteList函数，因为这个函数里面的细节非常复杂，就不细说了，具体就是创建TaskGraph需要的Task，如果有依赖加上依赖，具体是什么Task下面有说。 先来看这两个Type的区别。
+
+DispatchToRHIThread就只是把当前的列表都发起提交到TaskGraph，然后就退出了，不等待是否真正提交出去。而后面这个WaitForDispatchToRHIThread多调用了一个WaitForDispatch函数。可以看到，这里不仅是提交，还要等待RenderThreadSublistDispatchTask完成
+
+![](./image/20221216-1813-34.jpg)
+
+RenderThreadSublistDispatchTask这个Task其实就是执行上面ExecuteList创建的Task。代码在ExecuteInner里。
+
+![](./image/20221216-1813-35.jpg)
+
+这里有两种Task
+
+![](./image/20221216-1813-36.jpg)
+
+一个是FDispatchRHIThreadTask，另一个是FExecuteRHIThreadTask，而真正执行命令的是FExecuteRHIThreadTask，FDispatchRHIThreadTask这个Task只是在执行的时候，再提交真正的FExecuteRHIThreadTask，可以看到上面RenderThreadSublistDispatchTask其实是一个Dispatch，也就是说，这里只是等带Dispatch这个Task完成，而并不是等待真正Execute完成。那么再看另一个type，FlushRHIThread
+
+![](./image/20221216-1813-37.jpg)
+
+可以看到，这里就是不仅要等待提交完成，还要等待真正的Execute完成。除此外，还有个tpe叫做FlushResource
+
+![](./image/20221216-1813-38.jpg)
+
+这里就是不光要等待提交和Execute完成，还要等待资源都刷完。
+
+![](./image/20221216-1813-39.jpg)
+
+因此，前面说的这个枚举，从上到下，等待开销是越来越重的，要尽可能少用后面的操作。一般出现Flush资源的操作，可能stat里就是一个几十ms的大峰值，会严重影响帧率，这里是要特别注意的一点。
+
+最后还剩一个WaitForOutstandingTaskOnly没说
+
+![](./image/20221216-1813-40.jpg)
+
+![](./image/20221216-1813-41.jpg)
+
+可以看到，这个并不等提交，而只是在等OutstandingTask。这个OutstandingTask可以理解为外面的Task，当这个存在的时候Execute函数内，会把上面的Task都加上OutstandingTask作为依赖，当OutstandingTask执行完，才会继续实际的Task。而OutstandingTask发起的地方，就是QueueParallelAsyncCommandListSubmit，也就是并行RHI的地方
+
+![](./image/20221216-1813-42.jpg)
+
+这个函数由FParallelCommandListSet调用
+
+![](./image/20221216-1813-43.jpg)
+
+而这个函数内，会根据参数可以启用0个，1个或多个RHI线程，如下图
+
+![](./image/20221216-1813-44.jpg)
+
+如果启用多个RHI线程的时候，这些任务就会分到多个RHI线程上一起执行。通过搜索FParallelCommandListSet可以看到UE5有很多地方都在并行提交，比如在绘制网格BasePass的时候，会切分出多个线程的Task来执行。
+
+![](./image/20221216-1813-45.jpg)
+
+其实仔细思考，场景中很多不同的网格的阴影和BasePass等，这些网格之间并没有关系，虽然都是往同样的RT或GBuffer上绘制，虽然资源相同，但因为这里只是提交命令的收集，完全并行起来也不会有问题，这也是UE5很有优势的地方。
+
+最后想说的就是Vulkan的CommandBuffer和RHI的CommandList，CommandContext之间是什么关系？
+
+![](./image/20221216-1813-46.jpg)
+
+可以看到，其实Vulkan实现了自己的CommandContext，在提交Drawcall的时候：
+
+![](./image/20221216-1813-47.jpg)
+
+会先获取一个ActiveCmdBuffer来提交。这也就是说，UE整个绘制流程其实有很多层提交，渲染线程的逻辑把要绘制的View加工成CommandList需要的命令，然后在执行CommandList命令的时候，再放到Vulkan的CommandBuffer里，而Vulkan本身也有自己的提交到执行的流程，而GPU真正绘制的时候是在执行这个ActiveCmdBuffer的时候。
+
+UE的多线程提交属于基本上没有用到Vulkan本身提供的多线程CommandBuffer提交，而是自己做的一套，因此理论上对于GL或dx11等老的API，即使API层面没有提供多线程支持，这一套也是适用的。但不管是怎样做，前面的各种并行化操作，本质上也只是并行化准备数据并提交而已，真正的执行还是串行的。
+
+除ActiveCmdBuffer外，还有个UploadCmdBuffer，这个是给创建或更新资源时候使用的，在Lock/UnLock对应资源时候都要用到，后面会说。
+
+为什么要分开两个CmdBuffer呢？这是因为对于ActiveCmdBuffer来说，在Viewport绘制的时候，提交一次就可以了，而对于资源，用的时候就需要最新数据，比如读贴图的时候，Lock里只调用vmCopyBuffer并不能拿到真正的数据，因为这只是一个记录起来的命令，这时就要提交并等待结果回来，如果和drawcall处在同一个CmdBuffer里，就会把drawcall也提交出去，这显然是不合适的，那么单独搞一个UploadCmdBuffer就很有必要了。
+
+## RHIResource
+
+![](./image/20221216-1813-48.jpg)
+
+这里资源相关的就没有什么需要多说的了，可以看上图，就是各种平台API对应的资源封装。当然内部是用引用计数来维护的，一个资源可以被到处使用，最后一个为0的时候才销毁。真正到平台层，还会再继承一层，比如Vulkan的Buffer
+
+![](./image/20221216-1813-49.jpg)
+
+这里前面也有说，在读写资源前要先Lock，然后做读写操作，最后UnLock。Lock的时候需要指定读写标记。可以看上面这个类的对应函数
+
+![](./image/20221216-1813-50.jpg)
+
+如果是读，Lock先创建一个StagingBuffer，然后把Buffer内容拷到这个StagingBuffer上，然后把StagingBuffer的指针返回出去。UnLock的时候就会释放这个StagingBuffer。
+
+而如果是写，Lock的时候创建个空的StagingBuffer，在UnLock的时候，把StagingBuffer内容复制到实际的Buffer上：
+
+![](./image/20221216-1813-51.jpg)
+
+除了Buffer外，贴图也是类似的做法：
+
+![](./image/20221216-1813-52.jpg)
+
+资源本身需要内存，所以UE也有做对应的内存管理：
+
+![](./image/20221216-1813-53.jpg)
+
+本身没有什么难点，就不细说了。
+

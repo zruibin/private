@@ -1,0 +1,647 @@
+ 
+<!--BEGIN_DATA
+{
+    "create_date": "2017-04-06 11:20", 
+    "modify_date": "2017-04-06 11:20", 
+    "is_top": "0", 
+    "summary": " 一种Android客户端架构设计分享", 
+    "tags": "Android、架构", 
+    "file_name": "一种Android客户端架构设计分享.md"
+}
+END_DATA-->
+
+####<p>原文出处：<a href='http://blog.csdn.net/ahence/article/details/56678126' target='blank'> 一种Android客户端架构设计分享</a></p>
+
+![](./image/category_icon.jpg) 分类：
+
+
+技术发展日新月异，业界各种Android客户端架构设计，五花八门，但我们不能简单地说哪种架构更好，因为脱离业务谈架构是没有任何意义的，适合业务的才是好架构。
+而架构也不是一成不变的，随着业务的发展，也许当初设计的架构已不足以支撑目前的业务，那么就需要改变之前的架构。接下来将分享下我们Android客户端的架构设计，在App的某个业务发展阶段或许有一些参考意义。
+
+分层化与模块化
+
+分层化与模块化应该是任何软件开发的共识。
+
+分层化
+
+在Android应用开发中通常可以分为如下几层：
+
+![这里写图片描述](./image/20170223185803296)
+
+  * SDK层：主要是Android SDK及第三方的SDK（可能基于Android SDK或为独立的SDK），这些SDK为上层框架提供核心功能的支持。
+  * 基础框架层：这里所谓的基础框架，指多数App都必需的基础功能，是具体业务逻辑实现的基础。主要有网络请求功能、图片加载与缓存功能、SQLite数据库管理功能、Log管理功能等，当然根据对业务逻辑支持的不同，基础框架层的功能支持也不一定相同，上述几个应该是大部分App都要支持的，当然Crash监控与常用工具类也可归为该层次。   
+
+具体到每个基础框架的实现则没有任何限制，如网络功能可以使用Volley、OkHttp或者自己封装实现网络请求逻辑；对于图片管理功能则可以使用Glide、Fresco、Picasso，亦或自己实现……总之每个基础框架都要遵循一定的实现原则，保持功能模块的独立性，与具体业务解耦并对外提供良好的交互接口。
+
+  * 业务逻辑层：如果把App架构比作高层建筑，那么上述两层就是地基。地基打好之后，就可以在上面任意发挥了，至于如何发挥，那就必须结合实际的业务需求，不同的应用往往有不同的业务功能模块。   
+
+另一方面，业务功能模块也并非完全是并列的级别，有一些业务逻辑也是可以抽象出来的，作为通用的功能模块，比如登录、分享、扫描、统计等，其他的业务模块可能会调用到这些功能。
+
+这里需要注意的是SDK层与基础框架层并不是一成不变的，但它们的变化周期往往是比较长的，一般来说当基础功能不能满足最上层的业务逻辑时，就需要对其做扩展。由于基础框架层的功能模块已经是功能级别的粒度划分，因此扩展往往是模块级别的扩展，通常是新增基础功能框架而不是修改原有基础功能框架，这也符合“开放-闭合”原则。
+
+模块化
+
+至于模块化，对于分层化来说则是更细粒度的划分，即将每一层细分为不同的模块，各功能模块尽可能遵循“高内聚、低耦合”的原则，功能模块之间仅提供必要的交互接口。
+
+对于基础框架层，由上图可见，往往是根据功能来划分。这里的基础框架层细分为网络支持功能、图片库、日志系统、数据库支持等模块，如果不足以支撑业务发展，可能会新增其他基础功能模块。
+
+而业务逻辑层则主要由业务需求来决定，如分为扫描功能、电商、快递查询等模块。业务逻辑层的模块化还有一种驱动因素，那就是通用功能的封装，这一点大家应该都有体会，随着App业务逻辑的增加，不同业务功能之间可能会用到相同的功能，如用户登录、分享功能等，我们不希望在每个需要的地方都复写一遍相关代码，于是就需要把通用功能抽取成独立于具体业务需求的模块，如登录模块、分享模块，在模块内部实现通用的业务逻辑，同时对外暴露调用接口，不同的业务只需调用通用模块即可。
+
+业务数据流程设计
+
+由于业务逻辑、数据处理逻辑或网络框架的不同，相信各家应用都有自己的一套数据请求流程。最直接的就是从Activity或Fragment中调用网络请求的方法，然
+后通过回调将结果返回到Activity或Fragment中，虽然流程最清晰，但这种方式存在几个严重的问题：
+
+  * 网络数据直接返回到Activity或Fragment中，后续需要对数据进行解析、过滤、转换、缓存等操作，这些工作将会大大加重Activity或Fragment的负担。
+  * Activity或Fragment的代码量猛增，逻辑繁杂（不仅包含了View的逻辑还包含了数据处理的逻辑）
+  * 从整个应用的角度来看，每个页面甚至每个接口都需要重复上述相同的冗余工作，完全可以抽象出来。
+
+上述设计思路是需要摒弃的，结合自身业务及架构演化，我们没有跟风MVP、MVVM，而是设计了下面一套业务数据请求流程：
+
+![这里写图片描述](./image/20170223185826749)
+
+首先，视图层通常表现为Activity或Fragment，并由视图层发起数据请求，与上述不同，视图层并不直接跟网络框架打交道，而是先将数据请求发送到数据代理层DataAgent。需要注意到是，视图层与数据代理层之间没有采用直接通信的方式，而是插入了一个消息调度器MessageScheduler中转。这样做的好处是将视图层与数据代理层解耦，视图层无需关注数据代理层的具体实现，有了MessageScheduler，视图层所要做的就是发出一个数据请求的消息而已，然后就可以静静等待一个回复消息，该回复消息会附带最终需要的数据对象，这样在视图层就免除了数据处理的逻辑，拿到结果直接展示到UI上即可。使用这种方式，一般来讲Activity或Fragment三五百行代码即可搞定，UI逻辑或接口逻辑（如一个页面有多个接口）比较复杂的代码量基本也能控制在1000行左右，逻辑非常清爽。
+
+消息调度器将视图层的请求消息转发到数据代理层后，DataAgent解析出数据请求类型DataType（该类型对应着具体数据对象模型）、必要参数（接口参数、是
+否需要缓存结果、分页页码等），然后再执行具体的操作：
+
+  * 如果要取缓存的数据，则DataAgent直接向缓存模块发送请求。缓存的数据可以是初始JSON数据，也可以是解析处理后得到的数据对象Model，可根据具体需求配置。如果从缓存中取到的是JSON，则DataAgent先要解析处理得到对应Model；如果从缓存中取到的是Model，则不做处理，然后将Model封装发回到消息调度器，再由MessageScheduler分发给具体的请求者，如Activity或Fragment。
+  * 由于Android的数据来源有多种，如果数据来自持久化存储，如SQLite或File等，仍然统一由DataAgent来跟它们通信，获取数据并加工后通过MessageScheduler发回视图层。
+  * 最常见的是从服务器获取数据，此种场景下，DataAgent将与网络框架交互，将从MessageScheduler中获取的参数提供给网络框架构造请求url。至于网络框架使用Volley或OkHttp或者其他都没关系，网络框架负责向Server请求数据，数据通常以JSON格式返回。DataAgent收到返回的JSON数据后，根据DataType将JSON数据校验后抛给解析器，解析器会将JSON解析为视图层需要的Model。当然数据解析过程可能伴随数据的过滤、转换等逻辑。另外需要注意的是，还需要根据视图层需求对数据进行是否缓存的操作，可选择缓存JSON还是Model。经过一系列操作，得到最终Model后，DataAgent将其通过MessageScheduler发回视图层。
+
+当然，由于数据请求流程是耗时的，因此上述步骤都是走的线程池，这点上图中并未注明。
+
+数据代理层
+
+DataAgent在上文中已简单提及，它的主要作用是对数据的一系列操作，包括实际的数据请求、数据解析处理、数据缓存等逻辑。下图为从服务端接口获取JSON数据
+并处理的流程：
+
+![这里写图片描述](./image/20170223185851312)
+
+从上图可知，DataAgent的大致工作流程为：
+
+  1. DataAgent将真正的数据请求发送给各数据源，数据源可能为缓存、SQLite或文件，但通常是从服务端获取数据，因此DataAgent会将数据请求发到网络框架层，然后等待数据返回。
+  2. 由于数据源不同，返回数据也可能不同，这里简化为两种：原始JSON或Model。
+  3. DataAgent拿到数据后，则开始数据处理流程。以从网络请求的JSON数据为例，先对返回的JSON进行数据校验，检查数据的有效性与正确性，如果数据校验通过，接下来根据需求来决定要不要写入缓存，然后再进行数据加工（如精度处理、数据拼接、数据裁剪等），最后进行数据解析得到视图层需要的Model。如果数据校验没有通过，则尝试从缓存中读取，从缓存中读取后也需要校验（检查数据的时效性、有效性、正确性），校验通过后同样进行数据处理、解析等流程。如果缓存中读取得到的就是Model，那么则可以省略数据处理和解析的流程。得到最终的Model后，DataAgent将其包装发送给MessageScheduler。另外DataAgent还要具有一定的容错功能，因为任何数据源都无法保证能够返回合法的数据，如果不对数据错误进行容错处理，那么就可能无法解析为对应的Model，从而导致视图层无数据甚至异常。如果接口及缓存都无法返回正确的数据，DataAgent需要做特殊处理，以保证视图层能给用户以反馈。
+
+业务视图逻辑
+
+虽然不同的业务页面有不同的视图逻辑，这里以一个应用中最常见的页面为例来说明，假设该页面有一个列表。大家都知道ListView（此处为泛指，可能大家都在用Re
+cyclerView了）的工作方式，它需要ViewHolder来填充视图，需要Adapter来填充数据，如果每个需要ListView的界面都维护各自的一套ViewHolder及Adapter，那么页面逻辑又将变得臃肿。
+
+我们在实践中是这样做的：
+
+  * 封装一个Adapter公共处理类，提供多种构造函数，其中有一个type参数，用来标明需要使用哪个ViewHolder。
+  * 封装一个ViewHolder抽象类，定义数据设置的逻辑，并交由具体的ViewHolder实现。
+  * 构建一个叫做ViewHolderFactory的类，顾名思义该类主要作用是用来构建ViewHolder，它主要提供两个方法createViewHolder（）与createConvertView（），其中createConvertView（）是个中间方法，用于生成ViewHolder。
+  * 在Adapter的getView方法中，根据上述type参数，获取具体的ViewHolder实现，调用设置数据的逻辑。
+
+经过上述封装之后，视图层只需要向Adapter公共处理类传入一个type参数即可得到对应的Adapter；等数据返回到视图层后，再将数据传给Adapter公共处理类，其他什么都不用管，就可以展示列表数据了。原本需要很多代码实现的逻辑从视图层抽离之后，视图层只需要几行代码就能够完成一个列表展示了。
+
+Hybrid框架
+
+自Android诞生以来，就有Native App与Web App之争，这两种开发方式虽然各有优缺点，但Native App一直占据上风。近一两年来，移动应用中的Web页面越来越多，而纯Native的应用则相对越来越少。但是纯Web App由于其渲染效率、性能问题、对硬件的调用限制导致其也并未广泛地应用。于是一种折中的方案成为主流，即Hybrid App。
+
+所谓Hybrid App，即混合开发方式，部分功能使用Native开发，部分功能使用H5开发。为了充分利用Web开发的优点并避开其缺点，并非所有业务功能都适合使用Web方式来开发。在我们的应用中，主要将H5用于以下方面：
+
+  * 节日活动或游戏页、秒杀或团购页等具有时效性的页面。
+  * 使用说明、公告等偏展示、少交互的页面。
+  * 经常更新、交互较少且不涉及硬件调用的页面或模块，如电商商品首页展示、积分兑换模块。
+
+截止到目前，我们App中的Web页所占比重是上升的，大概占到所有功能的25%左右。使用Web开发的优势非常明显，可以支持多变的UI视图效果、节省开发人力（Android、iOS共用）、Bug的在线修复而不用App发版等。
+
+为了满足App的Web页面需求，于是我们在基础框架层扩展了一个Hybrid功能模块。该框架主要是自行封装了Android原生的WebView控件，且分为不同层级的封装，可根据需要灵活使用，核心功能及特性如下：
+
+  * 支持完整的Web页面，即整个页面的内容全部是H5实现，外部容器为Activity或Fragment。
+  * 支持局部的Web页面，即部分页面的内容是H5实现，可单独使用自定义的WebView或者嵌入Fragment使用。
+  * 定义了一套较为完整的交互协议，支持Native与JS的互相调用，典型的场景如H5页面点击跳转Native功能页面（支持传参）、JS唤起Native对话框或Toast等，同时Java也能调用JS函数。基于此套交互协议，基本能够满足日常App中Web开发需求。
+  * 避免了JS注入漏洞。
+  * 支持同一个Web页面中Http与Https混合的场景。
+  * 向业务逻辑层暴露接口，可根据需求定制WebViewClient与WebChromeClient。
+  * 对外提供接口，可根据需求控制缩放、Cookie管理、缓存管理、硬件加速等。
+  * 经过试验与摸索，兼容多种Android设备及版本。
+
+虽然后来出现了React Native，但由于学习成本及其Android版本的局限性，结合我们自己团队的人力资源原因，我们尚未在应用中正式使用。目前仍然以Hybrid开发为主，且其在整个应用中的比重越来越大，因此Hybrid框架是我们架构中重要的一个组成部分。
+
+消息调度中心
+
+前面业务数据流程的设计中，在视图层与数据代理层之间插入了一个消息调度器——MessageScheduler，MessageScheduler主要功能就是管理消息及消息调度。
+
+MessageScheduler核心原理是维护了一个哈希表，当收到视图层的数据请求时就使用唯一的key将发起者保存到哈希表中，以便稍后收到DataAgent的返回数据后，能够找到发起者。存储好消息发起者的信息后，即向DataAgent发送数据请求，多个数据请求是可以并行的，主要在于线程池的线程数控制机制。DataAgent返回数据之后，MessageScheduler根据唯一key找到初始的请求者，同样利用消息机制将请求结果返回给视图层，同时在哈希表中清除该元素。
+其示意图如下：
+
+![这里写图片描述](./image/20170223185913542)
+
+消息分发器
+
+既然有了消息调度机制，就需要消息分发器MessageDispatcher，来负责发送消息。
+
+MessageDispatcher本质上是利用了Android的消息机制来对业务需求进行封装和扩展。看过Android Framework层源码就会发现其实Android框架本身就有很多地方使用了消息机制来进行通信，Android消息机制可以在模块页面间、线程间通信，甚至可以在进程间使用Messenger通信（Messenger方式是利用了消息机制，当然还有其他进程间通信方式）。
+
+MessageDispatcher功能比较简单，支持两种方式：
+
+  * 点对点的通信，如两个页面之间，通信目标唯一，如上文提到的从视图层发送数据请求消息到消息调度器。
+  * 点对面的通信，类似于广播，也有点像EventBus，一条消息发出，凡是注册（或叫订阅）过的页面都能收到通知；也可以进一步通过Tag控制达到一对一发送。
+
+其示意图如下：
+
+![这里写图片描述](./image/20170223185927746)
+
+模块路由中心
+
+一个完整的应用中，免不了模块之间、功能页面之间的跳转。当然在需要的地方通过Intent可以实现跳转，但这不是一个好的方案，很明显不同模块或页面之间的耦合度增
+加了。而我们的原则是模块和页面之间尽可能解耦，于是设计了一个模块路由（Module Routing）中心，App中所有的页面跳转均由其控制。
+
+模块路由的核心原理是给功能页面进行唯一编码，编码的逻辑可以跟随产品版本定义到应用中，并保证兼容之前版本。这样就可以在应用的任何地方只需要向模块路由中心发送对应模块页面的编码即可，由模块路由负责打开目标页面。
+
+以下几点需要注意：
+
+  * 整个应用中的功能页编码都必须保证唯一
+  * 如打开某些功能页面除了具体编码外，还可能需要额外参数。如打开商品详情页，除了知道商品详情页的编码外，还需要商品ID，模块路由需要对附加参数提供支持。
+  * 模块路由支持打开Web页面，即Hybrid页面也支持上述特定编码，所以在Web页面上点击跳转Native页面使用的协议也是由模块路由支持的。
+
+使用模块路由的好处有：
+
+  * 大量减少应用中的跳转Intent
+  * 模块之间、页面之间解耦
+  * 适配变化，统一管理，修改方便
+
+其他
+
+日志系统
+
+在开发过程中，甚至运行过程中，日志都是很重要的一部分。当然Android提供了Log相关的API，但不建议这一行那一行地零星使用，否则如果想统一控制Tag或关闭Log时非常麻烦。建议对Log API进行简单封装或者使用现有第三方Log库，将Log功能独立出来，提供统一的调用接口、级别控制、开关控制，这样既方便调试也方便管理，同时也能为整个应用代码的清晰做出一点贡献。
+
+线上崩溃监控
+
+对线上应用的Crash监控是提高应用稳定性、优化应用性能的一个重要方法。我们构建了一个小型的全局监控系统，主要由以下功能特性：
+
+  * 对用户不可见，用户无感知
+  * 全局注册即可开启监控
+  * 捕捉线上崩溃，保存到本地文件
+  * 线上崩溃信息按一定策略上传服务器，上传后同时删除本地文件
+  * 崩溃信息主要包括Android设备信息（如手机型号、系统版本等）、App版本号、异常信息等
+
+服务器收到上传的线上崩溃信息后，也按一定策略通过邮件方式通知到开发者，以便开发者及时修复异常。线上崩溃监测系统虽然小而简单，但作用非常重要，利用线上崩溃反馈
+可以有效地提高应用的稳定性，建议在应用设计中务必给它留出一个位置。
+
+统计系统
+
+相信大部分应用都有统计分析后台，可以统计应用的日活、PV、UV或其他用户行为，也可能有一部分应用是使用的第三方统计功能，如友盟等。结合公司BI部门的统计需求，我们客户端自行设计了一套统计方案，用于Android与iOS两个客户端。之所以不用第三方统计，主要是因为我们无法根据需求自由定制且数据不在自家服务器，另一方面也有些许数据泄露的风险。
+
+基于客户端的统计系统主要包括三个方面的功能：
+
+  * 数据采集
+  * 数据存储
+  * 数据上传
+
+对于数据采集，主要针对统计部门的需求，如采集设备信息、定位信息、App启动时间次数、PV、UV、甚至用户行为，如点击、切换Tab、页面流向跟踪等。
+
+为了避免每次采集完数据后就即时上传，因此需要数据存储，将采集的统计数据暂存到本地，一般使用SQLite。然后采用一定策略进行上传，如数据累积到50条或者应用
+切换到后台时进行上传。
+
+对于数据上传，除了上传时机的选择策略外，还要遵循一定的结构字段，该结构可以根据数据统计部门的需求来定义。数据上传的流程同样可以使用之前的数据请求框架，只不过返回值可能为一个成功提示而已。
+
+基于上述功能，我们自定义的统计功能模块提供了方便的调用接口，并支持灵活扩展，目前可以完美支持日常的统计需求，调用也非常简单，只需要在需要统计的地方插入一行代码即可。
+
+域名劫持应对策略
+
+最近遇到域名劫持的问题，真是头疼，另一方面也说明我们的流量引起运营商注意了。目前主流的有几下几种方案：
+
+  * 向运营商投诉。此方法非常被动且效果不佳，完全掌控在运营商手中。
+  * 使用httpDNS。此方法使用http的方式直接获取最优IP，绕过localDNS的解析，可谓彻底解决了域名劫持。
+  * 先使用域名尝试，域名失败后再使用IP尝试。此方案属于容灾方案，并不能避免域名劫持。
+
+理论上讲第二种是最佳方案，但由于httpDNS为第三方服务，也无法保证效果，外加上付费及接入成本等因素，我们暂时采用了第三种容灾方案，主要实施逻辑如下：
+
+  1. 应用预先内置IP。
+  2. 每次启动应用时获取最新IP，并保存到应用本地。
+  3. 请求数据时，先使用域名走正常的逻辑，一旦遇到疑似劫持的问题后，使用本地的IP进行直连尝试。
+
+上述步骤其实是有漏洞的，比如启动时获取最新IP的接口如果被劫持了，那么就无法获取最新IP，假如刚好同时服务器IP也改变了，因此预先内置的IP已经失效，此时就彻底没办法了。不过上述两个条件同时满足的概率比较小，因此可以使用该方案解决很大一部分域名劫持问题。另外从服务端获取的IP，如果有多个的话，还需要增加一些策略，即考虑到负载均衡、访问速度、稳定性、网络运营商等因素，如何确定客户端拿到的哪一个是最优IP，当然这点可以优化，但首先能保证用户看到页面数据或许更加重要。
+
+上述应对域名劫持的策略本身并不能独立成一个模块，我们把它集成为网络框架的扩展。
+
+总结
+
+上文提到的是我们Android应用架构中的核心部分，可能你发现并没有什么花哨的、潮流的玩意儿，没有MVP，没有RxAndroid，没有插件化，也没有热修复…
+…但就是这样它仍然支撑起了上亿的用户量。世上没有完美的架构，只有符合自身业务的架构，上述架构还有很多缺点，我们也在有选择、有步骤地重构，而随着业务需求的扩展，架构也会不断演化，最后希望本文能给大家带来一点参考意义。
+
+
+
+<hr>
+
+
+
+
+####<p>原文出处：<a href='http://blog.csdn.net/guiying712/article/details/55213884' target='blank'>Android组件化项目详细实施方案</a></p>
+
+##1、Android组件化项目
+
+
+在Android项目组件化之前，我们的项目都是像下图那样，一个单一工程下，根据不同的业务分几个文件夹，把需要的第三方库依赖下就开始开发了，这样的代码耦合严重，牵一发而动全身，删除某处代码就会到处报错，如果不解决掉报错的地方，就没法编译打包，而且这样的代码只适合于个人开发，尤其团队开发合并代码的时候那真是一个麻烦，相信大家都会深有体会，如果项目很大的话，修改一点简单的页面都要重新编译，Android编译速度大家也都见识过，每次打包都很耗时，并且这样的代码想做单元测试也是无从下手。
+
+![这里写图片描述](./image/20170215185614643.png)
+
+所以Android项目组件化就迫在眉睫了，组件化的方向就是由一个项目工程拆分成若干个模块工程，由App主工程提供统一的入口，每个业务独立的模块共享项目的Co
+mmon依赖库。
+
+![这里写图片描述](./image/20170215185625737.png)
+
+##2、Android组件化项目实施步骤
+
+###1）第一步：配置可自动将组件在Application和Library属性之间切换的方法
+
+我们都知道Android Studio中的Module主要有两种属性，分别为 ：
+
+  * application属性，可以独立运行的Android程序，也就是我们的APP；
+
+> apply plugin: ‘com.android.application’
+
+  * library属性，不可以独立运行，一般是Android程序依赖的库文件；
+
+> apply plugin: ‘com.android.library’
+
+当我们在开发单独组件的时候，这个组件应该处于application模式，而当我们要将单独组件合并到主工程的时候，就需要将单独组从application模式改为library模式，也许你可以每次切换的时候都去build.gradle文件中去修改，但是你的项目要是有十几个组件的时候，你确定一个个去改？所以我们必须有一种能够动态切换组件模式的方法，做到一次修改，全局组件生效，这个问题就需要通过配置Gradle来解决了。
+
+在Android Studio项目的根目录下有一个**gradle.properties** 文件，这个文件主要用来配置Gradle settings的，例如JVM参数等，想要了解这个文件的更多作用请查看<http://www.gradle.org/docs/current/userguide/build_en
+vironment.html>  ，我们今天需要关注的是这个文件的一个特点：我们在**gradle.properties**中配置的字段都可以在**build.gradle**文件中直接读取出来，不用任何多余的代码。
+
+现在我们在**gradle.properties**添加了一行代码，定义一个属性isModule（是否是组件开发模式，true为是，false为否）：
+
+    
+    
+    ##每次更改“isModule”的值后，需要点击 "Sync Project" 按钮
+    isModule=true
+    
+
+然后我们在组件的**build.gradle**文件中读出这行代码：
+
+    
+    
+    if (isModule.toBoolean()) {
+        apply plugin: 'com.android.application'
+    } else {
+        apply plugin: 'com.android.library'
+    }
+    
+
+因为**gradle.properties**中的数据类型都是String类型，而这里我们需要的是boolean值，所以这里要将String转换为boolean值，如果是‘组件开发模式”就将这个组件应用为application模式，如果不是就将这个组件应用为library模式，也就是一个库。  
+这样我们的第一个问题就解决了，首先我们在**gradle.properties**中定义一个属性isModule，然后在每个组件的**build.gradle**中把这个属性读取出来，每当我们需要从组件开发模式和APP整体开发模式转换时，只需要修改“isModule”的值即可，当然注释中也说了修改为这个属性值后，要点击AndroidStudio上的 “Sync Project”按钮同步下整个项目才能生效。
+
+###2）第二步：解决组件AndroidManifest和主工程AndroidManifest合并的问题
+
+每个组件是由不同的成员单独开发的，这个时候组件就是一个独立的APP，那么这个组件就会有自己的“AndroidManifest.xml”，但是Android程序只有一个“AndroidManifest.xml”，当我们要把组件作为Library合并到主工程的时候，组件的“AndroidManifest.xml”和主工程的“AndroidManifest.xml”就会产生冲突，因为他们都有自己实现application类以及一些属性，还有自己的MAIN
+Activity，如果直接把张表合并到一起势必产生冲突。
+
+解决思路就是：每个组件维护两张表，一张用于组件单独开发时使用，另一张用于合并到主工程的注册表中，每当增加一个Android系统的四大组件时都要同时给两张表中
+添加。
+
+我们在上一节讲了可自动在组件的Application和Library属性之间切换的方法，有了这种方法，维护两张表就很方便了，首先在组件的main文件夹（和java文件夹平级）下创建两个文件夹，如下图：
+
+![这里写图片描述](./image/20170215185644456)
+
+然后在每个组件的_*build.gradle_中添加如下的代码：
+
+    
+    
+    sourceSets {
+        main {
+            if (isModule.toBoolean()) {
+                manifest.srcFile 'src/main/debug/AndroidManifest.xml'
+            } else {
+                manifest.srcFile 'src/main/release/AndroidManifest.xml'
+                //release模式下排除debug文件夹中的所有Java文件
+                java {
+                    exclude 'debug/**'
+                }
+            }
+        }
+    }
+    
+
+这些代码的意思是：当在组件开发模式下，组件的注册表文件使用debug文件夹下的，其他情况使用release文件夹下的注册表文件；那么这两张表的区别在哪里呢？
+
+下面的表示debug文件夹中的：
+
+    
+    
+    <application
+        android:name="debug.CarApplication"
+        android:icon="@mipmap/ic_car_launcher"
+        android:label="@string/car_name"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme">
+        <activity
+            android:name=".query.QueryActivity"
+            android:configChanges="orientation|screenSize|keyboard"
+            android:screenOrientation="portrait"
+            android:windowSoftInputMode="adjustPan|stateHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name=".scan.ScanActivity"
+            android:screenOrientation="portrait" />
+    </application>
+    
+
+下面的表是release文件夹中的：
+
+    
+    
+     <application android:theme="@style/AppTheme">
+        <activity
+            android:name=".query.QueryActivity"
+            android:configChanges="orientation|screenSize|keyboard"
+            android:screenOrientation="portrait"
+            android:theme="@style/AppTheme"
+            android:windowSoftInputMode="adjustPan|stateHidden" />
+        <activity
+            android:name=".scan.ScanActivity"
+            android:screenOrientation="portrait" />
+    </application>
+    
+
+  1. debug文件夹中注册表的标签中指定了具体application类，而release文件夹中的则没有，
+  2. debug文件夹中注册表的标签中添加一些application属性，而release文件夹中的则什么都没有添加；
+  3. debug文件夹中的注册表指定QueryActivity为MAIN Activity，也就是要启动的 Activity，而release文件夹中的则没有；
+
+###3）第三步：解决组件和主工程的Application冲突问题以及组件单独开发初始化（共享）数据问题
+
+当android程序启动时，android系统会为每个程序创建一个Application类的对象，并且只创建一个，application对象的生命周期是整个程序中最长的，它的生命周期就等于这个程序的生命周期。在默认情况下应用系统会自动生成Application 对象，但是如果我们自定义了Application，那就需要告知系统，实例化的时候，是实例化我们自定义的，而非默认的。但是我们在组件化开发的时候每一个组件可能都会有一个自己的Application类的对象，如果我们在自己的组件中开发时需要获取全局的Context，一般都会直接获取application对象，但是当所有组件要打包合并在一起的时候就会出现问题，因为最后程序只有一个Application，我们组件中自己定义的Application肯定没法使用，总不能每次打包的时候都把全局的application改一遍吧？
+
+解决思路：首先创建一个叫做Common的Library，这个Common库中主要包含整个项目用到公共基类、工具类、自定义View等，例如BaseActivity、BaseFragment、BaseApplication等，并且我们的每一个组件都要依赖这个Common库，现在主要讲Common库中的BaseApplication怎么定义，下面是BaseApplication中的部分代码：
+
+    
+    
+        public class BaseApplication extends Application {
+            private static BaseApplication sInstance;
+            public static Context context;
+            public static BaseApplication getIns() {
+                return sInstance;
+            }
+            @Override
+            public void onCreate() {
+                super.onCreate();
+                sInstance = this;
+                context = this.getApplicationContext();
+                if (isAppDebug(context)) {
+                    //只有debug模式才会打印日志
+                    Logger.init("Demo").logLevel(LogLevel.FULL);
+                } else {
+                    Logger.init("Demo").logLevel(LogLevel.NONE);
+                }
+            }
+        }
+    
+
+因为每个组件都依赖了Common库，所以每个组件都能够获取到BaseApplication.context，但是Android程序默认的是系统自己的Appl
+ication这个类，要想使用自己的就要继承Application并且在AndroidManifest.xml中声明，因此我们先在自己的组件中创建一个组件A
+pplication并且继承于BaseApplication，然后在debug文件中的AndroidManifest.xml中声明：
+
+    
+    
+    public class CarApplication extends BaseApplication {
+        @Override
+        public void onCreate() {
+            super.onCreate();
+            login();
+        }
+    }
+    
+
+这样我们就可以在组件中使用全局的Context：BaseApplication.context了，但是还有一个问题，我们在自己的组件中定义了CarApplication，那么组件合并到主工程后，主工程也有自己的Application，这样又冲突了，其实这个问题第二节的代码就已经写出来了，我们只是在组件开发时才使用CarApplication，那么我们在合并到主工程的时候把这个代码排除掉不就行了嘛，直接上图：
+
+![这里写图片描述](./image/20170215185704571.png)
+
+我们在java文件夹下再建一个debug文件夹，把组件自己的application放在这个文件夹中，然后在**build.gradle**添加这行代码：
+
+![这里写图片描述](./image/20170215185225455.png)
+
+这样在合并到主项目时debug文件夹下的java文件就全部被排除了。并且你可以在组件的Application中做一些初始化的操作，比如登陆，然后把数据保存下
+来，供组件使用。
+
+###4）第四步：解决library重复依赖以及Sdk和依赖的第三方库版本号控制问题
+
+重复依赖问题其实在开发中经常会遇到，比如你 compile 了一个A，然后在这个库里面又 compile 了一个B，然后你的工程中又 compile了一个同样的B，就依赖了两次。  
+默认情况下，如果是 aar 依赖，gradle 会自动帮我们找出新版本的库而抛弃旧版本的重复依赖。但是如果你使用的是 project 依赖，gradle并不会去去重，最后打包就会出现代码中有重复的类了。
+
+Library重复依赖的解决办法就是给整个工程提供统一的依赖第三方库的入口，在上一节讲解决Application冲突问题时我们建了一个Common库，这个库还有一个作用就是用来为整个项目提供统一的依赖第三方库的入口，我们把项目常用或者必须用到的库全部在Common库的**build.gradle**中依赖进来，例如Android support Library、网络库、图片加载库等，又因为每个组件都要依赖这个Common库，所以的**build.gradle**中就不在需要依赖任何其他库了，这样我们就有了统一的依赖第三方库的入口，添加、删除和升级库文件都只需要在Common库中去处理就好了。
+
+下面是组件**build.gradle**的依赖配置：
+
+    
+    
+    dependencies {
+        compile fileTree(dir: 'libs', include: ['*.jar'])
+        compile project(':common')
+    }
+    
+
+当组件合并到主项目的时候，其实就是将组件打包成**arr包**，所以主工程中在组件开发模式下是还是要单独依赖Common库，等到合并的时候在去依赖其他组件，
+Common库就不用依赖了，下面是主工程**build.gradle**的依赖配置：
+
+    
+    
+    dependencies {
+        compile fileTree(dir: 'libs', include: ['*.jar'])
+        if (!isModule.toBoolean()) {
+            compile project(':alert')
+            compile project(':car')
+        } else {
+            compile project(':common')
+        }
+    }
+    
+
+另外一个问题就是我们每个组件的**build.gradle**中都要配置一些属性，例如compileSdkVersion、buildToolsVersion还有defaultConfig等，如果我们需要修改项目的compileSdkVersion版本号，那就麻烦了，那么多组的**build.gradle**，每个都要去找到修改一遍，想想都头疼，所以我们要把这些**build.gradle**中都要配置的属性统一起来，类似于java中的静态常量，一处修改到处生效。首先我们在**项目（不是组件的）**的**build.gradle**中定义如下代码：
+
+    
+    
+    // Define versions in a single place
+    ext {
+    // Sdk and tools
+    buildToolsVersion = localBuildToolsVersion
+    compileSdkVersion = 23
+    minSdkVersion = 16
+    targetSdkVersion = 23
+    //时间：2017.2.13；每次修改版本号都要添加修改时间
+    versionCode = 1
+    versionName = "1.0"
+    javaVersion = JavaVersion.VERSION_1_8
+    // App dependencies version
+    supportLibraryVersion = "23.2.1"
+    retrofitVersion = "2.1.0"
+    glideVersion = "3.7.0"
+    loggerVersion = "1.15"
+    eventbusVersion = "3.0.0"
+    gsonVersion = "2.8.0"
+    }
+    
+
+然后在**组件**的**build.gradle**中引用这些值，下面贴出的是Common库的**build.gradle**代码会和组件的**build.gradle**有些许差异：
+
+    
+    
+    apply plugin: 'com.android.library'
+    android {
+        compileSdkVersion rootProject.ext.compileSdkVersion
+        buildToolsVersion rootProject.ext.buildToolsVersion
+    defaultConfig {
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode rootProject.ext.versionCode
+        versionName rootProject.ext.versionName
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            }
+        }
+    }
+    dependencies {
+        compile fileTree(dir: 'libs', include: ['*.jar'])
+        //Android Support
+        compile "com.android.support:appcompat-v7:$rootProject.supportLibraryVersion"
+        compile "com.android.support:design:$rootProject.supportLibraryVersion"
+        compile "com.android.support:percent:$rootProject.supportLibraryVersion"
+        //网络请求相关
+        compile "com.squareup.retrofit2:retrofit:$rootProject.retrofitVersion"
+        compile "com.squareup.retrofit2:retrofit-mock:$rootProject.retrofitVersion"
+        compile "com.github.franmontiel:PersistentCookieJar:$rootProject.cookieVersion"
+        //稳定的
+        compile "com.github.bumptech.glide:glide:$rootProject.glideVersion"
+        compile "com.orhanobut:logger:$rootProject.loggerVersion"
+        compile "org.greenrobot:eventbus:$rootProject.eventbusVersion"
+        compile "com.google.code.gson:gson:$rootProject.gsonVersion"
+        //不稳定的
+        compile "com.github.mzule.activityrouter:activityrouter:$rootProject.routerVersion"
+        compile "com.jude:easyrecyclerview:$rootProject.easyRecyclerVersion"
+    }
+    
+
+这样我们修改compileSdkVersion、buildToolsVersion、defaultConfig的值或者依赖库文件的版本号都可以直接在**项目**的**build.gradle**文件中直接修改了，修改完后整个项目也就都改过来了。
+
+###5）第五步：跨Module跳转问题，也是我们最重要的一步了
+
+在组件化开发的时候，我们不能在使用显示调用来跳转页面了，因为我们组件化的目的之一就是解决模块间的强依赖问题，组件跟组件之间完全没有任何依赖，假如现在我从A组件跳转到B组件，并且要携带参数跳转，这时候怎么办呢？而且组件这么多怎么管理也是个问题，这时候就需要引入“路由”的概念了。
+
+我在项目中使用了一个开源的“路由”库，github地址请点击：[ActivityRouter](https://github.com/mzule/ActivityRouter)，主页里会有详细的介绍，大家可以去了解一下。另外阿里巴巴也开源了一个组件路由，github地址请点击：[ARouter](https://github.com/alibaba/ARouter)；这两个都是现成拿来就能用的，当然有人可能比较好奇组件Router是什么原理，自己怎么开发，这里有一
+位作者写出了详细的教程，大家可以去学习下：[Android路由实现](http://blog.csdn.net/qibin0506/article/details/53373412?utm_source=tuicool&utm_medium=referral)。
+
+接下来我们就讲怎么将路由应用到我们的组件化项目中，首先我们要在**项目（不是组件的）**的**build.gradle**中依赖下面的代码：
+
+    
+    
+    buildscript {
+      dependencies {
+            classpath 'com.neenbedankt.gradle.plugins:android-apt:1.8'
+      }
+    }
+    
+
+为什么要使用**android-apt**呢？大家可以看下面的解释，或者自己去搜索：
+
+![这里写图片描述](./image/20170215185539804.png)
+
+然后在每个**组件**的**build.gradle**中加入下面的代码：
+
+    
+    
+    apply plugin: 'com.neenbedankt.android-apt'
+    dependencies {
+        compile 'com.github.mzule.activityrouter:activityrouter:1.2.2'
+        apt 'com.github.mzule.activityrouter:compiler:1.1.7'
+    }
+    
+
+接下来是在**主工程**的AndroidManifest.xml配置
+
+    
+    
+    <activity
+    android:name="com.github.mzule.activityrouter.router.RouterActivity"
+        android:theme="@android:style/Theme.NoDisplay">
+        <intent-filter>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.DEFAULT" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="demo" /><!--改成自己的scheme-->
+        </intent-filter>
+    </activity>
+    
+
+接下来我们需要在每个组件的java目录下，声明这个组件，向下面的代码那样（声明了两个组件）：
+
+    
+    
+    @Module("App")
+    public class AppModule {
+    }
+    @Module("Car")
+    public class Car { 
+    }
+    
+
+然后在主工程的Application 中声明需要添加到主工程中的所有组件：
+
+    
+    
+    @Modules({"App", "Car"})
+    public class DemoApplication extends BaseApplication {
+        @Override
+        public void onCreate() {
+            super.onCreate();
+        }
+    }
+    
+
+到这里我们的组件和主工程之间的关系就建立起来了，组件的声明以及添加和删除就都已经解决了。接下来就是组件之间Activity的跳转吗，前面我们做了那么多都是在
+为Activity的跳转做准备。
+
+首先我们在需要跳转的目标Activity上添加注解：
+
+    
+    
+    @Router("main")
+    public class MainActivity extends Activity {
+        ...
+    }
+    
+
+这样就可以通过 **demo://main**来打开MainActivity了。
+
+这一步就算讲完了，至于Router更多进阶功能就要靠大家自己去：[ActivityRouter](https://github.com/mzule/ActivityRouter) 学习了。
+
+###6）Module之间的通信问题
+
+如果在B组件中要通知A组件刷新列表，就要想办法解决组件间的通信问题，这个只要使用EventBus就能解决，并不是什么复杂问题。
+
+###7）资源名冲突问题
+
+因为我们拆分出了很多组件，在合并到主工程的时候就有可能会出现资源名冲突问题，比如A组件和B组件都定义了同一个资源名。这个问题一般很很好解决，我们只需要在组件的**build.gradle**中添加这样的代码：
+
+    
+    
+    resourcePrefix "组件名_"
+    
+
+但是设置了这个属性后有个问题，所有的资源名必须以指定的字符串做前缀，否则会报错，而且resourcePrefix这个值只能限定xml里面的资源，并不能限定图片资源，所有图片资源仍然需要手动去修改资源名。所以我并不推荐使用这种方法来解决资源名冲突，我们项目中解决办法是增加资源命名规约，只要遵守这个命名规约就能规避
+资源名冲突问题。
+
+##3、Android组件化项目结语
+
+
+到这里一个简单的组件化项目就搭建出来了，组件化相比于单一工程优势是显而易见的：  
+1\. 加快编译速度，提高开发效率  
+2\. 自由选择开发框架（MVC /MVP / MVVM /）  
+3\. 方便做单元测试  
+4\. 代码架构更加清晰，降低项目的维护难度  
+5\. 适合于团队开发
+
+最后贴出**Android组件化Demo**地址：[请用鼠标猛击这里](https://github.com/guiying712/AndroidModulePattern)
+

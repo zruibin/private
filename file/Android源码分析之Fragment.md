@@ -1,0 +1,396 @@
+ 
+<!--BEGIN_DATA
+{
+    "create_date": "2016-12-28 17:30", 
+    "modify_date": "2016-12-28 17:30", 
+    "is_top": "0", 
+    "summary": "Android源码分析之Fragment", 
+    "tags": "Android", 
+    "file_name": "Android源码分析之Fragment.md"
+}
+END_DATA-->
+
+####<p>原文出处：<a href='http://www.toutiao.com/i6360248874912711169/' target='blank'>Android源码分析之Fragment的生命周期管理</a></p>
+
+##Android源码分析之Fragment的生命周期管理
+
+
+Fragment最早引入是在给平板的Android 3.0系统，用来解决Pad上UI的模块化。随后逐渐推广到Phone UI上，3.0之前的版本则通过Support包引入。Fragment本质上是带生命周期管理的View的Wrapper，解耦了Activity和View，一方面Activity可以不用再处理View的逻辑；另一方面View也可以只专注渲染，不用关心Controller逻辑。Fragment就是他们之间的桥梁，使得UI模块可以方便的被各个Activity复用。
+
+Fragment对开发者已经不再陌生，本文也并不打算介绍Fragment的api使用，而是分析Fragment的源码，从源码的角度来对Fragment的使用有更深刻的理解。
+
+Fragment相关的源码存放在framework/base/core/Java/android/app/下，有如下几个重要的类：
+
+一，Fragment
+
+Fragment基本类，生命周期如下：
+
+![Android源码分析之Fragment的生命周期管理](./image/127e0000b4ba57f1c58f)
+
+Fragment的生命周期和Activity是对应的。
+
+二，FragmentManager
+
+FragmentManager是Fragment生命周期管理的核心类，确切的说，他是个抽象类，具体的实现是FragmentManagerImpl，所有的Fragment的管理：添加、删除、显示、隐藏等都由FragmentManagerImpl完成。
+
+三，FragmentController
+
+Activity拥有FragmentController的实例，通过FragmentController来分发Activity的生命周期事件，而FragmentController只是给外部的FragmentManager接口的wrapper，实际的实现还是由FragmentManager来完成。
+
+四，FragmentTransaction
+
+FragmentTransaction是一组Fragment操作集合，由FragmentManager调用beginTransaction来获得一个FragmentTransaction，之后可以执行add/replace/remove等Fragment操作，在调用Transaction的commit之前，这些
+操作还并未生效。FragmentTransaction之所以被称为事务，是因为它执行的FragmentOp集合是可以回退的，后面我们做源码分析的时候会详细分析。FragmentTransaction是个抽象类，实现类是BackStackRecord。
+
+Fragment本质系列文章将从如下几个角度，有针对性的对Fragment进行源码分析，分析Fragment本质，从而达到深入浅出的目的。
+
+一，Fragment的生命周期管理
+
+二，Fragment的View管理
+
+三，FragmentTransaction的事务和BackStack管理
+
+四，Fragment的状态保存和恢复
+
+本文先分析Fragment的生命周期管理：
+
+Fragment有如下几种状态和其生命周期对应，状态包括：
+
+![Android源码分析之Fragment的生命周期管理](./image/127c00002cc60bacf7f2)
+
+FragmentManager的mCurState状态是Activity的生命周期是保持一致的，而每个Fragment里有mState字段表示自己单独的状态，会通过moveToState来和FragmentManager的mCurState状态保持同步。为什么这样设计呢？原因是Fragment是可以动态add的，添加的时候，Activity的可以在任何的阶段，而FragmentManager是静态的，从Activity创建的时候就存在，因此就用FragmentManager来和Activity保持同步，而Fragment add之后将会和其同步状态。下面的这些dispatch函数定义在FragmentManager里，Activity在其生命周期里通过FragmentController调用这些方法，完成Activity和FragmentManager之间的状态同步：
+
+![Android源码分析之Fragment的生命周期管理](./image/127a0006ed15a2079b80)
+
+Activity的onCreate调用dispatchCreate，dispatchActivityCreated方法，这时候FragmentManager的状态就切换成ACTIVITY_CREATED，Activity的onStart执行dispatchStart把状态切换成STARTED，onResume切换成RESUMED状态，onPause切换STARTED，onStop切换成STOPPED，onDestroy就切换到了最初的INITIALIZING。这样FragmentManager就保证了和Activity的生命周期保持一致。
+
+FragmentManager的状态是静态的还比较简单，接下来就得分析Fragment的状态切换了。Fragment刚new出来时的初始状态mState是INITIALIZING，状态切换是由FragmentManager的moveToState函数完成。Fragment状态切换是和Fragment的几个操作分不开的，我们先对Fragment的基本操作进行分析，再对moveToState方法做分析。
+
+我们总结一下FragmentTransaction的几个基本操作：
+
+1， add
+
+FragmentTransaction的事务实现细节，我们放到后面的章节介绍，只需知道add的操作最后调用FragmentManager的addFragment方法来增加Fragment
+
+![Android源码分析之Fragment的生命周期管理](./image/12800001a7fb95b55aff)
+
+首先makeActive来激活Fragment，而激活Fragment要做的事就是把Fragment插入到mActive数组里，mActive是FragmentManager的一个字段，用来保存active的Fragment列表。makeActive只有addFragment才会调用，所以其本质是add过的Fr
+agment。mActive设计的目的主要是为了保存和恢复状态，保存所有mActive的所有Fragment，当进程被杀后恢复的时候，可以恢复出之前的所有Fragment，再接着对之前的BackStack的所有FragmentTransaction事务做redo，从而恢复进程被杀之前的状态 。由于Fragment的恢复是基于BackStack的，所以一个Fragment是否是Active的依据是其是否在BackStack里，也就是mBackStackNesting大于0，Active的Fragment在removeFragment的时候，只会将其从mAdded列表里删除，而不会从mActive删除，因为在做状态恢复的时候会要用这个Fragment，这也就是mActive和mAdded的区别，两者是不能等价的。如果Fragment不是active了，removeFragment就会调用makeInactive移除Fragment，另外Activity的onDestroy调用FragmentManager的dispatchDestroy时也会makeInactive把Fragment从mActive里删除（后续分析moveToState的时候会看到）。下面我们看看makeActive和makeInactive的定义加深一下印象。
+
+![Android源码分析之Fragment的生命周期管理](./image/12790006e593c2a28fd2)
+
+再回到addFragment，Fragment被makeActive之后就加入mAdded列表，最后根据moveToStateNow的值决定是否马上做状态切换moveToState（从源码上分析，只有从layout里的Fragment被onCreateView创建的时候，调用moveToState方法时才会将moveToStateNow置true，其他的时候比如FragmentTransaction执行事务时，会在所有op执行完之后，统一moveToStateNow），moveToSave会将Fragment的状态和FragmentManager的状态同步，同步的时候就会调用Fragment的生命周期函数，具体的分析我们留到分析moveToSave函数的时候。
+
+2，replace
+
+replace是FragmentTransaction的接口，FragmentManager没有与其对应的方法，这是FragmentTransaction内部的操作。replace的两参数的方法replace(int containerViewId, Fragment fragment)，表示要替换contai
+nerViewId下所有的Fragment。所谓的替换操作，就是把containerId等于containerViewId的所有Fragment都removeFragment。然后将第二个参数fragment调用addFragment加入。三参数的方法replace(int containerViewId, Fragment fragment, Stringtag)和两参数的差不多，设置替换后的Fragment的tag，可用户后续通过tag从FragmentManager里查找到Fragment。
+
+![Android源码分析之Fragment的生命周期管理](./image/11f900078e19388ce99a)
+
+doAddOp方法是把Op加入双向链表的表尾（mHead是表头，mTail是表尾），FragmentTransaction的是个事务，意味着可以回退，只要调用了addToBackStack方法，那么每次执行完Op之后就会调用FragmentManager的addBackStackState方法，把自己加到BackStack里，这样按back键后，就会一层一层的undo，而undo的实现就在FragmentTransaction的popFromBackStack里，详细实现我们放到后面的FragmentTransaction的BackStack管理里分析。我们回到replace操作，其执行在run方法里，我们摘录rep
+lace部分：
+
+![Android源码分析之Fragment的生命周期管理](./image/127a0006ee7ed43c1c08)
+
+从以上代码可知，replace的语义是查找mAdded列表，将containerId对应的所有Fragment都加入removed列表，并增加其mBackStackNesting，mBackStackNesting表示Fragment在back stack里的层数，越大就越接近栈顶，接着调用removeFragment将这些Fragment移除，之后将待替换的Fragment加到FragmentManager里。在这里，mBackStackNesting++的目的在于避免removeFragment的时候将其从mActive列表删除，因为后续popFromBackStack的时候还会undo，将这些Fragment加回来，如果mActive里没有了，影响的就是进程被杀死后，状态恢复没法完全还原，这里的mBackStackNesting+1会在这个BackStackRecord被popFromBackStack的时候，调用bumpBackStackNesting(-1)给减掉。这种在mActive列表里，而不在mAdded列
+表里的Fragment的状态只能是CREATED，这个状态的Fragment不会将其View加到UI的ViewTree里，所以用户是不可见的。
+
+![Android源码分析之Fragment的生命周期管理](./image/127d0006e3279abae7fe)
+
+上面是popFromBackStack的replace的undo操作，removed列表里之前remove了的Fragment就会被重新addFragment。
+
+3， remove
+
+removeFragment和addFragment是成对的，我们接着分析一下removeFragment：
+
+![Android源码分析之Fragment的生命周期管理](./image/127a0006eee20f9c27c0)
+
+正如之前所说，removeFragment的时候，会看Fragment是否还在BackStack里，如果还在，那么仅仅是从mAdded列表里删除，mActive列表里的还继续保留，并将Fragment的状态置为CREATED。
+
+4，show
+
+showFragment比较简单，如果当前是hidden状态，就把fragment的View设置VISIBLE，并不影响Fragment的生命周期，所以不需要moveToState。
+
+![Android源码分析之Fragment的生命周期管理](./image/11f9000750d2faff964b)
+
+5，hide
+
+hideFragment和showFragment刚好对称，将Fragment的View设成GONE。不影响生命周期，也不需要moveToState。
+
+![Android源码分析之Fragment的生命周期管理](./image/128000016bec63e24bda)
+
+6, attach
+
+attachFragment将detach的Fragment重新加入到mAdded列表，和addFragment区别是，attachFragment只有在Fragment被detach之后才有意义，并且不需要makeActive，因为之前addFragment的时候已经做过了。
+
+![Android源码分析之Fragment的生命周期管理](./image/12790006a98599e514e3)
+
+7, detach
+
+detachFragment会将Fragment从mAdded列表删除，并且把Fragment的状态置为CREATED，Fragment被detach的意义是指当前还在mActive列表里，UI并不显示出来，处于就绪状态，attach之后就会通过moveToState方法，使其的状态和FragmentManager的当前状态保持一致。
+  
+  
+![Android源码分析之Fragment的生命周期管理](./image/127d0006e4e99bacca4b)
+
+Fragment的几个基本操作就分析完了，相信大家已经有比较深刻的了解了。总结一下，除了removeFragment和attachFragment会将Fragment的状态改为CREATED或者INITIALIZING，其他的操作都只是将Fragment的状态和FragmentManager保持一致。
+
+再回到我们之前打算分析的Fragment的状态切换，Fragment在new出来时的状态是INITIALIZING，之后被加到FragmentManager之后，就和FragmentManager的状态一样了，直到被调用了removeFragment或者attachFragment，这时候Fragment就不再和FragmentManager一样，而是进入就绪状态（CREATED）或者初始化状态（INITIALIZING）。这两种状态的Fragment都UI不可见的，区别在于，前者还在Back Stack里，还可能会通过back键把当前的栈出栈而恢复，而后者则已经移除了BackStack，只能通过addFragment再加入了。
+
+最后我们分析重要方法moveToState，在这个方法里完成Fragment的状态切换，并完成Fragment的生命周期的调用。moveToState的方法比较长，我们分几个阶段来分析：
+
+1，预处理阶段
+
+分析见注释
+
+![Android源码分析之Fragment的生命周期管理](./image/127d0006ad1c7e3a67cb)
+
+2，Fragment的状态切换
+
+Fragment的状态切换有两个方向：一个是提升、一个是降低，我们从Fragment的状态位的定义可以看到，State值越大，表示Fragment越活跃，RESUMED=5表示在前台，INITIALIZING=0表示已经被删除。下面代码片段是moveToState的状态切换的整个框架，有意思的一点是switch的case是没有break的。当状态提升时，如果case到当前状态是INITIALIZING，而目标状态是STARTED，那么意味着将会走遍INITIALI
+ZING，CREATED，ACTIVITY_CREATED，STOPPED，STARTED几个case，正是有了这种机制，使得在每个case只需要处理和他相邻的状态提升逻辑，比如INITIALIZING处理的是INITIALIZING->CREATED的状态切换，之后我们就逐个看每个case的状态切换。同理对于状态的降低也是一样的方式，只不过case的顺序是刚好倒过来。
+
+![Android源码分析之Fragment的生命周期管理](./image/12800001abbf17fc4a75)
+
+3，INITIALIZING提升到CREATED或更高这个阶段包含Fragment的onAttach和onCreate生命周期，如果Fragment在layout文件里定义，还将走到onCreateView生命周期。Fragment的View管理，我们后面专门介绍，这里就不分析了。
+
+![Android源码分析之Fragment的生命周期管理](./image/127d0006e601c442a229)
+
+4，CREATE提升到ACTIVITY_CREATED或者更高
+
+这个阶段执行onCreateView，onActivityCreated生命周期
+
+![Android源码分析之Fragment的生命周期管理](./image/11f9000791d98a5a0009)
+
+5，ACTIVITY_CREATED或者STOPPED提升至STARTED状态或者更高
+
+执行onStart的生命周期
+
+![Android源码分析之Fragment的生命周期管理](./image/127a0006b344459111e3)
+
+6，STARTED状态提升至RESUMED
+
+执行onResume的生命周期
+
+![Android源码分析之Fragment的生命周期管理](./image/127d0006e724b958e743)
+
+7，降低状态是提升的逆过程，我们看RESUMED->STARTED->STOPPED的状态转化如下，分别执行onPause和onStop的生命周期
+
+![Android源码分析之Fragment的生命周期管理](./image/127d0006e75ee7dba64f)
+
+8，STOPPED或ACTIVITY_CREATED -> CREATED状态
+
+切换到CREATED状态时，就会把View从container里删除，所以CREATED状态的Fragment是没有UI的
+
+![Android源码分析之Fragment的生命周期管理](./image/12800001733d0d410415)
+
+9，CREATED-> INITIALIZING
+
+这个阶段执行onDestroy和onDetach的生命周期
+
+![Android源码分析之Fragment的生命周期管理](./image/127d0006e7bc9ad17b70)
+
+到此，整个Fragment的生命周期的管理就介绍完了，下篇文章我们将介绍Fragment余下的几个部分的分析。
+
+
+
+<hr>
+
+
+
+####<p>原文出处：<a href='http://www.toutiao.com/i6360980700195193346/' target='blank'>Android源码分析之Fragment的View管理</a></p>
+
+##Android源码分析之Fragment的View管理
+
+
+
+Fragment系列一共四篇，第一篇文章 [Android源码分析之Fragment的生命周期管理](http://m.toutiao.com/i6360248874912711169/?group_id=6266582227964297473&group_flags=0)我们介绍了Fragment的生命周期，对Fragment整个运行机制都会比较清楚了，这一篇我们分析Fragment的View管理。
+
+一，Fragment的两种定义方式
+
+1，在layout xml里通过fragment标签定义，这种方式定义的fragment是由LayoutInflater在解析xml文件的时候创建。在Activity的onCreate方法里，会通过setContentView方法设置layoutid，继而调用LayoutInflater的inflate方法解析xml。LayoutInflater在解析xml的时候，就会实例化出Fragment。
+
+2，Fragment还可以通过代码动态的new Fragment实例，通过FragmentTransaction的add/replace方法随时添加，上篇文章已经介绍过FragmentManager的addFragment流程。
+
+二，Fragment的fragmentId、containerId、tag的意义
+
+fragmentId和tag都是用来标识fragment自身的，containerId是fragment的View的父控件的id，是View的容器。静态和动态两种Fragment的containerId、fragmentId、tag的生成方式也是不一样的。
+
+1，代码动态创建的Fragment
+
+FragmentTransaction的add和replace都有containerViewId和tag参数，containerViewId就是fragment的containerId，并且fragmentId也同时会设置成和containerId一样。从这点也可以看出如果往同一个ViewGroup里add两个
+不同的Fragment，那么他们的fragmentId是一样的。fragmentId一样的话，会影响FragmentManager的findFragmentById的结果，这个方法只会返回第一个fragmentId等于目标id的Fragment。tag和fragmentId一样，都是用来标识Fragment自身，如果两个fragment的tag相同，则会影响findFragmentByTag的结果。
+
+2，Layout xml里定义的Fragment
+
+Layout xml方式的fragment的实例化流程是： Activity.onCreate -> Activity.setContentView ->PhoneWindow.setContentView ->
+LayouInflater.inflate->LayoutInflater.createViewFromTag ->
+Activity.onCreateView -> FragmentManager.onCreateView，因此在Activity的onCreate的时候会开始Fragment的创建。我们看看FragmentManager的onCreateView方法：
+
+![Android源码分析之Fragment的View管理](./image/12820002f1a3ec7a913c)
+
+FragmentManager的onCreateView只会处理fragment的tag。系统定义了Fragment的style，这个style里包含了三个属性attr： android:name，android:tag，android:id。android:name指定fragment的类名，Layout x
+ml定义的fragment里，优先使用class属性作为类名，没有的话就看android:name属性，后面实例化的时候会使用这个fname作为类名。android:id是指定的fragmentId，android:tag是指定的fragment的tag，Fragment的mContainerId则会使用fragment标签所在的ViewGroup的id作为其值。我们后续可以看到，View将会被add到ViewGroup里，而这个ViewGroup则是通过findViewById(mContainerId)获得，所以不要随意的指定一个无效的containerId，这样后面在找ViewGroup的时候会抛异常。
+
+接着就是实例化Fragment了，优先会通过id和tag从mActive列表里查找是否有已经实例化的fragment，这个逻辑主要是进程被杀后，恢复Fragment状态的时候会走到。case就是当进程被杀再启动之后，由于被杀之前FragmentManager会将其内部的fragment列表的状态都save，等下次启动的时候，在调用Fragment的dispatchCreate之前，会调用restoreAllState方法将之前save的mActive等fragment队列都恢复。之后Layout xml定义的fragment再onCreateView的时候就不用再创建新的实例了，所以才会先通过findFragmentByTag和findFragmentById先查找fragment实例。不过一般情况下，这里都是查不到的，就会调用Fragment.instantiate实例化Fragment，并且将mFromLayout设为true，表明是从Layout xml里定义的。之后fragmentId，containerId，tag都被赋值，addFragment到FragmentManager之后，就完成Fragment的实例化。
+
+三，Fragment的View创建
+
+1，Layout xml定义的Fragment
+
+Layout xml定义的Fragment的实例化时机是Activity onCreate的调用FragmentManager的onCreateView，我们接着上面的源码分析。当Fragment被实例化，并且addFragment加入之后，接着就会调用moveToState将Fragment的状态和FragmentManager的curState状态进行同步。而我们知道Fragment初始化时的状态是INITIALIZING状态，这里moveToState，就将Fragment的状态从INITIALIZING状态，提升至CREATED状态或者更高（这主要看Activity当前的生命周期走到哪一步了）。那么我们可以看INITIALIZING->CREATED的状态切换代码：
+
+![Android源码分析之Fragment的View管理](./image/127f0002fdfc90e15d9b)
+
+之前已经看到了，Layout xml定义的fragment实例化的时候，mFromLayout为true，因此在moveToState的时候，就将调用performCreateView创建View。虽然此时View已经创建，但是并没有addView到container里，所以UI上是不可见的。得等到state进入到ACTIVITY_CREATED/STARTED状态之后才会addView，也就是说CREATED状态的Fragment的UI元素还未加到ViewTree，用户无感知。
+
+2，代码动态创建的Fragment
+
+代码动态创建、加入的Fragment，会通过addFragment加到FragmentManager里面，而此时的mFromLayout并不为true，在CREATED之后即ACTIVITY_CREATED和STARTED时才会完成View的创建：
+
+![Android源码分析之Fragment的View管理](./image/127b0003bdbc34756d21)
+
+从这段代码就能看到，fragment这时会performCreateView创建View，并且通过containerId找到ViewGroup来装这个View，这里就比较清楚了，containerId是很重要的，千万不要乱给，否则直接抛异常。
+
+分析到这里就比较清楚了，Fragment的View创建时机两种方式定义的Fragment是不一样的，但View被加到ViewTree的时机则是一样的，都是在CREATED状态之后。
+
+四，Fragment的View销毁
+
+View销毁比创建要更简单一点，两种Fragment的时机都是一样的，都是Fragment的状态被降低到CREATED的时候：
+
+![Android源码分析之Fragment的View管理](./image/127b0003bdf4d54bd569)
+
+上面的代码就比较显然了，Fragment状态从STOPPED/ACTIVITY_CREATED状态变成CREATED的时候就会performDestroyView，接着将Fragment的View从mContainer里删除，这样UI元素就从View Tree里删除了。这和View创建也高度的吻合，CREATED状态的Fragment只是个就绪状态的Fragment，UI元素是不可见的。而我们总结一下CREATED状态的Fragment有哪些case：
+
+1，Fragment刚实例化的时候，曾经很短暂的时间是CREATED状态，因为ACTIVITY_CREATED状态是紧接着CREATED的，中间几乎没有间隔。
+
+2，Fragment被detach了，detach了之后Fragment的状态就转为CREATED
+
+3，Fragment被remove了，但其还在BackStack里，那么removeFragment就不会将其彻底删除，还继续保留在mActive队列里，并且状态是CREATED而非INITIALIZING。
+
+至此，Fragment的View管理就分析完了，整个过程还是比较简单的。
+
+
+
+<hr>
+
+
+####<p>原文出处：<a href='http://www.toutiao.com/i6361053982550393346/' target='blank'>Android源码分析之Fragment的返回栈和事务管理</a></p>
+
+##Android源码分析之Fragment的返回栈和事务管理
+
+磨剑石  2016-12-08 00:01
+
+Fragment系列一共四篇文章，之前两篇文章[Android源码分析之Fragment的生命周期管理](http://m.toutiao.com/i6360248874912711169/?group_id=6266582227964297473&group_flags=0)和[Android源码分析之Fra
+gment的View管理](http://m.toutiao.com/i6360980700195193346/?group_id=6361018343490912514&group_flags=0)，我们主要介绍了Fragment的整个生命周期管理，如果没看过这两篇文章的，可以再去看看，自认为还是讲得比较深入浅出的，非常有助于理解Fragment的基本原理。这一节我们介绍一下Back Stack和事务操作。  
+
+所有用过Fragment的人对FragmentTransaction应该都不会陌生，这是fragment基本操作的接口。FragmentTransaction名字里带了transaction这个单词，也就意味着他是支持事务操作的，而事务是可以回退的。FragmentTransaction的本质就是一堆的Fragment Op（后续会分析FragmentTransaction的源码），FragmentManager除了管理Fragment本身之外，还会管理FragmentTransaction。FragmentTransaction以Stack的数据结构来存储，先进后出，Stack的名字就叫BackStack，当FragmentTransaction commit后执行的时候，就把自己压栈，而用户按Back键的时候，就会出栈，出栈的操作就等于是把之前压栈的FragmentTransaction的事务回退。当然，FragmentTransaction的事务功能是需要调用addToBackStack方法才会打开，默认情况下不知道BackStack回退。最后提一句，FragmentTransaction的实现类是BackStackRecord，也完美的体现了他就是Back Stack的一个节点。
+
+我们接下来对BackStackRecord的源码进行分析：
+
+1，add
+
+add通过doAddOp执行OP_ADD操作
+
+![Android源码分析之Fragment的返回栈和事务管理](./image/12820002fd0c4b121de0)
+
+2，replace
+
+replace通过doAddOp执行OP_REPLACE
+
+![Android源码分析之Fragment的返回栈和事务管理](./image/127e0004d6702591705e)
+
+3，remove，hide，show，detach，attach
+
+都是通过addOp分别执行OP_REMOVE，OP_HIDE，OP_SHOW，OP_DETACH，OP_ATTACH
+
+![Android源码分析之Fragment的返回栈和事务管理](./image/127c0003451379d1e3c3)
+
+4，doAddOp和addOp
+
+从上面的接口最终调用的函数来看，主要是doAddOp和addOp。doAddOp主要是addFragment相关的操作add和replace，需要处理containerId和tag。
+
+![Android源码分析之Fragment的返回栈和事务管理](./image/127f0003095b87117989)
+
+看代码doAddOp主要是设置fragment的mContainerId，mFragmentId，mTag，之后就执行addOp完成操作。
+
+![Android源码分析之Fragment的返回栈和事务管理](./image/127f000309681aebea7a)
+
+Fragment的Op队列是个双链表，表头是mHead，表尾是mTail，addOp将op加到队列的末尾，然后设置进入、退出动画。看到这里就明白了，其他调用add/remove/show/hide/attach/detach/replace这些操作，这是讲Op加到了队列了，并未生效。而生效需要手动调用commit。
+
+5，commit和commitAllowingStateLoss
+
+![Android源码分析之Fragment的返回栈和事务管理](./image/127b0003c93f35c82f0f)
+
+两个commit最终都会执行到commitInternal方法，commitAllowingStateLoss和commit不一样的地方，我们留到下一篇Fragment的状态保存和恢复去分析。现在先看BackStackRecord的Op操作实现。这里可以看出commit也并没有马上执行其Op队列，而是enqueue给FragmentManager。如果调用了addToBackStack就返回其在back stack的序号，否则返回-1。
+
+所以commit是个异步操作，FragmentManager的enqueueAction会将commit post到主线程Handler里。
+
+![Android源码分析之Fragment的返回栈和事务管理](./image/127b0003c94b67cd0b0a)
+
+这里可以看到enqueueAction是将action加到mPendingActions列表里，post mExecCommit到Handler里执行，而mExecCommit其实是执行execPendingActions，因此我们就看execPendingActions的实现：
+
+![Android源码分析之Fragment的返回栈和事务管理](./image/127c0003453ed32ed385)
+
+execPendingActions是在主线程执行的，遍历mPendingActions队列。每个Action执行run函数。因此就是执行BackStackRecord的run函数：
+
+![Android源码分析之Fragment的返回栈和事务管理](./image/127e0004d6cee30c08e7)
+
+上面就是BackStackRecord的run方法，具体每个Op的执行内容暂时省略。首先bumpBackStackNesting(1)对每个Op里的fragment的mBackStackNesting++，后面的firstOutFragments和lastInFragments是为了做fragment的tran
+sition动画用的，这里不展开分析。之后的while循环对每个Op，根据其op.cmd的类型做不同的操作。while完之后，就moveToState，将所有的Fragment的状态和FragmentManager的状态同步。最后，如果mAddToBackStack为true的话，就讲自己加入到FragmentManager的Back Stack。至于每个Op的执行，除了replace，其他的都比较简单。
+
+add/remove/show/hide/attach/detach的Op执行如下，比较简单，就是调用FragmentManager的对应的接口。
+
+![Android源码分析之Fragment的返回栈和事务管理](./image/127c0003455f17c3037c)
+
+再看replace操作，其实之前在生命周期里已经分析过，我们再回顾一下：首先查找mAdded队列里mContainerId等于给定containerId的那些fragment，加入到op的removed队列里，并对mBackStackNesting++后，逐个removeFragment。最后将要replace的Fragment addFragment，从而完成了replace操作。
+
+![Android源码分析之Fragment的返回栈和事务管理](./image/127b0003c973b147d972)
+
+这里的两个关键点：
+
+a) 被replace的fragment需要加入removed列表，这个是因为后面事务回退的时候要把这些fragment再加回来。
+
+b) mBackStackNesting需要+1，这样避免removeFragment的时候会将fragment从mActive移除。后续回退的时候还会把mBackStackNesting-1。
+
+最后我们在总结一下FragmentTransaction的Op的执行过程：
+
+1，调用add/replace/show/hide/attach/detach/remove接口
+
+2，commit/commitAllowingStateLoss，enqueueAction到FragmentManager的PendingActions里，commit操作是异步的，不是调完就生效。
+
+3，UI Handler会执行execPendingActions，此时FragmentTransaction的事务操作才是真正的执行，从而完成所有Op操作，并且将自己加入到Back Stack里。
+
+6，FragmentManager的executePendingTransactions
+
+前面说了commit/commitAllowingStateLoss的操作是异步的。如果需要马上生效的话也有方法，就是FragmentManager的executePendingTransactions方法，它会同步的执行execPendingActions方法，但要注意，一定要在主线程里调用，否则execPendingActions执行的时候会抛异常。
+
+7，FragmentTransaction的事务回滚
+
+事务的核心是其可以回滚的，回滚之后和执行这个事务之前能保持一样。FragmentManager的Stack叫做BackStack，也就意味这，事务回滚的触发条件是back键，当backstack的层数大于1的时候，那么每次back键会将栈顶的BackStackRecord出栈，并将其事务回滚。
+
+Back键的截获是在Activity的onBackPressed里：
+
+![Android源码分析之Fragment的返回栈和事务管理](./image/127c00034569fe61710c)
+
+会调用FragmentManager的popBackStackImmediate方法，当Back Stack元素大于1的时候，会return true，这样Activity就不会finish了，而是将栈顶的FragmentTransaction弹出栈，再把UI回退到前一次的Fragment状态。popBackStackImmediate代码就不分析了，他会找出要弹出的BackStackRecord，调用其popFromBackStack方法。
+
+![Android源码分析之Fragment的返回栈和事务管理](./image/1280000620b474a35269)
+
+popFromBackStack方法和run是对称的，一个是perform，一个是undo，是互逆的。bumpBackStackNesting(-1)先将fragment的mBackStackNesting-1，不只是对所有Op的fragment，并且还会对op的removed队列里的fragment也会mBackStackNesting-1，这是因为之前replace的时候对这些fragment做了mBackStackNesting+1，undo的时候也需要回滚。同run方法一样，链表里的每个Op都做undo。
+
+add/remove/show/hide/attach/detach的Op执行如下，调用FragmentManager的对应的反接口。OP_ADD的回滚就是removeFragment，OP_REMOVE就是addFragment，OP_HIDE就是showFragment，OP_SHOW就是hideFragment，OP_DETACH就是attachFragment，OP_ATTACH就是detachFragment。
+
+![Android源码分析之Fragment的返回栈和事务管理](./image/1280000620c01820fa6f)
+
+最后是replace，先是将当前的fragmentremove掉，然后把之前放到removed队列里的被替换的fragment再addFragment加回来。
+
+![Android源码分析之Fragment的返回栈和事务管理](./image/1280000620cb3bfd2fdc)
+
+至此FragmentTransaction的整个事务操作从perform一直到undo都完整的分析了，并且也对Fragment的Back Stack管理也介绍了，希望大家对Fragment的了解又加深了一些。下篇文章是Fragment系列的最后一篇了，介绍一下Fragment的进程状态保存和恢复逻辑，会解释commit的时候为什么会抛出state loss的exception，以及为什么要用setArguments来设置Activity的Bundle对象。
+
+
+
+
+
+

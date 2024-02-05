@@ -1,0 +1,298 @@
+<!--BEGIN_DATA
+{
+    "create_date": "2016-02-24 17:53", 
+    "modify_date": "2016-02-24 17:53", 
+    "is_top": "0", 
+    "summary": "读 Threading Programming Guide 笔记", 
+    "tags": "iOS", 
+    "file_name": "读 Threading Programming Guide 笔记.md"
+}
+END_DATA-->
+
+
+#### <p>原文出处：<a href='http://www.devtalking.com/articles/read-threading-programming-guide-1/' target='blank'>读 Threading Programming Guide 笔记（一）</a></p>
+
+<blockquote>
+<p>记得第一次读这个文档还是3年前，那时也只是泛读。如今关于iOS多线程的文章层出不穷，但我觉得若想更好的领会各个实践者的文章，应该先仔细读读官方的相关文档，打好基础，定会有更好的效果。文章中有对官方文档的翻译，也有自己的理解，官方文档中代码片段的示例在这篇文章中都进行了完整的重写，还有一些文档中没有的代码示例，并且都使用Swift完成，给大家一些Objc与Swift转换的参考。<br>官方文档地址：<a href="https://developer.apple.com/library/prerelease/ios/documentation/Cocoa/Conceptual/Multithreading/Introduction/Introduction.html" target="_blank" rel="external">Threading Programming Guide</a></p>
+</blockquote>
+<h2 id="u4EC0_u4E48_u662F_u7EBF_u7A0B"><a href="#u4EC0_u4E48_u662F_u7EBF_u7A0B" class="headerlink" title="什么是线程"></a>什么是线程</h2><p>我们设想在应用程序中，每行代码的执行都有一个执行路径并对应一个执行容器。线程，可以让应用程序中的代码通过多个执行路径执行，从而达到多个代码块同时在不同的执行路径下执行运算，即多任务同时执行。</p>
+<p>在系统中，每个程序都是并行状态的，但是并不是一直持续着活跃状态，而是由系统根据程序的需要适时的分配执行时间和内存。在每个程序中，或许存在多个线程，执行着不同的任务，那么系统对程序执行的管理实际上就是对程序中线程的管理，比如适时的将某个线程安排到负载较小的内核中执行，或者阻止正在运行的优先级较低的线程，给优先级较高的线程让路等。所以说线程的运转需要内核级别和应用程序级别相互协调，即内核级别负责将事件分发给不同的线程，并将线程安排在合理的内核上执行以及管理线程的优先级，而应用程序级别是通过代码管理和操控线程的属性及状态。</p>
+<h3 id="u4E3A_u4EC0_u4E48_u8981_u4F7F_u7528_u7EBF_u7A0B"><a href="#u4E3A_u4EC0_u4E48_u8981_u4F7F_u7528_u7EBF_u7A0B" class="headerlink" title="为什么要使用线程"></a>为什么要使用线程</h3><p>回到iOS，我们开发的App至少都有一个线程，称之为主线程，线程中执行方法或函数的原则是先进先出原则，一个接一个的执行。假设在我们的App中有从远程下载图片的功能，并且该功能放在主线程中执行，那么当下载一个1080p高清图片时，就会需要耗费较长的时间，如果主线程中下载功能后面还有其他待执行的方法，那么只能等待下载功能完成之后，才能继续执行。所以此时对于用户来说，得不到任何来自App的响应，那么很容易认为是你的App出问题了，如此糟糕的用户体验，足以让用户将你的App打入冷宫甚至删除。</p>
+<p>如果我们使用另外一个线程专门处理下载功能，那么该线程和主线程同时执行，对于用户而言，此时可以由主线程对用户做出合适的响应，而下载在另一个线程中同时进行着。所以使用线程对提高程序的用户体验、性能无疑是最好的方法。</p>
+<h3 id="u4F7F_u7528_u7EBF_u7A0B_u4F1A_u5BFC_u81F4_u7684_u95EE_u9898"><a href="#u4F7F_u7528_u7EBF_u7A0B_u4F1A_u5BFC_u81F4_u7684_u95EE_u9898" class="headerlink" title="使用线程会导致的问题"></a>使用线程会导致的问题</h3><p>俗话说天下没有免费的午餐，诚然多线程能提高程序的性能、用户体验，但是在光鲜的背后还是要承担一定风险的。使用多线程势必会增加开发人员写代码花费的时间，因为代码的复杂度变高了，开发人员斟酌的频率就会变高，线程与线程之间有交互，容错率就会降低，开发人员调试的时间就会变多。由于多线程依然共享内存，所以会发生两个线程同时对某个数据进行操作，这样很容易使程序的执行结果发生错误。总而言之，多线程好，但使用时要知其根本，做到佩弦自急。</p>
+<h2 id="u5B9E_u73B0_u591A_u4EFB_u52A1_u5E76_u53D1_u6267_u884C_u4EFB_u52A1_u7684_u89E3_u51B3_u65B9_u6848"><a href="#u5B9E_u73B0_u591A_u4EFB_u52A1_u5E76_u53D1_u6267_u884C_u4EFB_u52A1_u7684_u89E3_u51B3_u65B9_u6848" class="headerlink" title="实现多任务并发执行任务的解决方案"></a>实现多任务并发执行任务的解决方案</h2><p>因为线程本身相对比较低层，它实现程序中并发执行任务功能的方式也较为复杂，所以我们如果想使用好线程，那么就必须要真正理解线程，要明白在我们的程序中使用线程之后会带来哪些潜在的风险，所谓知己知彼方能百战不殆。同时，我们也不能滥用线程，该用的时候用，不该用的时候就不要画蛇添足。毕竟，使用线程会增加内存的消耗以及CPU得运算时间，要避免物极必反。在真正理解线程之前，我们先看看在OS X和iOS中提供的不那么底层的实现多任务并发执行的解决方案：</p>
+<ul>
+<li><p>Operation object：该技术出现在OS X 10.5中，通过将要执行的任务封装成操作对象的方式实现任务在多线程中执行。任务可以理解为你要想执行的一段代码。在这个操作对象中不光包含要执行的任务，还包含线程管理的内容，使用时通常与操作队列对象联合使用，操作队列对象会管理操作对象如何使用线程，所以我们只需要关心要执行的任务本身即可。</p>
+</li>
+<li><p>GCD：该技术出现在OS X 10.6中，它与Operation Object的初衷类似，就是让开发者只关注要执行的任务本身，而不需要去关注线程的管理。你只需要创建好任务，然后将任务添加到一个工作队列里即可，该工作队列会根据当前CPU性能及内核的负载情况，将任务安排到合适的线程中去执行。</p>
+</li>
+<li><p>Idle-time notification：该技术主要用于处理优先级相对比较低、执行时间比较短的任务，让应用程序在空闲的时候执行这类任务。Cocoa框架提供<code>NSNotificationQueue</code>对象处理空闲时间通知，通过使用<code>NSPostWhenIdle</code>选项，向队列发送空闲时间通知的请求。</p>
+</li>
+<li><p>Asynchronous functions：系统中有一些支持异步的函数，可以自动让你的代码并行执行。这些异步函数可能通过应用程序的守护进程或者自定义的线程执行你的代码，与主进程或主线程分离，达到并行执行任务的功能。</p>
+</li>
+<li><p>Timers：我们也可以在应用程序主线程中使用定时器去执行一些比较轻量级的、有一定周期性的任务。</p>
+</li>
+<li><p>Separate processes：虽然通过另起一个进程比线程更加重量级，但是在某些情况下要比使用线程更好一些，比如你需要的执行的任务和你的应用程序在展现数据和使用方面没有什么关系，但是可以优化你的应用程序的运行环境，或者提高应用程序获取数据的效率等。</p>
+</li>
+</ul>
+<h2 id="u521D_u8BC6_u7EBF_u7A0B_u6982_u5FF5"><a href="#u521D_u8BC6_u7EBF_u7A0B_u6982_u5FF5" class="headerlink" title="初识线程概念"></a>初识线程概念</h2><h3 id="u7EBF_u7A0B_u6280_u672F"><a href="#u7EBF_u7A0B_u6280_u672F" class="headerlink" title="线程技术"></a>线程技术</h3><p>说到OS X和iOS中的线程技术，就不得不说GNU Mach。Apple操作系统中的线程技术是基于Mach线程技术实现的，所以本身就带有线程基本的特性，比如PEM。Mach线程我们几乎不会用到，一般编程中我们可能会使用POSIX API创建线程。</p>
+<blockquote>
+<p>GNU Mach：GNU是一个类UNIX操作系统，它采用GNU Hurd作为操作系统内核，而GNU Mach是基于GNU Hurd内核技术的微内核。<br>POSIX：可移植操作系统接口（Portable Operating System Interface of UNIX），它定义了操作系统应该为应用程序提供的接口标准， 是IEEE为要在各种UNIX操作系统上运行的软件而定义的一系列API标准的总称。<br>PEM：Preemptive Execution Model，以任务的优先级决定立即执行还是延后执行，或者安排至不同的内核执行。</p>
+</blockquote>
+<p>我们来看看OS X和iOS中主要的两种线程技术：</p>
+<ul>
+<li>Cocoa Threads：Cocoa框架中提供了<code>NSThread</code>和<code>NSObject</code>类供我们进行线程相关的操作。</li>
+<li>POSIX Threads：POSIX的线程API实际是基于C语言的线程接口，这些接口在使用线程和配置线程方面更加容易和灵活。</li>
+</ul>
+<p>在应用程序层面，不管是什么平台，线程的运行方式都是大体相同的，在线程的运行过程中一般都会经历三种状态，即运行中、准备运行、阻塞。如果某个线程在当前处于不活跃状态，也即是非运行中状态，那么它有可能是处于阻塞状态并在等待执行任务的输入。也有可能已经有任务输入，处于准备运行状态，只是在等待被分派。当我们终止线程后，它会永久性的被系统回收，因为毕竟线程会占用一定的系统内存和CPU运算时间，所以一般情况下，我们放入二级线程（非主线程）中的任务都是比较重要和有意义的任务。</p>
+<h3 id="RunLoops"><a href="#RunLoops" class="headerlink" title="RunLoops"></a>RunLoops</h3><p>上一节提到当线程终止后就会永久被系统收回，如果你还有任务需要另起线程执行，就要重新创建线程以及配置，但这也不是必须的，我们可以让线程在空闲的时候休眠，当有任务需要执行时唤醒，就像主线程一样，此时就要用到RunLoop。</p>
+<p>简单的来说，RunLoop用于管理和监听异步添加到线程中的事件，当有事件输入时，系统唤醒线程并将事件分派给RunLoop，当没有需要处理的事件时，RunLoop会让线程进入休眠状态。这样就能让线程常驻在进程中，而不会过多的消耗系统资源，达到有事做事，没事睡觉的效果。</p>
+<p>主线程中的RunLoop系统已经自动帮我们配置好了，但是我们自己创建的线程，还需要对RunLoop配置一番才可以使用，在后面的章节中都会有详细介绍。</p>
+<h3 id="u540C_u6B65_u7B56_u7565"><a href="#u540C_u6B65_u7B56_u7565" class="headerlink" title="同步策略"></a>同步策略</h3><p>诚然，使用线程好处多多，但是之前也提到过，使用线程也是会存在一定问题的，那就是资源竞争，当两个线程在同一时间操作同一个变量时，就会产生问题。一种解决方案是让不同的线程拥有各自独有的变量，虽然可以解决问题，但不是最优方案。较为优雅一些的方案则是使用线程中的同步策略来解决该问题。</p>
+<p>常用的同步策略有线程锁、状态位、原子操作。线程锁较为简单粗暴，简单的说当一个线程在操作变量时会挂上一把互斥锁，如果另一个线程先要操作该变量，它就得获得这把锁，但是锁只有一个，必须等第一个线程释放互斥锁后，才可以被其他线程获取，所以这样就解决了资源竞争的问题。状态位策略是通过线程或任务的执行情况生成一个状态，这个状态即像门卫又像协管员，一是阻止线程进行，二是以合适的执行顺序安排协调各个任务。第三个策略则是原子操作，相对前两个策略要更轻量级一些，它能通过硬件指令保证变量在更新完成之后才能被其他线程访问。</p>
+<h3 id="u7EBF_u7A0B_u4E4B_u95F4_u7684_u4EA4_u4E92"><a href="#u7EBF_u7A0B_u4E4B_u95F4_u7684_u4EA4_u4E92" class="headerlink" title="线程之间的交互"></a>线程之间的交互</h3><p>虽然我们尽量让每个线程完成独立的任务，但是有些时候我们需要将二级线程中任务的执行结果发送到主线程中进一步进行操作，那么线程之间的交互就不可避免的发生，幸运的是进程中的线程是共享进程空间的，所以实现线程之间的交互也不是那么困难，比如通过发送messages、全局变量、同步策略等都可以实现，在后面的章节中都会有详细介绍。</p>
+<h2 id="u4F7F_u7528_u7EBF_u7A0B_u65F6_u9700_u8981_u6CE8_u610F_u7684_u4E8B_u9879"><a href="#u4F7F_u7528_u7EBF_u7A0B_u65F6_u9700_u8981_u6CE8_u610F_u7684_u4E8B_u9879" class="headerlink" title="使用线程时需要注意的事项"></a>使用线程时需要注意的事项</h2><p>无规矩不成方圆，做任何事如果乱来，那必定会出现各种问题。因为线程相对比较底层，所以当我们对线程理解的不是特别透彻时直接创建线程，并手动管理线程，势必会出现正确性和性能上的各种问题，所以就有了这节对使用线程的一些建议。</p>
+<h3 id="u907F_u514D_u76F4_u63A5_u521B_u5EFA_u7EBF_u7A0B"><a href="#u907F_u514D_u76F4_u63A5_u521B_u5EFA_u7EBF_u7A0B" class="headerlink" title="避免直接创建线程"></a>避免直接创建线程</h3><p>创建并管理线程在代码层面相对比较复杂和繁琐，一个不留神就会产生一些潜在的问题。OS X和iOS都提供了较为上层的创建使用线程的API，就是前面提到一些多任务并发执行的解决方案，比如GCD、Operation objects。使用它们可以帮我们规避在管理线程和处理线程性能方面可能出现的问题，提高多线程操作时的性能和健壮性。</p>
+<h3 id="u8BA9_u7EBF_u7A0B_u6267_u884C_u6709_u4EF7_u503C_u7684_u4EFB_u52A1"><a href="#u8BA9_u7EBF_u7A0B_u6267_u884C_u6709_u4EF7_u503C_u7684_u4EFB_u52A1" class="headerlink" title="让线程执行有价值的任务"></a>让线程执行有价值的任务</h3><p>前文中提到过，线程消耗的系统资源不容小视，所以当我们手动创建和管理线程时，尤其要注意这一点。要保证另起线程执行的任务是有意义的、重要的任务，而且该终止的线程要终止，不要让线程有任何空闲时间，以保证系统资源的最优利用。</p>
+<h3 id="u907F_u514D_u8D44_u6E90_u7ADE_u4E89"><a href="#u907F_u514D_u8D44_u6E90_u7ADE_u4E89" class="headerlink" title="避免资源竞争"></a>避免资源竞争</h3><p>进程中的线程是共享该进程空间的，所以很容易出现多个线程对同一个变量进行操作从而导致程序执行结果错误的情况。如果为每个线程都提供一份变量的拷贝，的确是可以解决这个问题，但是在开发中这样会造成更大的弊端，所以前文中提到了一些同步策略，能帮助我们达到线程交互及解决资源竞争的目的。但是在理论上还是会有出错的可能，比如让线程在指定的顺序下对某个变量依次进行操作。所以在程序设计阶段应该尽量避免线程之间的资源竞争及减少线程之间的交互。</p>
+<h3 id="u7528_u6237_u754C_u9762_u4E0E_u7EBF_u7A0B"><a href="#u7528_u6237_u754C_u9762_u4E0E_u7EBF_u7A0B" class="headerlink" title="用户界面与线程"></a>用户界面与线程</h3><p>用户界面的更新、对用户事件的响应都应该放在主线程中，避免线程不安全的情况，以及能方便的管理UI界面。目前Cocoa框架默认对UI的操作都要在主线程中完成，即使不强制要求，我们也应该这样做。但是有一些情况比较特殊，比如对图片的处理，因为处理图片的过程并不是显性的，所以处理的过程可以放在二级线程中，当处理完成后，再在主线程中显示结果。这样可以有效的提升应用的性能。</p>
+<h3 id="u6E05_u695A_u5F53_u7EBF_u7A0B_u7ED3_u675F_u65F6_u5E94_u8BE5_u505A_u4EC0_u4E48"><a href="#u6E05_u695A_u5F53_u7EBF_u7A0B_u7ED3_u675F_u65F6_u5E94_u8BE5_u505A_u4EC0_u4E48" class="headerlink" title="清楚当线程结束时应该做什么"></a>清楚当线程结束时应该做什么</h3><p>当用户退出应用后，理论上该应用进程中的所有线程都会立即被结束。但是如果此时正好有一个二级线程在后台处理其他任务，比如说下载或者正在存储一些数据。那么此时就要判断正在处理的这些任务是否要保留，如果要丢弃，那么直接结束所有线程即可，但是如果要保留，那么就需要主线程等待正在处理任务的二级线程，从而延迟应用退出。</p>
+<p>这里处理时有两种情况，如果自行创建的线程并手动管理，那么要使用POSIX API创建具有<strong>joinable</strong>特性的二级线程，使主线程与之相关联。如果是使用Cocoa框架，那么可以使用<code>applicationShouldTerminate:</code>代理方法延迟应用关闭，当二级线程处理完任务后回调<code>replyToApplicationShouldTerminate:</code>通知到主线程，然后关闭应用。</p>
+<h3 id="u5F02_u5E38_u5904_u7406"><a href="#u5F02_u5E38_u5904_u7406" class="headerlink" title="异常处理"></a>异常处理</h3><p>每个线程都有捕获当前任务在执行时产生的异常的责任，不论是主线程还是二级线程。如果二级线程产生的异常需要交由主线程处理是也不能任由其抛出，而是先将其捕获，然后向主线程发送消息，告知主线程当前的情况。当消息发出后二级线程可根据需求选择继续处理其他的任务还是终止线程。</p>
+<h3 id="u5C3D_u53EF_u80FD_u5C11_u7684_u4F7F_u7528_u5E38_u9A7B_u7EBF_u7A0B"><a href="#u5C3D_u53EF_u80FD_u5C11_u7684_u4F7F_u7528_u5E38_u9A7B_u7EBF_u7A0B" class="headerlink" title="尽可能少的使用常驻线程"></a>尽可能少的使用常驻线程</h3><p>前文中提到过，可以为一些经常需要执行的、具有周期性的、量级较小的任务创建常驻线程，以减少创建关闭线程的资源消耗，但是不能滥用常驻线程。理论上，一个线程执行完任务后就应该关闭，并且关闭线程的最佳时机是执行完任务的后一秒。目的是为了避免空闲线程占用过多的资源从而导致一些潜在的问题。</p>
+<h3 id="u786E_u4FDD_u7C7B_u5E93_u7684_u7EBF_u7A0B_u5B89_u5168"><a href="#u786E_u4FDD_u7C7B_u5E93_u7684_u7EBF_u7A0B_u5B89_u5168" class="headerlink" title="确保类库的线程安全"></a>确保类库的线程安全</h3><p>如果我们在开发应用的相关功能，我们完全可以控制这块功能是否需要多线程去完成，但是当我们在开发一个供别人使用的类库时，就没法灵活的控制了。所以只能假设使用我们的类库必定会在多线程的环境中使用，这样我们可以通过锁机制确保线程安全。但是如果我们的类库没有在多线程环境中使用呢？那就会白白浪费掉对锁进行操作的相关资源，只能说使用锁机制可以保证类库线程安全的万无一失，但性能方面会大打折扣。</p>
+<p>另一种方式是让使用我们类库的应用要对类库进行明确地初始化，不管是主线程还是二级线程，换句话说也就是让每个线程都有一份我们类库的内容，这样也可以有效的保证类库线程安全。在Cocoa框架中，还有一种可选的方式，就是可以为<code>NSWillBecomeMultiThreadedNotification</code>注册一个观察者，目的是当应用变为多线程环境时可以通知到我们的类库，从而采取相关措施，但这种方式不保险，有可能当类库已经被多线程环境中的代码使用后才收到通知。总而言之，如果开发类库，那么务必要确保其线程安全。</p>
+<h2 id="u7EBF_u7A0B_u7684_u8D44_u6E90_u6D88_u8017"><a href="#u7EBF_u7A0B_u7684_u8D44_u6E90_u6D88_u8017" class="headerlink" title="线程的资源消耗"></a>线程的资源消耗</h2><p>在OS X和iOS中，每个应用其实就是一个进程，一个进程中由一个或多个线程组成，每个线程代表了所属应用中代码的执行路径。通常情况下应用始于主线程中的主函数，当需要有其他功能在二级线程中与主线程并行执行时，便可以创建其他二级线程。</p>
+<p>一旦二级线程被创建，那么它就是一个独立的实体，线程与线程之间是没有任何关联的，它们有各自的执行堆栈，由内核单独为每个线程分派运行时的执行任务。虽然每个线程是独立实体，但是它们之间是可以相互交互的，在实际的应用中，这类需求是很常见的，因为它们共享所属进程的内存空间，并且拥有相同的读写权，所以也很容易实现线程之间的交互。既然一个应用中可能会有多个线程协作完成功能，所以管理线程就是重中之重了，这一章节会从线程的资源消耗、创建、配置、使用、关闭这几个关键点梳理实际运用中的线程管理。</p>
+<p>线程的资源消耗主要分为三类，一类是内存空间的消耗、一类是创建线程消耗的时间、另一类是对开发人员开发成本的消耗。</p>
+<p>内存空间的消耗又分为两部分，一部分是内核内存空间，另一部分是应用程序使用的内存空间，每个线程在创建时就会申请这两部分的内存空间。申请内核内存空间是用来存储管理和协调线程的核心数据结构的，而申请应用程序的内存空间是用来存储线程栈和一些初始化数据的。对于用户级别的二级线程来说，对应用程序内存空间的消耗是可以配置的，比如线程栈的空间大小等。下面是两种内存空间通常的消耗情况：</p>
+<ul>
+<li>内核内存空间：主要存储线程的核心数据结构，每个线程大约会占用1KB的空间。</li>
+<li>应用程序内存空间：主要存储线程栈和初始化数据，主线程在OS X中大约占8MB空间，在iOS中大约占1MB。二级线程在两种系统中通常占大约512KB，但是上面提到二级线程在这块是可以配置的，所以可配置的最小空间为16KB，而且配置的空间大小必须是4KB的倍数。</li>
+</ul>
+<blockquote>
+<p>注意：二级线程在创建时只是申请了内存程序空间，但还并没有真正分配给二级线程，只有当二级线程执行代码需要空间时才会真正分配。</p>
+</blockquote>
+<p>线程的创建时间取决于机器硬件的性能，但通常大约在90毫秒，虽然在我们看来90毫秒很短，但当频繁的创建线程时就会影响到CPU处理其他任务的时间。所以现在往往都会使用线程池，避免频繁的创建全新的线程。</p>
+<p>前文中提到过设计和开发多线程的应用较单线程要复杂的多，要注意的事项在上文中就提出了八条，针对每条注意事项，都要花费不少时间去设计代码和测试。所以总体来说如果涉及到多线程，务必会增加开发人员的开发测试时间，但是换来的是应用程序具有更好的健壮性和高性能，所谓慢工出细活。</p>
+<h2 id="u521B_u5EFA_u7EBF_u7A0B"><a href="#u521B_u5EFA_u7EBF_u7A0B" class="headerlink" title="创建线程"></a>创建线程</h2><p>说到创建线程，就得说说线程的两种类型，<strong>Joinable</strong>和<strong>Detach</strong>。Joinable类型的线程可以被其他线程回收其资源和终止。举个例子，如果一个Joinable的线程与主线程结合，那么当主线程准备结束而该二级线程还没有结束的时候，主线程会被阻塞等待该二级线程，当二级线程结束后由主线程回收其占用资源并将其关闭。如果在主线程还没有结束时，该二级线程结束了，那么它不但不会关闭，而且资源也不会被系统收回，只是等待主线程处理。而Detach的线程则相反，会自行结束关闭线程并且有系统回收其资源。</p>
+<p>在OS X和iOS系统中有多种创建线程的方法，不同方法创建出的线程可能会有不同的线程属性，但就线程本身来说并没有什么差异。下面来看看创建线程的不同方法。</p>
+<h3 id="u4F7F_u7528NSThread_u521B_u5EFA_u7EBF_u7A0B"><a href="#u4F7F_u7528NSThread_u521B_u5EFA_u7EBF_u7A0B" class="headerlink" title="使用NSThread创建线程"></a>使用NSThread创建线程</h3><p>使用<code>NSThread</code>创建线程有两种方式：</p>
+<ul>
+<li><code>detachNewThreadSelector:toTarget:withObject:</code>：该方法是一个类方法，适用于OS X所有的版本和iOS2.0之后的版本。该方法其实完成了两个动作，先是创建线程，然后启动线程。通过方法名称就可以得知，该方法创建的线程为Detach类型的线程。</li>
+<li>创建<code>NSThread</code>对象：这种方法适用于OS X 10.5之后的版本和iOS2.0之后的版本。该方法通过创建<code>NSThread</code>对象，使用它的<code>start()</code>方法启动线程，该方法的好处是可以在启动前通过<code>NSThread</code>对象的各个属性进行配置，待配置妥当后再调用<code>start()</code>方法启动线程。该方法创建的线程也是Detach类型的线程。</li>
+</ul>
+<h4 id="detachNewThreadSelector_3AtoTarget_3AwithObject_3A"><a href="#detachNewThreadSelector_3AtoTarget_3AwithObject_3A" class="headerlink" title="detachNewThreadSelector:toTarget:withObject:"></a>detachNewThreadSelector:toTarget:withObject:</h4><p>该方法有三个参数：</p>
+<ul>
+<li>selector：发送给线程的消息，或者说是让线程执行的任务。这里需要注意的是该任务最多只能有一个参数，并且不能有返回值。</li>
+<li>target：在新的线程中接收消息的对象。</li>
+<li>object：传给target对象的参数，也就是传入selector中的参数。</li>
+</ul>
+<p>下面来看一个简单示例：</p>
+<pre><span class="line"><span class="keyword">import</span> Foundation</span><br><span class="line"></span><br><span class="line"><span class="class"><span class="keyword">class</span> <span class="title">TestThread</span> </span>&#123;</span><br><span class="line">    </span><br><span class="line">    <span class="func"><span class="keyword">func</span> <span class="title">launch</span><span class="params">()</span></span> &#123;</span><br><span class="line">        </span><br><span class="line">        <span class="built_in">print</span>(<span class="string">"First event in Main Thread."</span>)</span><br><span class="line">        </span><br><span class="line">        <span class="type">NSThread</span>.detachNewThreadSelector(<span class="string">"methodInSecondaryThread:"</span>, toTarget: <span class="keyword">self</span>, withObject: <span class="string">"I am a argument"</span>)</span><br><span class="line">        </span><br><span class="line">        <span class="built_in">print</span>(<span class="string">"Second event in Main Thread."</span>)</span><br><span class="line">        </span><br><span class="line">    &#125;</span><br><span class="line">    </span><br><span class="line">    <span class="func"><span class="keyword">func</span> <span class="title">methodInSecondaryThread</span><span class="params">(arg: String)</span></span> &#123;</span><br><span class="line">        </span><br><span class="line">        <span class="built_in">print</span>(<span class="string">"<span class="subst">\(arg)</span> of event in Secondary Thread."</span>)</span><br><span class="line">        </span><br><span class="line">    &#125;</span><br><span class="line">    </span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="keyword">let</span> testThread = <span class="type">TestThread</span>()</span><br><span class="line">testThread.launch()</span><br></pre>
+<p>上述代码定义了一个类<code>TestThread</code>，包含两个方法<code>launch()</code>和<code>methodInSecondaryThread()</code>，<code>lanch()</code>方法中用<code>print()</code>函数模拟事件，在两个事件中创建一个二级线程，用于执行<code>methodInSecondaryThread()</code>方法，在该方法中执行其他事件。执行看看结果如何：</p>
+<pre><span class="line"><span class="type">Terminating</span> app due to uncaught exception '<span class="type">NSInvalidArgumentException'</span>, reason: '*** -[<span class="type">NSThread</span> initWithTarget:selector:object:]: target does not implement selector (*** -[<span class="type">LearnThread</span>.<span class="type">TestThread</span> methodInSecondaryThread])'</span><br></pre>
+<p>结果很不幸，报错了，原因很简单，因为我们的代码是Swift，而<code>NSThread</code>继承了<code>NSObject</code>是Objective-C世界的东西，所以需要对代码进行修改，有两种方法：</p>
+<span class="line"><span class="comment">// 1. 让NSTread继承NSObject</span></span><br><span class="line"><span class="class"><span class="keyword">class</span> <span class="title">TestThread</span>: <span class="title">NSObject</span> </span>&#123;</span><br><span class="line"></span><br><span class="line"><span class="comment">// 2. 在methodInSecondaryThread()方法前添加@objc</span></span><br><span class="line"><span class="preprocessor">@objc</span> <span class="func"><span class="keyword">func</span> <span class="title">methodInSecondaryThread</span><span class="params">(arg: String)</span></span> &#123;</span><br>
+<p>我习惯让类继承<code>NSObject</code>：</p>
+<pre><span class="line"><span class="keyword">import</span> Foundation</span><br><span class="line"></span><br><span class="line"><span class="class"><span class="keyword">class</span> <span class="title">TestThread</span>: <span class="title">NSObject</span> </span>&#123;</span><br><span class="line">    </span><br><span class="line">    <span class="func"><span class="keyword">func</span> <span class="title">launch</span><span class="params">()</span></span> &#123;</span><br><span class="line">        </span><br><span class="line">        <span class="built_in">print</span>(<span class="string">"First event in Main Thread."</span>)</span><br><span class="line">        </span><br><span class="line">        <span class="type">NSThread</span>.detachNewThreadSelector(<span class="string">"methodInSecondaryThread:"</span>, toTarget: <span class="keyword">self</span>, withObject: <span class="string">"I am a argument"</span>)</span><br><span class="line">        </span><br><span class="line">        <span class="built_in">print</span>(<span class="string">"Second event in Main Thread."</span>)</span><br><span class="line">        </span><br><span class="line">    &#125;</span><br><span class="line">    </span><br><span class="line">    <span class="func"><span class="keyword">func</span> <span class="title">methodInSecondaryThread</span><span class="params">(arg: String)</span></span> &#123;</span><br><span class="line">        </span><br><span class="line">        <span class="built_in">print</span>(<span class="string">"<span class="subst">\(arg)</span> of event in Secondary Thread."</span>)</span><br><span class="line">        </span><br><span class="line">    &#125;</span><br><span class="line">    </span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="keyword">let</span> testThread = <span class="type">TestThread</span>()</span><br><span class="line">testThread.launch()</span><br></pre>
+<p>继续运行看看效果：</p>
+<pre><span class="line"><span class="type">First</span> event <span class="keyword">in</span> <span class="type">Main</span> <span class="type">Thread</span>.</span><br><span class="line"><span class="type">Second</span> event <span class="keyword">in</span> <span class="type">Main</span> <span class="type">Thread</span>.</span><br></pre>
+<p>运行成功了，但似乎少点什么东西，<code>methodInSecondaryThread()</code>方法中的内容并没有打印出来，难道线程没有执行吗？我们通过Instruments可以看到，在运行过程中二级线程是创建过的：</p>
+<p>
+<img src="./image/LearnThread-1.png" alt="LearnThread-1">
+</p>
+<p>导致这个问题的原因和上文介绍的线程类型有关系。因为主线程运行很快，快到当主线程结束时我们创建的二级线程还没来得及执行<code>methodInSecondaryThread()</code>方法，而通过<code>detachNewThreadSelector:toTarget:withObject:</code>创建的二级线程是Detach类型的，没有与主线程结合，所以主线程也不会等待，当主线程结束，进程结束，二级线程自然也结束了。解决这个问题的办法就是让二级线程有执行任务的时间，所以我们可以让主线程停顿几秒，让二级线程完成它的任务：</p>
+<pre><span class="line"><span class="keyword">import</span> Foundation</span><br><span class="line"></span><br><span class="line"><span class="class"><span class="keyword">class</span> <span class="title">TestThread</span>: <span class="title">NSObject</span> </span>&#123;</span><br><span class="line">    </span><br><span class="line">    <span class="func"><span class="keyword">func</span> <span class="title">launch</span><span class="params">()</span></span> &#123;</span><br><span class="line">        </span><br><span class="line">        <span class="built_in">print</span>(<span class="string">"First event in Main Thread."</span>)</span><br><span class="line">        </span><br><span class="line">        <span class="type">NSThread</span>.detachNewThreadSelector(<span class="string">"methodInSecondaryThread:"</span>, toTarget: <span class="keyword">self</span>, withObject: <span class="string">"I am a argument"</span>)</span><br><span class="line">        </span><br><span class="line">        sleep(<span class="number">3</span>)</span><br><span class="line">        </span><br><span class="line">        <span class="built_in">print</span>(<span class="string">"Second event in Main Thread."</span>)</span><br><span class="line">        </span><br><span class="line">    &#125;</span><br><span class="line">    </span><br><span class="line">    <span class="func"><span class="keyword">func</span> <span class="title">methodInSecondaryThread</span><span class="params">(arg: String)</span></span> &#123;</span><br><span class="line">        </span><br><span class="line">        <span class="built_in">print</span>(<span class="string">"<span class="subst">\(arg)</span> of event in Secondary Thread."</span>)</span><br><span class="line">        </span><br><span class="line">    &#125;</span><br><span class="line">    </span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="keyword">let</span> testThread = <span class="type">TestThread</span>()</span><br><span class="line">testThread.launch()</span><br></pre>
+
+<p>再运行就可以看到正确地结果了：</p>
+<pre><span class="line"><span class="type">First</span> event <span class="keyword">in</span> <span class="type">Main</span> <span class="type">Thread</span>.</span><br><span class="line"><span class="type">I</span> am a argument of event <span class="keyword">in</span> <span class="type">Secondary</span> <span class="type">Thread</span>.</span><br><span class="line"><span class="type">Second</span> event <span class="keyword">in</span> <span class="type">Main</span> <span class="type">Thread</span>.</span><br></pre>
+
+<h4 id="u521B_u5EFANSThread_u5BF9_u8C61"><a href="#u521B_u5EFANSThread_u5BF9_u8C61" class="headerlink" title="创建NSThread对象"></a>创建NSThread对象</h4><p>我们可以通过<code>initWithTarget:selector:object:</code>方法实例化一个<code>NSThread</code>对象，该方法的三个参数其实与<code>detachNewThreadSelector:toTarget:withObject:</code>方法的参数一样，只是顺序不一样而已：</p>
+<pre><span class="line"><span class="keyword">import</span> Foundation</span><br><span class="line"></span><br><span class="line"><span class="class"><span class="keyword">class</span> <span class="title">TestThread</span>: <span class="title">NSObject</span> </span>&#123;</span><br><span class="line">    </span><br><span class="line">    <span class="func"><span class="keyword">func</span> <span class="title">launch</span><span class="params">()</span></span> &#123;</span><br><span class="line">        </span><br><span class="line">        <span class="built_in">print</span>(<span class="string">"First event in Main Thread."</span>)</span><br><span class="line">        </span><br><span class="line">        <span class="keyword">let</span> secondaryThread = <span class="type">NSThread</span>(target: <span class="keyword">self</span>, selector: <span class="string">"methodInSecondaryThread:"</span>, object: <span class="string">"I am a argument"</span>)</span><br><span class="line">        </span><br><span class="line">        secondaryThread.start()</span><br><span class="line">        </span><br><span class="line">        sleep(<span class="number">3</span>)</span><br><span class="line">        </span><br><span class="line">        <span class="built_in">print</span>(<span class="string">"Second event in Main Thread."</span>)</span><br><span class="line">        </span><br><span class="line">    &#125;</span><br><span class="line">    </span><br><span class="line">    <span class="func"><span class="keyword">func</span> <span class="title">methodInSecondaryThread</span><span class="params">(arg: String)</span></span> &#123;</span><br><span class="line">        </span><br><span class="line">        <span class="built_in">print</span>(<span class="string">"<span class="subst">\(arg)</span> of event in Secondary Thread."</span>)</span><br><span class="line">        </span><br><span class="line">    &#125;</span><br><span class="line">    </span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="keyword">let</span> testThread = <span class="type">TestThread</span>()</span><br><span class="line">testThread.launch()</span><br></pre>
+<p>上述的代码的运行结果自然也是一样的：</p>
+<pre><span class="line"><span class="type">First</span> event <span class="keyword">in</span> <span class="type">Main</span> <span class="type">Thread</span>.</span><br><span class="line"><span class="type">I</span> am a argument of event <span class="keyword">in</span> <span class="type">Secondary</span> <span class="type">Thread</span>.</span><br><span class="line"><span class="type">Second</span> event <span class="keyword">in</span> <span class="type">Main</span> <span class="type">Thread</span>.</span><br></pre> 
+<p>这种方法依然只能在二级线程中执行最多只有一个参数的函数或方法，如果想要执行多参数的任务，可以将参数放入集合中传递，当然被执行的任务得能正确接收到参数集合。或者可以通过另外一种方法，那就是通过创建继承<code>NSThread</code>的类，然后重写<code>main()</code>方法来实现：</p>
+<pre><span class="line"><span class="keyword">import</span> Foundation</span><br><span class="line"></span><br><span class="line"><span class="class"><span class="keyword">class</span> <span class="title">CustomThread</span>: <span class="title">NSThread</span> </span>&#123;</span><br><span class="line">    </span><br><span class="line">    <span class="keyword">var</span> arg1: <span class="type">String</span>!</span><br><span class="line">    <span class="keyword">var</span> arg2: <span class="type">String</span>!</span><br><span class="line">    </span><br><span class="line">    <span class="keyword">init</span>(arg1: <span class="type">String</span>, arg2: <span class="type">String</span>) &#123;</span><br><span class="line">        </span><br><span class="line">        <span class="keyword">self</span>.arg1 = arg1</span><br><span class="line">        <span class="keyword">self</span>.arg2 = arg2</span><br><span class="line">        </span><br><span class="line">    &#125;</span><br><span class="line">    </span><br><span class="line">    <span class="keyword">override</span> <span class="func"><span class="keyword">func</span> <span class="title">main</span><span class="params">()</span></span> &#123;</span><br><span class="line">        </span><br><span class="line">        <span class="built_in">print</span>(<span class="string">"<span class="subst">\(<span class="keyword">self</span>.arg1)</span>, <span class="subst">\(<span class="keyword">self</span>.arg2)</span>, we are the arguments in Secondary Thread."</span>)</span><br><span class="line">        </span><br><span class="line">    &#125;</span><br><span class="line">    </span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="class"><span class="keyword">class</span> <span class="title">TestThread</span>: <span class="title">NSObject</span> </span>&#123;</span><br><span class="line">    </span><br><span class="line">    <span class="func"><span class="keyword">func</span> <span class="title">launch</span><span class="params">()</span></span> &#123;</span><br><span class="line">        </span><br><span class="line">        <span class="built_in">print</span>(<span class="string">"First event in Main Thread."</span>)</span><br><span class="line">        </span><br><span class="line">        <span class="keyword">let</span> customThread = <span class="type">CustomThread</span>(arg1: <span class="string">"I am arg1"</span>, arg2: <span class="string">"I am arg2"</span>)</span><br><span class="line">        </span><br><span class="line">        customThread.start()</span><br><span class="line">        </span><br><span class="line">        sleep(<span class="number">3</span>)</span><br><span class="line">        </span><br><span class="line">        <span class="built_in">print</span>(<span class="string">"Second event in Main Thread."</span>)</span><br><span class="line">        </span><br><span class="line">    &#125;</span><br><span class="line">    </span><br><span class="line">    <span class="func"><span class="keyword">func</span> <span class="title">methodInSecondaryThread</span><span class="params">(arg: String)</span></span> &#123;</span><br><span class="line">        </span><br><span class="line">        <span class="built_in">print</span>(<span class="string">"<span class="subst">\(arg)</span> of event in Secondary Thread."</span>)</span><br><span class="line">        </span><br><span class="line">    &#125;</span><br><span class="line">    </span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="keyword">let</span> testThread = <span class="type">TestThread</span>()</span><br><span class="line">testThread.launch()</span><br></pre>
+
+<p>如上述代码所示，我们创建了<code>CustomThread</code>类，并继承了<code>NSThread</code>，然后通过初始化方法传参，再重写<code>main()</code>方法处理相关任务。执行结果如下：</p>
+<pre><span class="line"><span class="type">First</span> event <span class="keyword">in</span> <span class="type">Main</span> <span class="type">Thread</span>.</span><br><span class="line"><span class="type">I</span> am arg1, <span class="type">I</span> am arg2, we are the arguments <span class="keyword">in</span> <span class="type">Secondary</span> <span class="type">Thread</span>.</span><br><span class="line"><span class="type">Second</span> event <span class="keyword">in</span> <span class="type">Main</span> <span class="type">Thread</span>.</span><br></pre>
+
+<h3 id="u4F7F_u7528NSObject_u521B_u5EFA_u7EBF_u7A0B"><a href="#u4F7F_u7528NSObject_u521B_u5EFA_u7EBF_u7A0B" class="headerlink" title="使用NSObject创建线程"></a>使用NSObject创建线程</h3><p>在OS X和iOS中，<code>NSObject</code>对象本身就具有创建线程的能力，所以只要是继承了<code>NSObject</code>的类自然也具备这个能力：</p>
+<pre><span class="line"><span class="keyword">import</span> Foundation</span><br><span class="line"></span><br><span class="line"><span class="class"><span class="keyword">class</span> <span class="title">TestThread</span>: <span class="title">NSObject</span> </span>&#123;</span><br><span class="line">    </span><br><span class="line">    <span class="func"><span class="keyword">func</span> <span class="title">launch</span><span class="params">()</span></span> &#123;</span><br><span class="line">        </span><br><span class="line">        <span class="built_in">print</span>(<span class="string">"First event in Main Thread."</span>)</span><br><span class="line"></span><br><span class="line">        performSelectorInBackground(<span class="string">"performInBackground"</span>, withObject: <span class="literal">nil</span>)</span><br><span class="line">        </span><br><span class="line">        sleep(<span class="number">3</span>)</span><br><span class="line">        </span><br><span class="line">        <span class="built_in">print</span>(<span class="string">"Second event in Main Thread."</span>)</span><br><span class="line">  </span><br><span class="line">    &#125;</span><br><span class="line">    </span><br><span class="line">    <span class="func"><span class="keyword">func</span> <span class="title">performInBackground</span><span class="params">()</span></span> &#123;</span><br><span class="line">        </span><br><span class="line">        <span class="built_in">print</span>(<span class="string">"I am a event, perform in Background Thread."</span>)</span><br><span class="line">        </span><br><span class="line">    &#125;</span><br><span class="line">    </span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="keyword">let</span> testThread = <span class="type">TestThread</span>()</span><br><span class="line">testThread.launch()</span><br></pre>
+
+<p>上述代码中的<code>TestThread</code>类继承了<code>NSObject</code>类，那么就可以通过<code>performSelectorInBackground:withObject:</code>方法创建二级线程，该方法只有两个参数：</p>
+<ul>
+<li>selector：发送给线程的消息，或者说是让线程执行的任务。这里需要注意的是该任务最多只能有一个参数，并且不能有返回值。</li>
+<li>object：传给target对象的参数，也就是传入selector中的参数。</li>
+</ul>
+<p>该方法创建的线程也是Detach类型的。以上这几种方式都是基于Cocoa框架实现的，大家可以使用<code>NSThread</code>的类方法<code>isMultiThreaded</code>去检验，在合适的地方插入这行代码<code>print(NSThread.isMultiThreaded())</code>，看看程序的线程状态。</p>
+<h3 id="u4F7F_u7528POSIX_API_u521B_u5EFA_u7EBF_u7A0B"><a href="#u4F7F_u7528POSIX_API_u521B_u5EFA_u7EBF_u7A0B" class="headerlink" title="使用POSIX API创建线程"></a>使用POSIX API创建线程</h3><p>在OS X和iOS中，可以通过POSIX API创建线程，上文中提到过，POSIX的线程API实际是基于C语言的线程接口，这些接口在使用线程和配置线程方面更加容易和灵活，移植性也比较强，但由于相对较为底层，如果不熟悉C语言，上手成本会比较高,<code>NSThread</code>就是基于POSIX线程API封装而成的。</p>
+<p>POSIX API通过
+<pre><code>int pthread_create(pthread_t *restrict thread, const pthread_attr_t *restrict attr, void *(*start_routine)(void *), void *restrict arg);</code></pre>
+函数创建线程：</p>
+<ul>
+<li>thread：线程标识符。</li>
+<li>attr：线程属性设置。</li>
+<li>start_routine：线程函数的起始地址。</li>
+<li>arg：传递给start_routine的参数。</li>
+<li>返回值：成功返回0，出错返回-1。</li>
+</ul>
+<p>大体的参数其实和使用<code>NSThread</code>创建线程基本一致，不过需要注意的是通过<code>pthread_create()</code>创建的线程是Joinable类型的，如果要将新线程设置为Detach类型，需要在创建前使用<code>pthread_attr_setdetachstate(&amp;attr, PTHREAD_CREATE_DETACHED);</code>函数设置其线程属性。</p>
+<p>在Cocoa框架中，上文提到的那些同步机制，比如线程锁，当二级线程创建后才就会自动生成。如果在程序中使用POSIX API创建线程，那么Cocoa框架是无法得知当前程序已处于多线程状态的，所以就不会自动开启相关的同步机制，而当我们又没有通过POSIX API手动控制的话，就有可能导致应用程序崩溃的情况。另外要注意的一点是Cocoa框架中的线程锁是不能操作通过POSIX API创建的线程的，反之亦然。所以当Cocoa框架与POSIX API混用的时候，在同步机制方面一定要配套使用。</p>
+
+</span>
+
+</div>
+</article>
+
+
+
+
+
+
+####<p>原文出处：<a href='http://www.devtalking.com/articles/read-threading-programming-guide-2/' target='blank'>读 Threading Programming Guide 笔记（二）</a></p>
+
+
+ <article class="post post-type-normal " itemscope itemtype="http://schema.org/Article">
+
+<h2 id="u7EBF_u7A0B_u5C5E_u6027_u914D_u7F6E"><a href="#u7EBF_u7A0B_u5C5E_u6027_u914D_u7F6E" class="headerlink" title="线程属性配置"></a>线程属性配置</h2><p>线程也是具有若干属性的，自然一些属性也是可配置的，在启动线程之前我们可以对其进行配置，比如线程占用的内存空间大小、线程持久层中的数据、设置线程类型、优先级等。</p>
+<h3 id="u914D_u7F6E_u7EBF_u7A0B_u7684_u6808_u7A7A_u95F4_u5927_u5C0F"><a href="#u914D_u7F6E_u7EBF_u7A0B_u7684_u6808_u7A7A_u95F4_u5927_u5C0F" class="headerlink" title="配置线程的栈空间大小"></a>配置线程的栈空间大小</h3><p>在前文中提到过线程对内存空间的消耗，其中一部分就是线程栈，我们可以对线程栈的大小进行配置：</p>
+<ul>
+<li>Cocoa框架：在OS X v10.5之后的版本和iOS2.0之后的版本中，我们可以通过修改<code>NSThread</code>类的<code>stackSize</code>属性，改变二级线程的线程栈大小，不过这里要注意的是该属性的单位是字节，并且设置的大小必须得是4KB的倍数。</li>
+<li>POSIX API：通过<code>pthread_attr_- setstacksize</code>函数给线程属性<code>pthread_attr_t</code>结构体设置线程栈大小，然后在使用<code>pthread_create</code>函数创建线程时将线程属性传入即可。</li>
+</ul>
+<blockquote>
+<p>注意：在使用Cocoa框架的前提下修改线程栈时，不能使用<code>NSThread</code>的<code>detachNewThreadSelector: toTarget:withObject:</code>方法，因为上文中说过，该方法先创建线程，即刻便启动了线程，所以根本没有机会修改线程属性。</p>
+</blockquote>
+<h3 id="u914D_u7F6E_u7EBF_u7A0B_u5B58_u50A8_u5B57_u5178"><a href="#u914D_u7F6E_u7EBF_u7A0B_u5B58_u50A8_u5B57_u5178" class="headerlink" title="配置线程存储字典"></a>配置线程存储字典</h3><p>每一个线程，在整个生命周期里都会有一个字典，以<code>key-value</code>的形式存储着在线程执行过程中你希望保存下来的各种类型的数据，比如一个常驻线程的运行状态，线程可以在任何时候访问该字典里的数据。</p>
+<p>在Cocoa框架中，可以通过<code>NSThread</code>类的<code>threadDictionary</code>属性，获取到<code>NSMutableDictionary</code>类型对象，然后自定义<code>key</code>值，存入任何里先储存的对象或数据。如果使用POSIX线程，可以使用<code>pthread_setspecific</code>和<code>pthread_getspecific</code>函数设置获取线程字典。</p>
+<h3 id="u914D_u7F6E_u7EBF_u7A0B_u7C7B_u578B"><a href="#u914D_u7F6E_u7EBF_u7A0B_u7C7B_u578B" class="headerlink" title="配置线程类型"></a>配置线程类型</h3><p>在上文中提到过，线程有Joinable和Detached类型，大多数非底层的线程默认都是Detached类型的，相比Joinable类型的线程来说，Detached类型的线程不用与其他线程结合，并且在执行完任务后可自动被系统回收资源，而且主线程不会因此而阻塞，这着实要方便许多。</p>
+<p>使用<code>NSThread</code>创建的线程默认都是Detached类型，而且似乎也不能将其设置为Joinable类型。而使用POSIX API创建的线程则默认为Joinable类型，而且这也是唯一创建Joinable类型线程的方式。通过POSIX API可以在创建线程前通过函数<code>pthread_attr_setdetachstate</code>更新线程属性，将其设置为不同的类型，如果线程已经创建，那么可以使用<code>pthread_detach</code>函数改变其类型。Joinable类型的线程还有一个特性，那就是在终止之前可以将数据传给与之相结合的线程，从而达到线程之间的交互。即将要终止的线程可以通过<code>pthread_exit</code>函数传递指针或者任务执行的结果，然后与之结合的线程可以通过<code>pthread_join</code>函数接受数据。</p>
+<p>虽然通过POSIX API创建的线程使用和管理起来较为复杂和麻烦，但这也说明这种方式更为灵活，更能满足不同的使用场景和需求。比如当执行一些关键的任务，不能被打断的任务，像执行I/O操作之类。</p>
+<h3 id="u8BBE_u7F6E_u7EBF_u7A0B_u4F18_u5148_u7EA7"><a href="#u8BBE_u7F6E_u7EBF_u7A0B_u4F18_u5148_u7EA7" class="headerlink" title="设置线程优先级"></a>设置线程优先级</h3><p>每一个新创建的二级线程都有它自己的默认优先级，内核会根据线程的各属性通过分配算法计算出线程的优先级。这里需要明确一个概念，高优先级的线程虽然会更早的运行，但这其中并没有执行时间效率的因素，也就是说高优先级的线程会更早的执行它的任务，但在执行任务的时间长短方面并没有特别之处。</p>
+<p>不论是通过<code>NSThread</code>创建线程还是通过POSIX API创建线程，他们都提供了设置线程优先级的方法。我们可以通过<code>NSThread</code>的类方法<code>setThreadPriority:</code>设置优先级，因为线程的优先级由0.0～1.0表示，所以设置优先级时也一样。我们也可以通过<code>pthread_setschedparam</code>函数设置线程优先级。</p>
+<blockquote>
+<p>注意：设置线程的优先级时可以在线程运行时设置。</p>
+</blockquote>
+<p>虽然我们可以调节线程的优先级，但不到必要时还是不建议调节线程的优先级。因为一旦调高了某个线程的优先级，与低优先级线程的优先等级差距太大，就有可能导致低优先级线程永远得不到运行的机会，从而产生性能瓶颈。比如说有两个线程A和B，起初优先级相差无几，那么在执行任务的时候都会相继无序的运行，如果将线程A的优先级调高，并且当线程A不会因为执行的任务而阻塞时，线程B就可能一直不能运行，此时如果线程A中执行的任务需要与线程B中任务进行数据交互，而迟迟得不到线程B中的结果，此时线程A就会被阻塞，那么程序的性能自然就会产生瓶颈。</p>
+<h2 id="u7EBF_u7A0B_u6267_u884C_u7684_u4EFB_u52A1"><a href="#u7EBF_u7A0B_u6267_u884C_u7684_u4EFB_u52A1" class="headerlink" title="线程执行的任务"></a>线程执行的任务</h2><p>在任何平台，线程存在的价值和意义都是一样的，那就是执行任务，不论是方法、函数或一段代码，除了依照语言语法正常编写外，还有一些额外需要大家注意的事项。</p>
+<h3 id="Autorelease_Pool"><a href="#Autorelease_Pool" class="headerlink" title="Autorelease Pool"></a>Autorelease Pool</h3><p>在Xcode4.3之前，我们都处在手动管理引用计数的时代，代码里满是<code>retain</code>和<code>release</code>的方法，所以那个时候，被线程执行的任务中，为了能自动处理大量对象的<code>retain</code>和<code>release</code>操作，都会使用<code>NSAutoreleasePool</code>类创建自动释放池，它的作用是将线程中要执行的任务都放在自动释放池中，自动释放池会捕获所有任务中的对象，在任务结束或线程关闭之时自动释放这些对象：</p>
+ <pre><span class="line">- (<span class="keyword">void</span>)myThreadMainRoutine</span><br><span class="line">&#123;</span><br><span class="line"></span><br><span class="line">    <span class="built_in">NSAutoreleasePool</span> *pool = [[<span class="built_in">NSAutoreleasePool</span> alloc] init]; <span class="comment">// 顶层自动释放池</span></span><br><span class="line"></span><br><span class="line">    <span class="comment">// 线程执行任务的逻辑代码</span></span><br><span class="line"></span><br><span class="line">    [pool release];</span><br><span class="line"></span><br><span class="line">&#125;</span><br></pre> 
+<p>到了自动引用计数（ARC）时代，就不能使用<code>NSAutoreleasePool</code>进行自动释放池管理了，而是新加了<code>@autoreleasepool</code>代码块语法来创建自动释放池：</p>
+ <pre><span class="line">- (<span class="keyword">void</span>)myThreadMainRoutine</span><br><span class="line">&#123;</span><br><span class="line"></span><br><span class="line">    <span class="keyword">@autoreleasepool</span> &#123;</span><br><span class="line">     </span><br><span class="line">     <span class="comment">// 线程执行任务的逻辑代码</span></span><br><span class="line">     </span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">&#125;</span><br></pre> 
+<p>我们知道每个应用程序都是运行在一个主线程里的，而线程都至少得有一个自动释放池，所以说整个应用其实是跑在一个自动释放池中的。大家都知道C系语言中，程序的入口函数都是<code>main</code>函数，当我们创建一个Objective－C的iOS应用后，Xcode会在<strong>Supporting Files</strong>目录下自动为我们创建一个<code>main.m</code>文件：</p>
+<p><img src="./image/LearnThread-2.png" alt="LearnThread-2"></p>
+<p>在<code>main.m</code>这个文件中就能证实上面说的那点：</p>
+<td class="code"><pre><span class="line"><span class="keyword">int</span> main(<span class="keyword">int</span> argc, <span class="keyword">char</span> * argv[]) &#123;</span><br><span class="line">    <span class="keyword">@autoreleasepool</span> &#123;</span><br><span class="line">        <span class="keyword">return</span> <span class="built_in">UIApplicationMain</span>(argc, argv, <span class="literal">nil</span>, <span class="built_in">NSStringFromClass</span>([AppDelegate class]));</span><br><span class="line">    &#125;</span><br><span class="line">&#125;</span><br></pre> 
+<p>以上都是在Objective－C中，但在Swift中，就有点不一样了，<code>NSAutoreleasePool</code>和<code>@autoreleasepool</code>都不能用了，取而代之的是Swift提供的一个方法<code>func autoreleasepool(code: () -&gt; ())</code>，接收的参数为一个闭包，我们可以这样使用：</p>
+  <pre><span class="line"><span class="func"><span class="keyword">func</span> <span class="title">performInBackground</span><span class="params">()</span></span> &#123;</span><br><span class="line">        </span><br><span class="line">        autoreleasepool(&#123;</span><br><span class="line">        </span><br><span class="line">          <span class="comment">// 线程执行任务的逻辑代码</span></span><br><span class="line">          </span><br><span class="line">          <span class="built_in">print</span>(<span class="string">"I am a event, perform in Background Thread."</span>)  </span><br><span class="line">          </span><br><span class="line">        &#125;)</span><br><span class="line">        </span><br><span class="line">    &#125;</span><br></pre> 
+<p>根据尾随闭包的写法，还可以这样使用：</p>
+  <pre><span class="line"><span class="func"><span class="keyword">func</span> <span class="title">performInBackground</span><span class="params">()</span></span> &#123;</span><br><span class="line"></span><br><span class="line">        autoreleasepool&#123;</span><br><span class="line">        </span><br><span class="line">          <span class="comment">// 线程执行任务的逻辑代码</span></span><br><span class="line">          </span><br><span class="line">          <span class="built_in">print</span>(<span class="string">"I am a event, perform in Background Thread."</span>)</span><br><span class="line">            </span><br><span class="line">        &#125;</span><br><span class="line">        </span><br><span class="line">    &#125;</span><br></pre> 
+<p>有些人可能会问在ARC的时代下为什么还要用自动释放池呢？比如在SDWebImage中就大量使用了<code>@autoreleasepool</code>代码块，其原因就是为了避免内存峰值，大家都知道在MRC时代，除了<code>retain</code>和<code>release</code>方法外，还有一个常用的方法是<code>autorelease</code>，用来延迟释放对象，它释放对象的时机是当前runloop结束时。到了ARC时代，虽然不用我们手动管理内存了，但其自动管理的本质与MRC时是一样的，只不过由编译器帮我们在合适的地方加上了这三个方法，所以说如果在一个线程执行的任务中大量产生需要<code>autorelease</code>的对象时，因为不能及时释放对象，所以就很有可能产生内存峰值。那么在这种任务中在特定的时候使用<code>@autorelease</code>代码块，帮助释放对象，就可以有效的防止内存峰值的发生。</p>
+<h3 id="u8BBE_u7F6E_u5F02_u5E38_u5904_u7406"><a href="#u8BBE_u7F6E_u5F02_u5E38_u5904_u7406" class="headerlink" title="设置异常处理"></a>设置异常处理</h3><p>在线程执行任务的时候，难免会出现异常，如果不能及时捕获异常任由其抛出，就会导致整个应用程序退出。在Swift2.0中，Apple提供了新的<a href="http://www.devtalking.com/articles/what-is-new-in-swift/">异常控制处理机制</a>，让我们能像Java中一样形如流水的捕获处理异常。所以在线程执行的任务中，我们尽量使用异常处理机制，提高健壮性。</p>
+<h3 id="u521B_u5EFARunloop"><a href="#u521B_u5EFARunloop" class="headerlink" title="创建Runloop"></a>创建Runloop</h3><p>大家知道，一个线程只能执行一个任务，当任务结束后也就意味着这个线程也要结束，频繁的创建线程也是挺消耗资源的一件事，于是就有了常驻线程，前文介绍线程相关概念时也提到过：</p>
+<blockquote>
+<p>简单的来说，RunLoop用于管理和监听异步添加到线程中的事件，当有事件输入时，系统唤醒线程并将事件分派给RunLoop，当没有需要处理的事件时，RunLoop会让线程进入休眠状态。这样就能让线程常驻在进程中，而不会过多的消耗系统资源，达到有事做事，没事睡觉的效果。</p>
+</blockquote>
+<p>如果想要线程不结束，那就要被执行的任务不结束，让被执行的任务不结束显然不靠谱，那么就需要一个机制，能占着线程。该机制就是事件循环机制（Eventloop），体现在代码中就是一个<code>do-while</code>循环，不断的接收事件消息、处理事件、等待新事件消息，除非接收到一个让其退出的事件消息，否则它将一直这么循环着，线程自然就不会结束。Runloop就是管理消息和事件，并提供Eventloop函数的对象，线程执行的任务其实就是在Runloop对象的Eventloop函数里运行。关于Runloop更详细的知识及配置<br>操作在后文中会有讲述。</p>
+<h3 id="u7EC8_u6B62_u7EBF_u7A0B"><a href="#u7EC8_u6B62_u7EBF_u7A0B" class="headerlink" title="终止线程"></a>终止线程</h3><p>打个不恰当的比方，人终有一死，或正常生老病死，或非正常出事故意外而亡，前者尚合情合理后者悲痛欲绝。线程也一样，有正常终止结束，也有非正常的强制结束，不管是线程本身还是应用程序都希望线程能正常结束，因为正常结束也就意味着被执行的任务正常执行完成，从而让线程处理完后事随即结束，如果在任务执行途中强制终止线程，会导致线程没有机会处理后事，也就是正常释放资源对象等，这样会给应用程序带来例如内存溢出这类潜在的问题，所以强烈不推荐强制终止线程的做法。</p>
+<p>如果确实有在任务执行途中终止线程的需求，那么可以使用Runloop，在任务执行过程中定期查看是否有收到终止任务的事件消息，这样一来可以在任务执行途中判断出终止任务的信号，然后进行终止任务的相关处理，比如保存数据等，二来可以让线程有充分的时间释放资源。</p>
+<h2 id="Run_Loop"><a href="#Run_Loop" class="headerlink" title="Run Loop"></a>Run Loop</h2><p>Run Loops是线程中的基础结构，在上文中也提到过，Run Loops其实是一个事件循环机制，用来分配、分派线程接受到的事件任务，同时可以让线程成为一个常驻线程，即有任务时处理任务，没任务时休眠，且不消耗资源。在实际应用时，Run Loop的生命周期并不全是自动完成的，还是需要人工进行配置，不论是Cocoa框架还是Core Foundation框架都提供了Run Loop的相关对象对其进行配置和管理。</p>
+<blockquote>
+<p>注：Core Foundation框架是一组C语言接口，它们为iOS应用程序提供基本数据管理和服务功能，比如线程和Run Loop、端口、Socket、时间日期等。</p>
+</blockquote>
+<p>在所有的线程中，不论是主线程还是二级线程，都不需要显示的创建Run Loop对象，这里的显示指的是通过任何<em>create</em>打头的方法创建Run Loop。对于主线程来说，当应用程序通过<code>UIApplicationMain</code>启动时，主线程中的Run Loop就已经创建并启动了，而且也配置好了。那么如果是二级线程，则需要我们手动先获取Run Loop，然后再手动进行配置并启动。下面的章节会向大家详细介绍Run Loop的知识。</p>
+<blockquote>
+<p>注：在二级线程中获取Run Loop有两种方式，通过<code>NSRunloop</code>的类方法<code>currentRunLoop</code>获取Run Loop对象（<code>NSRunLoop</code>），或者通过Core Foundation框架中的<code>CFRunLoopGetCurrent()</code>函数获取当前线程的Run Loop对象（<code>CFRunLoop</code>）。<code>NSRunLoop</code>是<code>CFRunLoop</code>的上层封装。</p>
+</blockquote>
+  <pre><span class="line"><span class="keyword">let</span> nsrunloop = <span class="type">NSRunLoop</span>.currentRunLoop()</span><br><span class="line">        </span><br><span class="line"><span class="keyword">let</span> cfrunloop = <span class="type">CFRunLoopGetCurrent</span>()</span><br></pre> 
+<h3 id="Run_Loop_u7684_u4E8B_u4EF6_u6765_u6E90"><a href="#Run_Loop_u7684_u4E8B_u4EF6_u6765_u6E90" class="headerlink" title="Run Loop的事件来源"></a>Run Loop的事件来源</h3><p>Run Loop有两个事件来源，一个是<strong>Input source</strong>，接收来自其他线程或应用程序（进程）的异步事件消息，并将消息分派给对应的事件处理方法。另一个是<strong>Timer source</strong>，接收定期循环执行或定时执行的同步事件消息，同样会将消息分派给对应的事件处理方法。</p>
+<p><img src="./image/LearnThread-3.png" alt="LearnThread-3"></p>
+<p>上图展示了Run Loop的两类事件来源，以及在Input source中的两种不同的子类型，它们分别对应着Run Loop中不同的处理器。当不同的事件源接收到消息后，通过<code>NSRunLoop</code>的<code>runUntilDate:</code>方法启动运行Run Loop，将事件消息分派给对应的处理器执行，一直到指定的时间时退出Run Loop。</p>
+<h3 id="Run_Loop_u7684_u89C2_u5BDF_u8005"><a href="#Run_Loop_u7684_u89C2_u5BDF_u8005" class="headerlink" title="Run Loop的观察者"></a>Run Loop的观察者</h3><p>Run Loop的观察者可以理解为Run Loop自身运行状态的监听器，它可以监听Run Loop的下面这些运行状态：</p>
+<ul>
+<li>Run Loop准备开始运行时。</li>
+<li>当Run Loop准备要执行一个Timer Source事件时。</li>
+<li>当Run Loop准备要执行一个Input Source事件时。</li>
+<li>当Run Loop准备休眠时。</li>
+<li>当Run Loop被进入的事件消息唤醒并且还没有开始让处理器执行事件消息时。</li>
+<li>退出Run Loop时。</li>
+</ul>
+<p>Run Loop的观察者在<code>NSRunloop</code>中没有提供相关接口，所以我们需要通过Core Foundation框架使用它，可以通过<code>CFRunLoopObserverCreate</code>方法创建Run Loop的观察者，类型为<code>CFRunLoopObserverRef</code>，它其实是<code>CFRunLoopObserver</code>的重定义名称。上述的那些可以被监听的运行状态被封装在了<code>CFRunLoopActivity</code>结构体中，对应关系如下：</p>
+<ul>
+<li><code>CFRunLoopActivity.Entry</code></li>
+<li><code>CFRunLoopActivity.BeforeTimers</code></li>
+<li><code>CFRunLoopActivity.BeforeSources</code></li>
+<li><code>CFRunLoopActivity.BeforeWaiting</code></li>
+<li><code>CFRunLoopActivity.AfterWaiting</code></li>
+<li><code>CFRunLoopActivity.Exit</code></li>
+</ul>
+<p>Run Loop的观察者和Timer事件类似，可以只使用一次，也可以重复使用，在创建观察者时可以设置。如果只使用一次，那么当监听到对应的状态后会自行移除，如果是重复使用的，那么会留在Run Loop中多次监听Run Loop相同的运行状态。</p>
+<h3 id="Run_Loop_Modes"><a href="#Run_Loop_Modes" class="headerlink" title="Run Loop Modes"></a>Run Loop Modes</h3><p>Run Loop Modes可以称之为Run Loop模式，这个模式可以理解为对Run Loop各种设置项的不同组合，举个例子，iPhone手机运行的iOS有很多系统设置项，假设白天我打开蜂窝数据，晚上我关闭蜂窝数据，而打开无线网络，到睡觉时我关闭蜂窝数据和无线网络，而打开飞行模式。假设在这三个时段中其他的所有设置项都相同，而只有这三个设置项不同，那么就可以说我的手机有三种不同的设置模式，对应着不同的时间段。那么Run Loop的设置项是什么呢？那自然就是前文中提到的不同的事件来源以及观察者了，比如说，Run Loop的模式A（Mode A），只包含接收Timer Source事件源的事件消息以及监听Run Loop运行时的观察者，而模式B（Mode B）只包含接收Input Source事件源的事件消息以及监听Run Loop准备休眠时和退出Run Loop时的观察者，如下图所示：</p>
+<p><img src="./image/LearnThread-4.png" alt="LearnThread-4"></p>
+<p>所以说，Run Loop的模式就是不同类型的数据源和不同观察者的集合，当Run Loop运行时要设置它的模式，也就是告知Run Loop只需要关心这个集合中的数据源类型和观察者，其他的一概不予理会。那么通过模式，就可以让Run Loop过滤掉它不关心的一些事件，以及避免被无关的观察者打扰。如果有不在当前模式中的数据源发来事件消息，那只能等Run Loop改为包含有该数据源类型的模式时，才能处理事件消息。</p>
+<p>在Cocoa框架和Core Foundation框架中，已经为我们预定义了一些Run Loop模式：</p>
+<ul>
+<li>默认模式：在<code>NSRunloop</code>中的定义为<code>NSDefaultRunLoopMode</code>，在<code>CFRunloop</code>中的定义为<code>kCFRunLoopDefaultMode</code>。该模式包含的事件源囊括了除网络链接操作的大多数操作以及时间事件，用于当前Run Loop处于空闲状态等待事件时，以及Run Loop开始运行时。</li>
+<li>NSConnectionReplyMode：该模式用于监听<code>NSConnection</code>相关对象的返回结果和状态，在系统内部使用，我们一般不会使用该模式。</li>
+<li>NSModalPanelRunLoopMode：该模式用于过滤在模态面板中处理的事件（Mac App）。</li>
+<li>NSEventTrackingRunLoopMode：该模式用于跟踪用户与界面交互的事件。</li>
+<li>模式集合：或者叫模式组，顾名思义就是将多个模式组成一个组，然后将模式组认为是一个模式设置给Run Loop，在<code>NSRunloop</code>中的定义为<code>NSRunLoopCommonModes</code>，在<code>CFRunloop</code>中的定义为<code>kCFRunLoopCommonModes</code>。系统提供的模式组名为Common Modes，它默认包含NSDefaultRunLoopMode、NSModalPanelRunLoopMode、NSEventTrackingRunLoopMode这三个模式。</li>
+</ul>
+<p>以上五种系统预定的模式中，前四种属于只读模式，也就是我们无法修改它们包含的事件源类型和观察者类型。而模式组我们可以通过Core Foundation框架提供的<code>CFRunLoopAddCommonMode(_ rl: CFRunLoop!, _ mode: CFString!)</code>方法添加新的模式，甚至是我们自定义的模式。这里需要注意的是，既然在使用时，模式组是被当作一个模式使用的，那么自然可以给它设置不同类型的事件源或观察者，当给模式组设置事件源或观察者时，实际是给该模式组包含的所有模式设置。比如说给模式组设置了一个监听Run Loop准备休眠时的观察者，那么该模式组里的所有模式都会被设置该观察者。</p>
+<h3 id="Input_Source"><a href="#Input_Source" class="headerlink" title="Input Source"></a>Input Source</h3><p>前文中说过，Input Sources接收到各种操作输入事件消息，然后异步的分派给对应事件处理方法。在Input Sources中又分两大类的事件源，一类是基于端口事件源（Port-based source），在<code>CFRunLoopSourceRef</code>的结构中为source1，主要通过监听应用程序的Mach端口接收事件消息并分派，该类型的事件源可以主动唤醒Run Loop。另一类是自定义事件源（Custom source），在<code>CFRunLoopSourceRef</code>的结构中为source0，一般是接收其他线程的事件消息并分派给当前线程的Run Loop，比如<code>performSwlwctor:onThread:...</code>系列方法，该类型的事件源无法自动唤醒Run Loop，而是需要手动将事件源设置为待执行的标记，然后再手动唤醒Run Loop。虽然这两种类型的事件源接收事件消息的方式不一样，但是当接收到消息后，对消息的分派机制是完全相同的。</p>
+<h4 id="Port-Based_Source"><a href="#Port-Based_Source" class="headerlink" title="Port-Based Source"></a>Port-Based Source</h4><p>Cocoa框架和Core Foundation框架都提供了相关的对象和函数用于创建基于端口的事件源。在Cocoa框架中，实现基于端口的事件源主要是通过<code>NSPort</code>类实现的，它代表了交流通道，也就是说在不同的线程的Run Loop中都存在<code>NSPort</code>，那么它们之间就可以通过发送与接收消息（<code>NSPortMessage</code>）互相通信。所以我们只需要通过<code>NSPort</code>类的类方法<code>port</code>创建对象实例，然后通过<code>NSRunloop</code>的方法将其添加到Run Loop中，或者在创建二级线程时将创建好的<code>NSPort</code>对象传入即可，无需我们再做消息、消息上下文、事件源等其他配置，都由Run Loop自行配置好了。而在Core Foundation框架中就比较麻烦一些，大多数配置都需要我们手动配置，在后面会详细举例说明。</p>
+<h4 id="Custom_Input_Source"><a href="#Custom_Input_Source" class="headerlink" title="Custom Input Source"></a>Custom Input Source</h4><p>Cocoa框架中没有提供创建自定义事件源的相关接口，我们只能通过Core Foundation框架中提供的对象和函数创建自定义事件源，手动配置事件源各个阶段要处理的逻辑，比如创建<code>CFRunLoopSourceRef</code>事件源对象，通过<code>CFRunLoopScheduleCallBack</code>回调函数配置事件源上下文并注册事件源，通过<code>CFRunLoopPerformCallBack</code>回调函数处理接收到事件消息后的逻辑，通过<code>CFRunLoopCancelCallBack</code>函数销毁事件源等等，在后文中会有详细举例说明。</p>
+<p>虽然Cocoa框架没有提供创建自定义事件源的相关对象和接口，但是它为我们预定义好了一些事件源，能让我们在当前线程、其他二级线程、主线程中执行我们希望被执行的方法，让我们看看<code>NSObject</code>中的这些方法：</p>
+  <pre><span class="line"><span class="func"><span class="keyword">func</span> <span class="title">performSelectorOnMainThread</span><span class="params">(<span class="number">_</span> aSelector: Selector, withObject arg: AnyObject?, waitUntilDone wait: Bool)</span></span></span><br><span class="line"></span><br><span class="line"><span class="func"><span class="keyword">func</span> <span class="title">performSelectorOnMainThread</span><span class="params">(<span class="number">_</span> aSelector: Selector, withObject arg: AnyObject?, waitUntilDone wait: Bool, modes array: [String]?)</span></span></span><br></pre> 
+<p>这两个方法允许我们将当前线程中对象的方法让主线程去执行，可以选择是否阻塞当前线程，以及希望被执行的方法作为事件消息被何种Run Loop模式监听。</p>
+<blockquote>
+<p>注：如果在主线程中使用该方法，当选择阻塞当前线程，那么发送的方法会立即被主线程执行，若选择不阻塞当前线程，那么被发送的方法将被排进主线程Run Loop的事件队列中，并等待执行。</p>
+</blockquote>
+  <pre><span class="line"><span class="func"><span class="keyword">func</span> <span class="title">performSelector</span><span class="params">(<span class="number">_</span> aSelector: Selector, withObject anArgument: AnyObject?, afterDelay delay: NSTimeInterval)</span></span></span><br><span class="line"></span><br><span class="line"><span class="func"><span class="keyword">func</span> <span class="title">performSelector</span><span class="params">(<span class="number">_</span> aSelector: Selector, withObject anArgument: AnyObject?, afterDelay delay: NSTimeInterval, inModes modes: [String])</span></span></span><br></pre> 
+<p>这两个方法允许我们给当前线程发送事件消息，当前线程接收到消息后会依次加入Run Loop的事件消息队列中，等待Run Loop迭代执行。该方法还可以指定消息延迟发送时间及消息希望被何种Run Loop模式监听。</p>
+<blockquote>
+<p>注：该方法中的延迟时间并不是延迟Run Loop执行事件消息的事件，而是延迟向当前线程发送事件消息的时间。另外，即便不设置延迟时间，那么发送的事件消息也不一定立即被执行，因为在Run Loop的事件消息队列中可以已有若干等待执行的消息。</p>
+</blockquote>
+  <pre><span class="line"><span class="func"><span class="keyword">func</span> <span class="title">performSelector</span><span class="params">(<span class="number">_</span> aSelector: Selector, onThread thr: NSThread, withObject arg: AnyObject?, waitUntilDone wait: Bool)</span></span></span><br><span class="line"></span><br><span class="line"><span class="func"><span class="keyword">func</span> <span class="title">performSelector</span><span class="params">(<span class="number">_</span> aSelector: Selector, onThread thr: NSThread, withObject arg: AnyObject?, waitUntilDone wait: Bool, modes array: [String]?)</span></span></span><br></pre> 
+<p>这两个方法允许我们给其他二级线程发送事件消息，前提是要取得目标二级线程的<code>NSThread</code>对象实例，该方法同样提供了是否阻塞当前线程的选项和设置Run Loop模式的选项。</p>
+<blockquote>
+<p>注：使用该方法给二级线程发送事件消息时要确保目标线程正在运行，换句话说就是目标线程要有启动着的Run Loop。并且保证目标线程执行的任务要在应用程序代理执行<code>applicationDidFinishLaunching:</code>方法前完成，否则主线程就结束了，目标线程自然也就结束了。</p>
+</blockquote>
+  <pre><span class="line"><span class="func"><span class="keyword">func</span> <span class="title">performSelectorInBackground</span><span class="params">(<span class="number">_</span> aSelector: Selector, withObject arg: AnyObject?)</span></span></span><br></pre> 
+<p>该方法允许我们在当前应用程序中创建一个二级线程，并将指定的事件消息发送给新创建的二级线程。</p>
+  <pre><span class="line"><span class="class"><span class="keyword">class</span> <span class="title">func</span> <span class="title">cancelPreviousPerformRequestsWithTarget</span>(<span class="title">_</span> <span class="title">aTarget</span>: <span class="title">AnyObject</span>)</span><br><span class="line"></span><br><span class="line"><span class="title">class</span> <span class="title">func</span> <span class="title">cancelPreviousPerformRequestsWithTarget</span>(<span class="title">_</span> <span class="title">aTarget</span>: <span class="title">AnyObject</span>, <span class="title">selector</span> <span class="title">aSelector</span>: <span class="title">Selector</span>, <span class="title">object</span> <span class="title">anArgument</span>: <span class="title">AnyObject</span>?)</span></span><br></pre> 
+<p>这两个方法是<code>NSObject</code>的类方法，第一个方法作用是在当前线程中取消Run Lop中某对象通过<code>performSelector:withObject:afterDelay:</code>方法发送的所有事件消息执行请求。第二个方法多了两个过滤参数，那就是方法名称和参数，取消指定方法名和参数的事件消息执行请求。</p>
+<h3 id="Timer_Source"><a href="#Timer_Source" class="headerlink" title="Timer Source"></a>Timer Source</h3><p>Timer Source顾名思义就是向Run Loop发送在将来某一时间执行或周期性重复执行的同步事件消息。当某线程不需要其他线程通知而需要自己通知自己执行任务时就可以用这种事件源。举个应用场景，在iOS应用中，我们经常会用到搜索功能，而且一些搜索框具有自动搜索的能力，也就是说不用我们点击搜索按钮，只需要输入完我想要搜索的内容就会自动搜索，大家想一想如果每输入一个字就开始立即搜索，不但没有意义，性能开销也大，用户体验自然也很糟糕，我们希望当输入完这句话，或至少输入一部分之后再开始搜索，所以我们就可以在开始输入内容时向执行搜索功能的线程发送定时搜索的事件消息，让其在若干时间后再执行搜索任务，这样就有缓冲时间输入搜索内容了。</p>
+<p>这里需要注意的是Timer Source发送给Run Loop的周期性执行任务的重复时间是相对时间。比如说给Run Loop发送了一个每隔5秒执行一次的任务，每次执行任务的正常时间为2秒，执行5次后终止，假设该任务被立即执行，那么当该任务终止时应该历时30秒，但当第一次执行时出现了问题，导致任务执行了20秒，那么该任务只能再执行一次就终止了，执行的这一次其实就是第5次，也就是说不论任务的执行时间延迟与否，Run Loop都会按照初始的时间间隔执行任务，并非按Finish-To-Finish去算的，所以一旦中间任务有延时，那么就会丢失任务执行次数。关于Timer Source的使用，在后文中会有详细举例说明。</p>
+<h3 id="Run_Loop_u5185_u90E8_u8FD0_u884C_u903B_u8F91"><a href="#Run_Loop_u5185_u90E8_u8FD0_u884C_u903B_u8F91" class="headerlink" title="Run Loop内部运行逻辑"></a>Run Loop内部运行逻辑</h3><p>在Run Loop的运行生命周期中，无时无刻都伴随着执行等待执行的各种任务以及在不同的运行状态时通知不同的观察者，下面我们看看Run Loop中的运行逻辑到底是怎样的：</p>
+<ol>
+<li>通知对应观察者Run Loop准备开始运行。</li>
+<li>通知对应观察者准备执行定时任务。</li>
+<li>通知对应观察者准备执行自定义事件源的任务。</li>
+<li>开始执行自定义事件源任务。</li>
+<li>如果有基于端口事件源的任务准备待执行，那么立即执行该任务。然后跳到步骤9继续运转。</li>
+<li>通知对应观察者线程进入休眠。</li>
+<li>如果有下面的事件发生，则唤醒线程：<ul>
+<li>接收到基于端口事件源的任务。</li>
+<li>定时任务到了该执行的时间点。</li>
+<li>Run Loop的超时时间到期。</li>
+<li>Run Loop被手动唤醒。</li>
+</ul>
+</li>
+<li>通知对应观察者线程被唤醒。</li>
+<li>执行等待执行的任务。<ul>
+<li>如果有定时任务已启动，执行定时任务并重启Run Loop。然后跳到步骤2继续运转。</li>
+<li>如果有非定时器事件源的任务待执行，那么分派执行该任务。</li>
+<li>如果Run Loop被手动唤醒，重启Run Loop。然后跳转到步骤2继续运转。</li>
+</ul>
+</li>
+<li>通知对应观察者已退出Run Loop。</li>
+</ol>
+<p>以上这些Run Loop中的步骤也不是每一步都会触发，举一个例子：<br>1.对应观察者接收到通知Run Loop准备开始运行 -&gt; 3.对应观察者接收到通知Run Loop准备执行自定义事件源任务 -&gt; 4.开始执行自定义事件源任务 -&gt; 任务执行完毕且没有其他任务待执行 -&gt; 6.线程进入休眠状态，并通知对应观察者 -&gt; 7.接收到定时任务并唤醒线程 -&gt; 8.通知对应观察者线程被唤醒 -&gt; 9.执行定时任务并重启Run Loop -&gt; 2.通知对应观察者准备执行定时任务 －&gt; Run Loop执行定时任务，并在等待下次执行任务的间隔中线程休眠 -&gt; 6.线程进入休眠状态，并通知对应观察者…</p>
+<p>这里需要注意的一点是从上面的运行逻辑中可以看出，当观察者接收到执行任务的通知时，Run Loop并没有真正开始执行任务，所以观察者接收到通知的时间与Run Loop真正执行任务的时间有时间差，一般情况下这点时间差影响不大，但如果你需要通过观察者知道Run Loop执行任务的确切时间，并根据这个时间要进行后续操作的话，那么就需要通过结合多个观察者接收到的通知共同确定了。一般通过监听准备执行任务的观察者、监听线程进入休眠的观察者、监听线程被唤醒的观察者共同确定执行任务的确切时间。</p>
+
+</span>
+</div>
+</article>
