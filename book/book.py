@@ -194,7 +194,7 @@ def readBooks():
 
 def clone(name, git, tag):
     if os.path.exists(name):
-        return
+        shutil.rmtree(name)
     destCmd = "git clone --depth=1 "
     if len(tag) > 0: destCmd = destCmd + " -b " + tag + " "
     destCmd = destCmd + git  + " "
@@ -237,7 +237,6 @@ def processChapters(ymls):
     return orderDict
 
 def generateChaters(orderChapters, name):
-
     destPath = os.path.join(DEST_DIR, name)
     print(destPath)
     if not os.path.exists(destPath):
@@ -300,6 +299,7 @@ def main():
     html = ""
     books = readBooks()
     for book in books:
+        os.chdir(currentDir)
         # print(book)
         name = book["name"]
         git = book["git"]
