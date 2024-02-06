@@ -22,16 +22,18 @@ import inspect
 from enum import Enum
 import collections
 
-print(sys.path)
 sys.path.append(r'../app') 
-print(sys.path)
+# print(sys.path)
 import Util
 
+GENERATE_EPUB = False
 
 SLASH = "/"
 DOCS = "docs"
+BASE_DIR = ""
 DEST_NAME = "dest"
 DEST_DIR = ""
+EPUB_NAME = "epub"
 CSS_STYLE = ""
 
 CONTENT_TMP = """
@@ -179,7 +181,7 @@ def readCss():
     global CSS_STYLE
     for css in cssList:
         cssFile = os.path.join(path, css)
-        print(cssFile)
+        # print(cssFile)
         content = Util.getTheFileContent(cssFile)
         CSS_STYLE = CSS_STYLE + content
     # print(CSS_STYLE)
@@ -236,8 +238,8 @@ def processChapters(ymls):
                 setOrderDict(category, value)
     return orderDict
 
-def generateChaters(orderChapters, name):
-    destPath = os.path.join(DEST_DIR, name)
+def generateChaters(orderChapters, baseName):
+    destPath = os.path.join(DEST_DIR, baseName)
     print(destPath)
     if not os.path.exists(destPath):
         os.makedirs(destPath)
@@ -262,17 +264,17 @@ def generateChaters(orderChapters, name):
             indexName = str(index)+"."+str(subIndex)
             content = Util.getTheFileContent(filePath)
             # 将markdown文本转换html的样式
-            content  = Util.transformTheMarkdownToHtml(content)
-            content = CONTENT_TMP % (CSS_STYLE, content)
+            htmlContent = Util.transformTheMarkdownToHtml(content)
+            content = CONTENT_TMP % (CSS_STYLE, htmlContent)
             Util.writeContentToFile(outputFile, content)
             # print(indexName, "---->", filePath, desc, outputDir, outputFile)
             subIndex = subIndex + 1
-            chapters.append([indexName, key, fileName.replace(".md", ".html")])
+            chapters.append([indexName, key, fileName.replace(".md", ".html"), htmlContent])
 
         index = index + 1
     print(" ")
     indexPath = os.path.join(destPath, "index.html")
-    print(chapters)
+    # print(chapters)
     html = ""
     for chapter in chapters:
         category = chapter[0]
@@ -285,12 +287,15 @@ def generateChaters(orderChapters, name):
 
     content = CONTENT_TMP % (CSS_STYLE, html)
     Util.writeContentToFile(indexPath, content)
+    if GENERATE_EPUB:
+        Util.generateEpub(baseName, chapters, os.path.join(BASE_DIR, EPUB_NAME), CSS_STYLE)
 
 def main():
-    currentDir = os.getcwd()
+    global BASE_DIR
+    BASE_DIR = os.getcwd()
     readCss()
     global DEST_DIR
-    DEST_DIR = os.path.join(currentDir, DEST_NAME)
+    DEST_DIR = os.path.join(BASE_DIR, DEST_NAME)
     # print(DEST_DIR)
     if not os.path.exists(DEST_DIR):
         os.makedirs(DEST_DIR)
@@ -299,13 +304,13 @@ def main():
     html = ""
     books = readBooks()
     for book in books:
-        os.chdir(currentDir)
+        os.chdir(BASE_DIR)
         # print(book)
         name = book["name"]
         git = book["git"]
         tag = book["tag"]
         if len(git) == 0: continue
-        clone(name, git, tag)
+        # clone(name, git, tag)
         os.chdir(name)
         ymls = []
         with open("./chapters.yml", 'r', encoding='utf-8') as f:
@@ -317,8 +322,8 @@ def main():
         generateChaters(orderChapters, name)
         html = html + '<li><a href="%s/%s/index.html">%s</a></li>' % (DEST_NAME, name, name)
     
-    os.chdir(currentDir)
-    indexPath = os.path.join(currentDir, "index.html")
+    os.chdir(BASE_DIR)
+    indexPath = os.path.join(BASE_DIR, "index.html")
     content = CONTENT_TMP % (CSS_STYLE, html)
     Util.writeContentToFile(indexPath, content)
     pass
