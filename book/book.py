@@ -25,8 +25,9 @@ import collections
 sys.path.append(r'../app') 
 # print(sys.path)
 import Util
+from RBLog import *
 
-GENERATE_EPUB = False
+GENERATE_EPUB = True
 
 SLASH = "/"
 DOCS = "docs"
@@ -80,7 +81,7 @@ class Color(Enum):
     White = 37
 
 def operator(cmdString, newline=True):
-    print(cmdString)
+    LogI(cmdString)
     res = subprocess.Popen(cmdString, 
                             shell=True, 
                             stdout=subprocess.PIPE,
@@ -240,13 +241,13 @@ def processChapters(ymls):
 
 def generateChaters(orderChapters, baseName):
     destPath = os.path.join(DEST_DIR, baseName)
-    print(destPath)
+    LogI(destPath)
     if not os.path.exists(destPath):
         os.makedirs(destPath)
 
     chapters = []
     index = 0
-    print(os.getcwd())
+    LogI(os.getcwd())
     for key, values in orderChapters.items():
         key = key.strip(SLASH)
         subIndex = 1
@@ -272,7 +273,7 @@ def generateChaters(orderChapters, baseName):
             chapters.append([indexName, key, fileName.replace(".md", ".html"), htmlContent])
 
         index = index + 1
-    print(" ")
+
     indexPath = os.path.join(destPath, "index.html")
     # print(chapters)
     html = ""
