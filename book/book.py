@@ -327,16 +327,3 @@ if __name__ == '__main__':
     main()
     pass
 
-"""
-<link rel="stylesheet" href="../../../../vender/js/highlight/zruibin_code.css" />
-<!-- <script type="text/javascript" charset="UTF-8" src="../../../../vender/js/highlight/highlight.min.js" />  -->
-<script>
-hljs.configure({
-    // 忽略未经转义的 HTML 字符
-    ignoreUnescapedHTML: true,
-});
-hljs.highlightAll();
-</script>
-"""
-
-
