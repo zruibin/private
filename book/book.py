@@ -311,7 +311,7 @@ def main():
         git = book["git"]
         tag = book["tag"]
         if len(git) == 0: continue
-        # clone(name, git, tag)
+        clone(name, git, tag)
         os.chdir(name)
         ymls = []
         with open("./chapters.yml", 'r', encoding='utf-8') as f:
