@@ -26,17 +26,18 @@ END_DATA-->
 class MyClass {  
 public:  
     static void Test_Func1() {  
-    cout << "Handle Test_Func1!" << endl;  
+        cout << "Handle Test_Func1!" << endl;  
     }  
     void Test_Func2() {  
-    cout << "Handle Test_Func2!" << endl;  
+        cout << "Handle Test_Func2!" << endl;  
     }  
     void Test_Func3() {  
-    cout << "Handle Test_Func3! value:" << value << endl;  
+        cout << "Handle Test_Func3! value:" << value << endl;  
     }  
     virtual void Test_Func4() {  
-    cout << "Handle Test_Func4!" << endl;  
-    }  
+        cout << "Handle Test_Func4!" << endl;  
+    }
+
     int value = 0;  
 };  
 
@@ -76,7 +77,7 @@ if(url_handler->IsUrlNeedHandle(data)) {
 bool IsBlacklistDllFromSrv(const std::string& dll_name) {  
     try {  
         std::string target_str = dll_name;  
-    std::transform(target_str.begin(), target_str.end(), target_str.begin(), ::tolower);  
+        std::transform(target_str.begin(), target_str.end(), target_str.begin(), ::tolower);  
         if (dll_blacklist_from_srv.find(target_str) != std::string::npos) {  
             return true;  
         }  
@@ -208,7 +209,8 @@ int main(){
         std::wstring wideStr = L"Hello, 你好!";  
         std::string narrowStr = wideToNarrow(wideStr);  
         std::wstring convertedWideStr = narrowToWide(narrowStr);  
-    } {  
+    } 
+    {  
         //std::string narrowStr = "Hello, 你好!"; (1)  
         std::string narrowStr = utf8ToString(u8"Hello, 你好!"); //(2)  
         std::wstring wideStr = narrowToWide(narrowStr);  
@@ -567,7 +569,7 @@ effective C++中也提到了：以pass-by-reference-to-const替换pass-by-value
 对`shared_ptr`相信大家都很熟悉，但是一提到是否线程安全，可能很多人心里就没底了，借助本节，对`shared_ptr`线程安全方面的问题进行分析和解释。`shared_ptr`的线程安全问题主要有两种：
 
 1. 引用计数的加减操作是否线程安全; 
-2. 2. `shared_ptr`修改指向时是否线程安全。
+2. `shared_ptr`修改指向时是否线程安全。
 
 **引用计数**
 
@@ -604,7 +606,7 @@ _Atomic_word _M_weak_count;  // #weak + (#shared != 0)
  }  
 ```
 
-对引用计数的增加主要有以下2种方法：`_M_add_ref_copy`函数，对`_M_use_count + 1`，是原子操作。`_M_add_ref_lock`函数，是调用`__atomic_compare_exchange_n``实现的``，`主要逻辑仍然是`_M_use_count + 1，而该函数是线程安全的，`和`_M_add_ref_copy`的区别是对不同`_Lock_policy`有不同的实现，包含直接加、原子操作加、加锁。
+对引用计数的增加主要有以下2种方法：`_M_add_ref_copy`函数，对`_M_use_count + 1`，是原子操作。`_M_add_ref_lock`函数，是调用`__atomic_compare_exchange_n`实现的，主要逻辑仍然是`_M_use_count + 1`，而该函数是线程安全的，和`_M_add_ref_copy`的区别是对不同`_Lock_policy`有不同的实现，包含直接加、原子操作加、加锁。
 
 因此我们可以得出结论：在多线程环境下，管理同一个数据的`shared_ptr`在进行计数的增加或减少的时候是线程安全的，这是一波原子操作。
 
@@ -684,13 +686,13 @@ void fn(shared_ptr<A> sp) {
 
 我们可以得到下面的结论：
 
-1. 多线程环境中，对于持有相同裸指针的`std::shared_ptr`实例，所有成员函数的调用都是线程安全的。
+1、 多线程环境中，对于持有相同裸指针的`std::shared_ptr`实例，所有成员函数的调用都是线程安全的。
 
 a. 当然，对于不同的裸指针的 `std::shared_ptr` 实例，更是线程安全的
 
 b. 这里的 “成员函数” 指的是 `std::shared_ptr` 的成员函数，比如 get ()、reset ()、operrator->()等
 
-2. 多线程环境中，对于同一个`std::shared_ptr`实例，只有访问const的成员函数，才是线程安全的，对于非const成员函数，是非线程安全的，需要加锁访问。
+2、 多线程环境中，对于同一个`std::shared_ptr`实例，只有访问const的成员函数，才是线程安全的，对于非const成员函数，是非线程安全的，需要加锁访问。
 
 首先来看一下 `std::shared_ptr` 的所有成员函数，只有前3个是 non-const 的，剩余的全是 const 的：
 
@@ -772,7 +774,7 @@ std::string getData(const std::string& key) {
 
 **strlen** 是个函数，只能用于以 null 字符结尾的字符串，返回的是一个以 null 字符（'\0'）结尾的字符串的长度(不包括 null 字符本身)，且在运行时才会计算字符串的长度。
 
-需要注意的是，使用 sizeof 操作符计算数组长度时需要注意数组元素类型的大小。例如，对于一个 int 类型的数组，使用 sizeof 操作符计算其长度应该为 sizeof(array) / sizeof(int)。而对于一个字符数组，使用strlen函数计算其长度应该为 strlen(array)。
+需要注意的是，使用 sizeof 操作符计算数组长度时需要注意数组元素类型的大小。例如，对于一个 int 类型的数组，使用 sizeof 操作符计算其长度应该为 `sizeof(array) / sizeof(int)`。而对于一个字符数组，使用strlen函数计算其长度应该为 strlen(array)。
 
 ```cpp
 char str[] = "hello";  
@@ -858,7 +860,7 @@ Start Calculate...
 The calculation result is:655  
 ```
 
-执行完(1) (2), 然后再(4)(3), 说明是真正调用std::future<>::get()才去执行的，如果没有调用get，那么就一直不会执行。
+执行完(1) (2), 然后再(4)(3), 说明是真正调用`std::future<>::get()`才去执行的，如果没有调用get，那么就一直不会执行。
 
 std::async是否异步受参数控制的，其第一个参数是启动策略，它控制 std::async 的异步行为。可以使用 3 种不同的启动策略创建std::async ，即：
 
