@@ -18,7 +18,10 @@ END_DATA-->
 
 TGFX（Tencent Graphics） 是一个跨平台的纯 GPU 绘图引擎，提供了完备的图片，矢量和文本的 2D 绘制能力。它最初是从 [PAG动效](https://pag.art/)的开源项目中孵化而来，作为 Skia 绘图引擎的轻量化平替方案，以仅 **400K** 左右的包体大小实现了 Skia 近 2M 包体的绝大部分功能，并为 PAG 4.0 版本带来了约 **65%** 的包体降低以及 **60%** 的矢量渲染性能提升。截止 2023 年 7 月，借助 PAG 项目，TGFX 已经实际运行在了 **1000+** 的头部业务场景中，如**微信，手Q，王者荣耀，小红书，知乎，Bilibili**等，稳定性也经过了 **10 亿+** 用户设备的持续验证。除了 PAG 外，TGFX 目前也独立在Bilibili的音视频编辑框架，[Hippy ](https://github.com/Tencent/Hippy)动态化框架以及[腾讯文档](https://docs.qq.com/)中作为底层的绘图引擎使用，也为腾讯文档带来了 **50% **的内存直线降低。
 
-**Github地址**：[https://github.com/Tencent/libpag/tree/main/tgfx](https://github.com/Tencent/libpag/tree/main/tgfx)  
+**Github地址**：
+
+* [https://github.com/Tencent/libpag/tree/main/tgfx](https://github.com/Tencent/libpag/tree/main/tgfx)
+* [tgfx](https://github.com/Tencent/tgfx)
 
 ## 二、 诞生背景
 
