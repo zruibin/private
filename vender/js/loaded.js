@@ -53,6 +53,7 @@ document.onreadystatechange = () => {
         setTimeout("loadingView(false)", 50);
 
         if (isArticle()) {
+            loadingImage();
             mathOnDidLoad();
         }
     }
@@ -150,6 +151,7 @@ if (isArticle()) {
     // 用concat方法把两个或者多个数组连接在一起，但是不改变已经存在的数组
     // 而是返回一个连接之后的新数组
     loadFiles = loadFiles.concat([
+        "vender/loadImage/loadImage.js",
         "vender/preview/preview.js",
         "vender/preview/preview.css",
         "vender/jump/jump.css",
