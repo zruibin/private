@@ -10,7 +10,7 @@
   var obj = document.createElement("p");
   obj.className = "alignright";
 
-  var content = 'COPYRIGHT © 2014-2024 <a href="index.html">Ruibin.Chow</a> ALL RIGHTS RESERVED. &nbsp;';
+  var content = 'COPYRIGHT © 2014-2026 <a href="index.html">Ruibin.Chow</a> ALL RIGHTS RESERVED. &nbsp;';
   // content += '<br><a href="https://beian.miit.gov.cn/">粤ICP备2021173035号</a>';
   obj.innerHTML = content;
 
