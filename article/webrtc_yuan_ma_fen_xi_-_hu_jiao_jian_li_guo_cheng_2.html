@@ -1,0 +1,1465 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>WebRTC源码分析-呼叫建立过程2 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="WebRTC源码分析-呼叫建立过程2,C/C++,WebRTC,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="WebRTC源码分析-呼叫建立过程之四（上）(创建并添加本地音频轨到PeerConnection)<br/>WebRTC源码分析-呼叫建立过程之四（中）(创建并添加本地视频轨到PeerConnection)<br/>WebRTC源码分析-呼叫建立过程之四（下）(创建数据通道DataChannel)" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>WebRTC源码分析-呼叫建立过程2</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2020-09-12 18:47
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+<a href='../article/tag_webrtc.html' class='article_tag'>WebRTC</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://blog.csdn.net/ice_ly000/article/details/105763733' target='blank'>WebRTC源码分析-呼叫建立过程之四（上）(创建并添加本地音频轨到PeerConnection)</a></p></h4>
+<h4>目录</h4>
+<ul>
+<li><ol>
+<li>引言</li>
+</ol>
+</li>
+<li><ol>
+<li>音频轨创建和添加</li>
+</ol>
+</li>
+<li><ul>
+<li>2.1 音频源AudioSource的创建</li>
+<li><ul>
+<li>2.1.1 音频源继承树</li>
+</ul>
+</li>
+<li>2.1.2 近端音频源LocalAudioSource</li>
+<li>2.1.3 远端音频源RemoteAudioSource</li>
+<li>2.2 创建音频轨AudioTrack</li>
+<li><ul>
+<li>2.2.1 音频轨继承树</li>
+</ul>
+</li>
+<li>2.3 添加音频轨AudioTrack到PeerConnection</li>
+<li><ul>
+<li>2.3.1 PeerConnection::FindSenderForTrack</li>
+</ul>
+</li>
+<li>2.3.2 PeerConnection::AddTrackUnifiedPlan</li>
+<li>2.3.3 PeerConnection::UpdateNegotiationNeeded</li>
+<li><ul>
+<li>2.3.3.1 PC的信令状态——SignalingState</li>
+</ul>
+</li>
+<li>2.3.3.2 是否需要协商？——CheckIfNegotiationIsNeeded()</li>
+<li>2.3.4 StatsCollector::AddTrack</li>
+</ul>
+</li>
+<li><ol>
+<li>总结</li>
+</ol>
+</li>
+</ul>
+<h2>1. 引言</h2>
+<p>创建完PeerConnectionFactory 和 PeerConnection这两个API层的操盘对象之后，紧接着需要初始化本地的媒体，也即创建本地的音频轨、视频轨、数据通道，并将这些本地的媒体轨道添加到PeerConnection对象中。如图中红色标注所示。</p>
+<p>本文将详细描述上述轨道的创建细节 以及 轨道被添加到PeerConnection中的存储情况。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200912-184336-10.jpg" alt="在这里插入图片描述"></p>
+<h2>2. 音频轨创建和添加</h2>
+<p>WebRTC的示例工程中使用如下几行代码实现AudioTrack的创建 &amp;&amp; 添加AudioTrack到PeerConnection中。</p>
+<div class="highlight"><pre><code><span></span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">webrtc</span><span class="o">::</span><span class="n">AudioTrackInterface</span><span class="o">&gt;</span><span class="w"> </span><span class="n">audio_track</span><span class="p">(</span>
+<span class="w">    </span><span class="n">peer_connection_factory_</span><span class="o">-&gt;</span><span class="n">CreateAudioTrack</span><span class="p">(</span>
+<span class="w">        </span><span class="n">kAudioLabel</span><span class="p">,</span><span class="w"> </span><span class="n">peer_connection_factory_</span><span class="o">-&gt;</span><span class="n">CreateAudioSource</span><span class="p">(</span>
+<span class="w">                          </span><span class="n">cricket</span><span class="o">::</span><span class="n">AudioOptions</span><span class="p">())));</span>
+<span class="k">auto</span><span class="w"> </span><span class="n">result_or_error</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">peer_connection_</span><span class="o">-&gt;</span><span class="n">AddTrack</span><span class="p">(</span><span class="n">audio_track</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="n">kStreamId</span><span class="p">});</span>
+</code></pre></div>
+<ul>
+<li>视频轨对象肯定实现了rtc::RefCountInterface接口，因为最后被智能指针对象audio_track所持有</li>
+<li>PeerConnectionFactory.CreateAudioTrack方法用来创建音频轨，音频轨实现了AudioTrackInterface接口；</li>
+<li>PeerConnectionFactory.CreateAudioSource方法用来创建音频源，并作为创建音频轨的参数，传递给音频轨对象。音频源对象实现了AudioSourceInterface接口</li>
+</ul>
+<h3>2.1 音频源AudioSource的创建</h3>
+<div class="highlight"><pre><code><span></span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">AudioSourceInterface</span><span class="o">&gt;</span>
+<span class="n">PeerConnectionFactory</span><span class="o">::</span><span class="n">CreateAudioSource</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">cricket</span><span class="o">::</span><span class="n">AudioOptions</span><span class="o">&amp;</span><span class="w"> </span><span class="n">options</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">signaling_thread_</span><span class="o">-&gt;</span><span class="n">IsCurrent</span><span class="p">());</span>
+<span class="w">  </span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">LocalAudioSource</span><span class="o">&gt;</span><span class="w"> </span><span class="n">source</span><span class="p">(</span>
+<span class="w">      </span><span class="n">LocalAudioSource</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span><span class="o">&amp;</span><span class="n">options</span><span class="p">));</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">source</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">LocalAudioSource</span><span class="o">&gt;</span><span class="w"> </span><span class="n">LocalAudioSource</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">cricket</span><span class="o">::</span><span class="n">AudioOptions</span><span class="o">*</span><span class="w"> </span><span class="n">audio_options</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">LocalAudioSource</span><span class="o">&gt;</span><span class="w"> </span><span class="n">source</span><span class="p">(</span>
+<span class="w">      </span><span class="n">new</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">RefCountedObject</span><span class="o">&lt;</span><span class="n">LocalAudioSource</span><span class="o">&gt;</span><span class="p">());</span>
+<span class="w">  </span><span class="n">source</span><span class="o">-&gt;</span><span class="n">Initialize</span><span class="p">(</span><span class="n">audio_options</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">source</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="n">LocalAudioSource</span><span class="o">::</span><span class="n">Initialize</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">cricket</span><span class="o">::</span><span class="n">AudioOptions</span><span class="o">*</span><span class="w"> </span><span class="n">audio_options</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">audio_options</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="n">options_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">audio_options</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>上述是本地音频源创建过程，由源码可知，创建的本地音频轨实体对象是LocalAudioSource，并且创建该对象后进行了初始化——&gt;将音频选项对象传递给了LocalAudioSource进行存储。</p>
+<h4>2.1.1 音频源继承树</h4>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200912-184403-11.png" alt="在这里插入图片描述"></p>
+<p>由上面的继承树，从上至下分析，我们可以获知如下几点信息：</p>
+<ul>
+<li><strong>继承接口RefCountInterface</strong>：表明音频源是一个引用计数对象。使用时将配合智能指针scoped_ptr 和 模板RefCountedObject&lt;&gt;一起使用，如同上面源码所示。详细分析见：<a href="https://blog.csdn.net/ice_ly000/article/details/105629297">WebRTC源码分析——引用计数系统</a></li>
+<li><strong>继承接口NotifierInterface</strong>：表明音频源是一个通知者NotifierInterface对象，通过继承该接口，实现注册关注音频源的观察者ObserverInterface对象。那么，观察者观察什么？音频源作为通知者，向观察者通知什么呢？——&gt;通知音频源的状态改变。</li>
+<li><strong>继承接口MediaSourceInterface</strong>：表明音频源首先是一个媒体源，像视频源也是一个媒体源。提供媒体源两个基本属性：媒体源的状态——SourceState（kInitializing, kLive, kEnded, kMuted）；本地源还是远端源？</li>
+<li><strong>继承接口AudioSourceInterface</strong>：音频源基础接口。提供了设置音量，获取音频选项AudioOptions的能力；提供了注册/注销音频观察者的接口，可以获知音量变化；提供了注册/注销音频轨Sink的接口，让音频数据可以从Source流向Sink；</li>
+<li><strong>实体类Notifier<AudioSourceInterface></strong>：提供了NotifierInterface接口的实现，维护需要观察音频源状态改变的观察者列表，并在源状态改变时，挨个通知观察者列表中的观察者</li>
+<li>最终的实体类有LocalAudioSource 和 RemoteAudioSource两类，分别代表本地音频源、远端的音频源。</li>
+</ul>
+<p>PS1：有三套注册/注销接口，分别是：</p>
+<ul>
+<li>RegisterObserver/UnregisterObserver：注册源状态变化的观察者，当源的SourceState发生改变时，将调用观察者的OnChanged()方法，来通知观察者；</li>
+<li>RegisterAudioObserver/UnregisterAudioObserver：注册音量大小变化的的观察者，当音频源音量大小改变时，将通过调用观察者OnSetVolume(double volume)方法，来通知观察者；</li>
+<li>AddSink/RemoveSink：注册音频数据的接收者，当源产生音频数据时，将通过调用<code>Sink的OnData(const void* audio_data, int bits_per_sample, int sample_rate, size_t number_of_channels, size_t number_of_frames)</code>方法，让音频数据从源流入Sink。</li>
+</ul>
+<h4>2.1.2 近端音频源LocalAudioSource</h4>
+<p>WebRTC中，近端原始音视频数据总是要经过 “采集-&gt;音视频源-&gt;音频轨” 这样一条路径，至少视频数据是严格按照该条路径输出的。我们来看看近端音频的情况——LocalAudioSource</p>
+<div class="highlight"><pre><code><span></span><span class="n">class</span><span class="w"> </span><span class="n">LocalAudioSource</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">public</span><span class="w"> </span><span class="n">Notifier</span><span class="o">&lt;</span><span class="n">AudioSourceInterface</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w"> </span><span class="n">public</span><span class="o">:</span>
+<span class="w">  </span><span class="c1">// Creates an instance of LocalAudioSource.</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">LocalAudioSource</span><span class="o">&gt;</span><span class="w"> </span><span class="n">Create</span><span class="p">(</span>
+<span class="w">      </span><span class="k">const</span><span class="w"> </span><span class="n">cricket</span><span class="o">::</span><span class="n">AudioOptions</span><span class="o">*</span><span class="w"> </span><span class="n">audio_options</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">SourceState</span><span class="w"> </span><span class="nf">state</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">override</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">kLive</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="nf">remote</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">override</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">cricket</span><span class="o">::</span><span class="n">AudioOptions</span><span class="w"> </span><span class="nf">options</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">override</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">options_</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">AddSink</span><span class="p">(</span><span class="n">AudioTrackSinkInterface</span><span class="o">*</span><span class="w"> </span><span class="n">sink</span><span class="p">)</span><span class="w"> </span><span class="n">override</span><span class="w"> </span><span class="p">{}</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">RemoveSink</span><span class="p">(</span><span class="n">AudioTrackSinkInterface</span><span class="o">*</span><span class="w"> </span><span class="n">sink</span><span class="p">)</span><span class="w"> </span><span class="n">override</span><span class="w"> </span><span class="p">{}</span>
+
+<span class="w"> </span><span class="n">protected</span><span class="o">:</span>
+<span class="w">  </span><span class="n">LocalAudioSource</span><span class="p">()</span><span class="w"> </span><span class="p">{}</span>
+<span class="w">  </span><span class="o">~</span><span class="n">LocalAudioSource</span><span class="p">()</span><span class="w"> </span><span class="n">override</span><span class="w"> </span><span class="p">{}</span>
+
+<span class="w"> </span><span class="n">private</span><span class="o">:</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="n">Initialize</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">cricket</span><span class="o">::</span><span class="n">AudioOptions</span><span class="o">*</span><span class="w"> </span><span class="n">audio_options</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">cricket</span><span class="o">::</span><span class="n">AudioOptions</span><span class="w"> </span><span class="n">options_</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>源码如上所示，在本地创建轨道时所使用的音频源对象是LocalAudioSource。仔细查看LocalAudioSource类的代码，可以知道该音频源实质上什么也没有做：既没有与音频设备建立联系，从音频设备处获取采集的音频数据，也没有实质的提供注册Sink的方法，更没有向注册的Sink推送数据。由此可知，本地的音频数据的流转跟LocalAudioSource其实没什么关系，这个是我非常纳闷的一点，因为LocalAudioSource看起来像是一个没有完成、或者说是废弃的类，但示例中正常使用了，并且近端音频数据还是正常流转的。那么肯定是走了别的路径。</p>
+<p>当前，音频设备模块ADM是被音频引擎VoiceEngine所持有的，因此，音频数据采集开始，最初的位置可能就是VoiceEngine。后续将专门出一篇文章来分析介绍近端音频流转。</p>
+<h4>2.1.3 远端音频源RemoteAudioSource</h4>
+<p>与LocalAudioSource不一样，代表远端音频源的RemoteAudioSource类是真实有效的类，提供了继承树上所有接口和功能的实现。</p>
+<p><strong>远端音频源从哪儿获取数据？又将数据推向何处？</strong>
+RemoteAudioSource::AudioDataProxy类的对象可以携带RemoteAudioSource对象被注册到VoiceEngine中，从那得到从远端收到的音频数据；RemoteAudioSource又可以向注册到其中的Sink列表进一步扇出音频数据。具体看如下源码：</p>
+<div class="highlight"><pre><code><span></span><span class="n">class</span><span class="w"> </span><span class="n">RemoteAudioSource</span><span class="o">::</span><span class="n">AudioDataProxy</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">public</span><span class="w"> </span><span class="n">AudioSinkInterface</span><span class="w"> </span><span class="p">{</span>
+<span class="w"> </span><span class="n">public</span><span class="o">:</span>
+<span class="w">  </span><span class="n">explicit</span><span class="w"> </span><span class="n">AudioDataProxy</span><span class="p">(</span><span class="n">RemoteAudioSource</span><span class="o">*</span><span class="w"> </span><span class="n">source</span><span class="p">)</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">source_</span><span class="p">(</span><span class="n">source</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">source</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="o">~</span><span class="n">AudioDataProxy</span><span class="p">()</span><span class="w"> </span><span class="n">override</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">source_</span><span class="o">-&gt;</span><span class="n">OnAudioChannelGone</span><span class="p">();</span><span class="w"> </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// AudioSinkInterface implementation.</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="n">OnData</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">AudioSinkInterface</span><span class="o">::</span><span class="n">Data</span><span class="o">&amp;</span><span class="w"> </span><span class="n">audio</span><span class="p">)</span><span class="w"> </span><span class="n">override</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">source_</span><span class="o">-&gt;</span><span class="n">OnData</span><span class="p">(</span><span class="n">audio</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w"> </span><span class="n">private</span><span class="o">:</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">RemoteAudioSource</span><span class="o">&gt;</span><span class="w"> </span><span class="n">source_</span><span class="p">;</span>
+
+<span class="w">  </span><span class="n">RTC_DISALLOW_IMPLICIT_CONSTRUCTORS</span><span class="p">(</span><span class="n">AudioDataProxy</span><span class="p">);</span>
+<span class="p">};</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">RemoteAudioSource::OnData</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">AudioSinkInterface</span><span class="o">::</span><span class="n">Data</span><span class="o">&amp;</span><span class="w"> </span><span class="n">audio</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Called on the externally-owned audio callback thread, via/from webrtc.</span>
+<span class="w">  </span><span class="n">rtc</span><span class="o">::</span><span class="n">CritScope</span><span class="w"> </span><span class="n">lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">sink_lock_</span><span class="p">);</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="o">*</span><span class="w"> </span><span class="n">sink</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">sinks_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">sink</span><span class="o">-&gt;</span><span class="n">OnData</span><span class="p">(</span><span class="n">audio</span><span class="p">.</span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="mi">16</span><span class="p">,</span><span class="w"> </span><span class="n">audio</span><span class="p">.</span><span class="n">sample_rate</span><span class="p">,</span><span class="w"> </span><span class="n">audio</span><span class="p">.</span><span class="n">channels</span><span class="p">,</span>
+<span class="w">                 </span><span class="n">audio</span><span class="p">.</span><span class="n">samples_per_channel</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>2.2 创建音频轨AudioTrack</h3>
+<div class="highlight"><pre><code><span></span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">AudioTrackInterface</span><span class="o">&gt;</span><span class="w"> </span><span class="n">PeerConnectionFactory</span><span class="o">::</span><span class="n">CreateAudioTrack</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&amp;</span><span class="w"> </span><span class="n">id</span><span class="p">,</span>
+<span class="w">    </span><span class="n">AudioSourceInterface</span><span class="o">*</span><span class="w"> </span><span class="n">source</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">signaling_thread_</span><span class="o">-&gt;</span><span class="n">IsCurrent</span><span class="p">());</span>
+<span class="w">  </span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">AudioTrackInterface</span><span class="o">&gt;</span><span class="w"> </span><span class="n">track</span><span class="p">(</span><span class="n">AudioTrack</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">source</span><span class="p">));</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">AudioTrackProxy</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span><span class="n">signaling_thread_</span><span class="p">,</span><span class="w"> </span><span class="n">track</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">AudioTrack</span><span class="o">&gt;</span><span class="w"> </span><span class="n">AudioTrack</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&amp;</span><span class="w"> </span><span class="n">id</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">AudioSourceInterface</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">source</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">new</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">RefCountedObject</span><span class="o">&lt;</span><span class="n">AudioTrack</span><span class="o">&gt;</span><span class="p">(</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">source</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="n">AudioTrack</span><span class="o">::</span><span class="n">AudioTrack</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&amp;</span><span class="w"> </span><span class="n">label</span><span class="p">,</span>
+<span class="w">                       </span><span class="k">const</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">AudioSourceInterface</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">source</span><span class="p">)</span>
+<span class="w">    </span><span class="o">:</span><span class="w"> </span><span class="n">MediaStreamTrack</span><span class="o">&lt;</span><span class="n">AudioTrackInterface</span><span class="o">&gt;</span><span class="p">(</span><span class="n">label</span><span class="p">),</span><span class="w"> </span><span class="n">audio_source_</span><span class="p">(</span><span class="n">source</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">audio_source_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">audio_source_</span><span class="o">-&gt;</span><span class="n">RegisterObserver</span><span class="p">(</span><span class="n">this</span><span class="p">);</span>
+<span class="w">    </span><span class="n">OnChanged</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="n">AudioTrack</span><span class="o">::</span><span class="n">OnChanged</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">thread_checker_</span><span class="p">.</span><span class="n">IsCurrent</span><span class="p">());</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">audio_source_</span><span class="o">-&gt;</span><span class="n">state</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">MediaSourceInterface</span><span class="o">::</span><span class="n">kEnded</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">set_state</span><span class="p">(</span><span class="n">kEnded</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">set_state</span><span class="p">(</span><span class="n">kLive</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>PeerConnectionFactory::CreateAudioTrack、AudioTrack::Create、AudioTrack::AudioTrack三步创建了AudioTrack类的实体对象，这是音频轨的实体类对象。</li>
+<li>向应用层返回的是AudioTrack的代理对象AudioTrackProxy，这是为了WebRTC中防止线程乱入所作的常规操作，正如PeerConnectionFactory 和 PeerConnection那样——<a href="https://blog.csdn.net/ice_ly000/article/details/103191668">WebRTC源码分析-线程安全之Proxy，防止线程乱入</a></li>
+<li>AudioTrack对象注册为它相关音频源的观察者，从而获取相关音频源的状态通知，在通知中查看音频源的状态，从而同步更新轨道的状态。</li>
+</ul>
+<h4>2.2.1 音频轨继承树</h4>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200912-184404-12.jpg" alt="在这里插入图片描述"></p>
+<p>从上面的继承图上，分析出以下要点：</p>
+<ul>
+<li><strong>继承接口ObserverInterface：</strong> 让音频轨成为一个观察者。正如前文所述，在音频轨创建时，音频轨会注册为相关的音频源的观察者。</li>
+<li><strong>继承接口NotifierInterface：</strong> 让音频轨同时又成为一个通知者。当音频轨的状态改变时，将通知关注音频轨状态的观察者，这些观察者通过继承树上的MediaStreamTrack<AudioTrackInterface>所提供的注册/注销/通知 接口来实现音频轨道的状态跟踪。</li>
+<li><strong>继承接口RefCountInterface：</strong> 让音频轨成为引用计数对象。</li>
+<li><strong>继承接口MediaStreamTrackInterface:</strong> 音频轨首先必须是媒体轨，视频轨也继承该接口。该接口提供媒体轨道的基本属性接口：媒体类别，使能，轨道状态等。</li>
+<li><strong>继承接口AudioTrackInterface：</strong> 提供注册/注销音频轨Sink的接口，让音频数据能进一步的从音频轨流向外部对象。</li>
+<li>中间对象MediaStreamTrack<AudioTrackInterface> &amp;&amp; MediaStreamTrack<AudioTrackInterface>：分别提供底层接口的具体实现。</li>
+<li>实体类AudioTrack：进一步提供底层接口的一些实现，是创建的音频轨实体对象。</li>
+</ul>
+<h3>2.3 添加音频轨AudioTrack到PeerConnection</h3>
+<p>PeerConnection::AddTrack方法提供两个入参：媒体轨道Track以及媒体流id向量。暗示了WebRTC中一个概念：一个媒体轨道MediaTrack逻辑上可以归属多个媒体流MediaStream。入参<code>stream_ids</code>向量在SDP中会以msid参数出现，一个msid表示逻辑上的一个媒体流。往后，我们可以看到媒体Track会被添加到一个RtpSender中，stream_ids也会存储在RtpSender中。</p>
+<p>在继续往下分析前，需要先略微分析下SDP，对SDP中的msid、mid做一个简单的介绍</p>
+<div class="highlight"><pre><code><span></span><span class="n">a</span><span class="o">=</span><span class="n">group</span><span class="o">:</span><span class="n">BUNDLE</span><span class="w"> </span><span class="n">audio</span><span class="w"> </span><span class="n">video</span><span class="w"> </span><span class="n">data</span>
+<span class="n">a</span><span class="o">=</span><span class="n">msid</span><span class="o">-</span><span class="n">semantic</span><span class="o">:</span><span class="w"> </span><span class="n">WMS</span><span class="w"> </span><span class="n">h1aZ20mbQB0GSsq0YxLfJmiYWE9CBfGch97C</span>
+<span class="n">m</span><span class="o">=</span><span class="n">audio</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">111</span><span class="w"> </span><span class="mi">103</span><span class="w"> </span><span class="mi">104</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">106</span><span class="w"> </span><span class="mi">105</span><span class="w"> </span><span class="mi">13</span><span class="w"> </span><span class="mi">126</span>
+<span class="n">a</span><span class="o">=</span><span class="n">mid</span><span class="o">:</span><span class="n">audio</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">18509423</span><span class="w"> </span><span class="n">msid</span><span class="o">:</span><span class="n">h1aZ20mbQB0GSsq0YxLfJmiYWE9CBfGch97C</span><span class="w"> </span><span class="mi">15598</span><span class="n">a91</span><span class="o">-</span><span class="n">caf9</span><span class="mi">-4</span><span class="n">fff</span><span class="o">-</span><span class="n">a28f</span><span class="mi">-3082310</span><span class="n">b2b7a</span>
+<span class="n">m</span><span class="o">=</span><span class="n">video</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">100</span><span class="w"> </span><span class="mi">101</span><span class="w"> </span><span class="mi">107</span><span class="w"> </span><span class="mi">116</span><span class="w"> </span><span class="mi">117</span><span class="w"> </span><span class="mi">96</span><span class="w"> </span><span class="mi">97</span><span class="w"> </span><span class="mi">99</span><span class="w"> </span><span class="mi">98</span>
+<span class="n">a</span><span class="o">=</span><span class="n">mid</span><span class="o">:</span><span class="n">video</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">3463951252</span><span class="w"> </span><span class="n">msid</span><span class="o">:</span><span class="n">h1aZ20mbQB0GSsq0YxLfJmiYWE9CBfGch97C</span><span class="w"> </span><span class="n">ead4b4e9</span><span class="o">-</span><span class="n">b650</span><span class="mi">-4</span><span class="n">ed5</span><span class="mi">-86</span><span class="n">f8</span><span class="mi">-6</span><span class="n">f5f5806346d</span>
+<span class="n">m</span><span class="o">=</span><span class="n">application</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">DTLS</span><span class="o">/</span><span class="n">SCTP</span><span class="w"> </span><span class="mi">5000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">mid</span><span class="o">:</span><span class="n">data</span>
+</code></pre></div>
+<p>上述是一个被简化的SDP数据，从中简要的总结如下几点知识，可以辅助我们去理解后续的内容（我们总是基于Unified Plan这种SDP格式进行讨论，因为Plan B这种格式大多数情况下已经被弃用）：</p>
+<ul>
+<li><strong>mid：</strong> 一个mLine（即m=* section）在WebRTC中与一个RtpTranceiver对象对应（track会存储于RtpTranceiver的RtpSender中），RtpTranceiver对象的mid属性与SDP的mLine的属性a=mid:xxx对应。当然RtpTranceiver只能存储音频、视频轨道。应用数据通道得另算。</li>
+<li>a=group:BUNDLE audio video data 是一个全局性的描述，表示mid为audio video data的这三个mLine所表征的媒体数据要绑定传输，也即对应网络传输层的一个连接来收发包。</li>
+<li><strong>msid：</strong> a=msid-semantic: WMS h1aZ20mbQB0GSsq0YxLfJmiYWE9CBfGch97C 也是一个全局性的描述，告知了这个会话中存在几个逻辑上的媒体流，WMS表示WebRTC Media Stream。此处只有一个，流id为h1aZ20mbQB0GSsq0YxLfJmiYWE9CBfGch97C。</li>
+<li>mLine的a=msid=xxx的属性表示了该mline所对应地媒体轨道逻辑上所属的流，可以同时属于多个流。示例上，音频轨和视频轨均属于流h1aZ20mbQB0GSsq0YxLfJmiYWE9CBfGch97C。其后跟随的是轨道的id。</li>
+</ul>
+<p>PeerConnection::AddTrack源码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">RTCErrorOr</span><span class="o">&lt;</span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">RtpSenderInterface</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">PeerConnection</span><span class="o">::</span><span class="n">AddTrack</span><span class="p">(</span>
+<span class="w">    </span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">MediaStreamTrackInterface</span><span class="o">&gt;</span><span class="w"> </span><span class="n">track</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">stream_ids</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 1 进行一些条件判断</span>
+<span class="w">  </span><span class="c1">// 1.1 必须在信令线程</span>
+<span class="w">  </span><span class="n">RTC_DCHECK_RUN_ON</span><span class="p">(</span><span class="n">signaling_thread</span><span class="p">());</span>
+<span class="w">  </span><span class="n">TRACE_EVENT0</span><span class="p">(</span><span class="s">&quot;webrtc&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;PeerConnection::AddTrack&quot;</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 1.2 轨道不能为空，必须是音频 or 视频轨</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">track</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">LOG_AND_RETURN_ERROR</span><span class="p">(</span><span class="n">RTCErrorType</span><span class="o">::</span><span class="n">INVALID_PARAMETER</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Track is null.&quot;</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="p">(</span><span class="n">track</span><span class="o">-&gt;</span><span class="n">kind</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">MediaStreamTrackInterface</span><span class="o">::</span><span class="n">kAudioKind</span><span class="w"> </span><span class="o">||</span>
+<span class="w">        </span><span class="n">track</span><span class="o">-&gt;</span><span class="n">kind</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">MediaStreamTrackInterface</span><span class="o">::</span><span class="n">kVideoKind</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">LOG_AND_RETURN_ERROR</span><span class="p">(</span><span class="n">RTCErrorType</span><span class="o">::</span><span class="n">INVALID_PARAMETER</span><span class="p">,</span>
+<span class="w">                         </span><span class="s">&quot;Track has invalid kind: &quot;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">track</span><span class="o">-&gt;</span><span class="n">kind</span><span class="p">());</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// 1.3 PeerConnection的信令状态机不能是closed</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">IsClosed</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">LOG_AND_RETURN_ERROR</span><span class="p">(</span><span class="n">RTCErrorType</span><span class="o">::</span><span class="n">INVALID_STATE</span><span class="p">,</span>
+<span class="w">                         </span><span class="s">&quot;PeerConnection is closed.&quot;</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// 2 遍历PeerConnection.RtpTransceiver列表.RtpSender列表，</span>
+<span class="w">  </span><span class="c1">//   查看当前的track是否在某个RtpSender中，存在则不能重复添加</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">FindSenderForTrack</span><span class="p">(</span><span class="n">track</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">LOG_AND_RETURN_ERROR</span><span class="p">(</span>
+<span class="w">        </span><span class="n">RTCErrorType</span><span class="o">::</span><span class="n">INVALID_PARAMETER</span><span class="p">,</span>
+<span class="w">        </span><span class="s">&quot;Sender already exists for track &quot;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">track</span><span class="o">-&gt;</span><span class="n">id</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s">&quot;.&quot;</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// 3 根据SDP采用UnifiedPlan还是Plan B决定如何添加Track到PeerConnection的成员中</span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">sender_or_error</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="p">(</span><span class="n">IsUnifiedPlan</span><span class="p">()</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">AddTrackUnifiedPlan</span><span class="p">(</span><span class="n">track</span><span class="p">,</span><span class="w"> </span><span class="n">stream_ids</span><span class="p">)</span>
+<span class="w">                       </span><span class="o">:</span><span class="w"> </span><span class="n">AddTrackPlanB</span><span class="p">(</span><span class="n">track</span><span class="p">,</span><span class="w"> </span><span class="n">stream_ids</span><span class="p">));</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">sender_or_error</span><span class="p">.</span><span class="n">ok</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// 4 是否需要进行重新协商</span>
+<span class="w">    </span><span class="n">UpdateNegotiationNeeded</span><span class="p">();</span>
+<span class="w">    </span><span class="c1">// 5 添加轨道到统计数据收集器</span>
+<span class="w">    </span><span class="n">stats_</span><span class="o">-&gt;</span><span class="n">AddTrack</span><span class="p">(</span><span class="n">track</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">sender_or_error</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>添加轨道到PeerConnection过程如上源码分为5个步骤：</p>
+<ol>
+<li>检查状态和入参；</li>
+<li>遍历PeerConnection的存储轨道的成员，确定当前轨道是否已在PeerConnection中，防止重复添加同一个track；</li>
+<li>根据SDP采用UnifiedPlan还是Plan B决定如何添加Track到PeerConnection的成员中；</li>
+<li>判断是否需要进行重新协商；</li>
+<li>添加轨道到统计数据收集器。</li>
+</ol>
+<p>接下来将对2~5这4个步骤都进行详细的梳理。</p>
+<h4>2.3.1 PeerConnection::FindSenderForTrack</h4>
+<p>防止重复添加同一个track，从PeerConnection保存track的字段中查找当前的track是否已存在，存在则返回对应的RtpSender，否则返回空指针。</p>
+<div class="highlight"><pre><code><span></span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">RtpSenderProxyWithInternal</span><span class="o">&lt;</span><span class="n">RtpSenderInternal</span><span class="o">&gt;&gt;</span>
+<span class="n">PeerConnection</span><span class="o">::</span><span class="n">FindSenderForTrack</span><span class="p">(</span><span class="n">MediaStreamTrackInterface</span><span class="o">*</span><span class="w"> </span><span class="n">track</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">transceiver</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">transceivers_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="w"> </span><span class="n">sender</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">transceiver</span><span class="o">-&gt;</span><span class="n">internal</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">senders</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">sender</span><span class="o">-&gt;</span><span class="n">track</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">track</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">sender</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">nullptr</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>PeerConnection对象有个成员<code>std::vector&lt;rtc::scoped_refptr&lt;RtpTransceiverProxyWithInternal&lt;RtpTransceiver&gt;&gt;&gt;transceivers_</code>;
+该成员是一个RtpTransceiver向量。每个RtpTransceiver代表sdp中同一个mLine的所包含的a=ssrc的音频轨 or 视频轨 or数据（因为，一个mLine只能表示一种媒体类型）。由于sdp中可能会有多个mLine，因此，PeerConnection中需要包含多个RtpTransceiver，以上述向量成员<code>transceivers_</code>来保存</p>
+<p>由于SDP的Plan B格式下，本地要发送的多个相同媒体类型的轨道（a=ssrc不同）可能会属于同一个mLine，因此，RtpTransceiver包含一个RtpSender的向量 ，每个RtpSender会存储其中一个轨道。当SDP采用Unified Plan时，RtpTransceiver的RtpSender向量实质上只会存在一个RtpSender，为了兼容PlanB的格式才会存在多个RtpSender。</p>
+<p>RtpTransceiver即可以代表本地轨道数据的发送器，又能代表接收远端轨道数据的接收器。因此，RtpTransceiver还包含一个RtpReceiver的向量。远端的轨道会被存储在RtpTransceiver的某个RtpReceiver中。</p>
+<p>上述查找本地Track的过程就遍历了每个RtpTransceiver对象的每个RtpSender中的track的地址，看是否是同一个。 关于RtpTransceiver类的阐述可见——<a href="https://blog.csdn.net/ice_ly000/article/details/105851324">WebRTC源码分析——RtpTransceiver类</a></p>
+<h4>2.3.2 PeerConnection::AddTrackUnifiedPlan</h4>
+<p>添加track到PeerConnection，根据SDP采用Unified Plan还是Plan B。由于Plab B大概率要被遗弃，因此，当前只分析Unified Plan。</p>
+<div class="highlight"><pre><code><span></span><span class="n">RTCErrorOr</span><span class="o">&lt;</span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">RtpSenderInterface</span><span class="o">&gt;&gt;</span>
+<span class="n">PeerConnection</span><span class="o">::</span><span class="n">AddTrackUnifiedPlan</span><span class="p">(</span>
+<span class="w">    </span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">MediaStreamTrackInterface</span><span class="o">&gt;</span><span class="w"> </span><span class="n">track</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">stream_ids</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 1 查找是否存在可复用的RtpTransceiver</span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">transceiver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FindFirstTransceiverForAddedTrack</span><span class="p">(</span><span class="n">track</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 2 存在，添加track到该复用的RtpTransceiver，并修改必要的属性</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">transceiver</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Reusing an existing &quot;</span>
+<span class="w">                     </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">cricket</span><span class="o">::</span><span class="n">MediaTypeToString</span><span class="p">(</span><span class="n">transceiver</span><span class="o">-&gt;</span><span class="n">media_type</span><span class="p">())</span>
+<span class="w">                     </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot; transceiver for AddTrack.&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// 2.1 设置RtpTransceiver的方向，注意不能将接收方向覆盖掉，即如果接收方向是存在的，</span>
+<span class="w">    </span><span class="c1">//     则必须保留，因此有如下的判断。</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">transceiver</span><span class="o">-&gt;</span><span class="n">direction</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">RtpTransceiverDirection</span><span class="o">::</span><span class="n">kRecvOnly</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">transceiver</span><span class="o">-&gt;</span><span class="n">internal</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">set_direction</span><span class="p">(</span>
+<span class="w">          </span><span class="n">RtpTransceiverDirection</span><span class="o">::</span><span class="n">kSendRecv</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">transceiver</span><span class="o">-&gt;</span><span class="n">direction</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">RtpTransceiverDirection</span><span class="o">::</span><span class="n">kInactive</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">transceiver</span><span class="o">-&gt;</span><span class="n">internal</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">set_direction</span><span class="p">(</span>
+<span class="w">          </span><span class="n">RtpTransceiverDirection</span><span class="o">::</span><span class="n">kSendOnly</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// 2.2 添加track到对应的sender</span>
+<span class="w">    </span><span class="n">transceiver</span><span class="o">-&gt;</span><span class="n">sender</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">SetTrack</span><span class="p">(</span><span class="n">track</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// 2.3 设置RtpSender的流id</span>
+<span class="w">    </span><span class="n">transceiver</span><span class="o">-&gt;</span><span class="n">internal</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">sender_internal</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">set_stream_ids</span><span class="p">(</span><span class="n">stream_ids</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// 2.4 设置重用标识</span>
+<span class="w">    </span><span class="n">transceiver</span><span class="o">-&gt;</span><span class="n">internal</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">set_reused_for_addtrack</span><span class="p">(</span><span class="nb">true</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 3 不存在，创建新的RtpTransceiver，添加track到新的RtpTransceiver</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// 3.1 得到与轨道一致的媒体类型 </span>
+<span class="w">    </span><span class="n">cricket</span><span class="o">::</span><span class="n">MediaType</span><span class="w"> </span><span class="n">media_type</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="p">(</span><span class="n">track</span><span class="o">-&gt;</span><span class="n">kind</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">MediaStreamTrackInterface</span><span class="o">::</span><span class="n">kAudioKind</span>
+<span class="w">             </span><span class="o">?</span><span class="w"> </span><span class="n">cricket</span><span class="o">::</span><span class="n">MEDIA_TYPE_AUDIO</span>
+<span class="w">             </span><span class="o">:</span><span class="w"> </span><span class="n">cricket</span><span class="o">::</span><span class="n">MEDIA_TYPE_VIDEO</span><span class="p">);</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Adding &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">cricket</span><span class="o">::</span><span class="n">MediaTypeToString</span><span class="p">(</span><span class="n">media_type</span><span class="p">)</span>
+<span class="w">                     </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot; transceiver in response to a call to AddTrack.&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// 3.2 得到或新建RtpSender的id，可以与track的id相同，但是不能与其他</span>
+<span class="w">    </span><span class="c1">//     RtpSender的id重复，否则创建一个新的UUID作为RtpSender的唯一标识。             </span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">sender_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">track</span><span class="o">-&gt;</span><span class="n">id</span><span class="p">();</span>
+<span class="w">    </span><span class="c1">// Avoid creating a sender with an existing ID by generating a random ID.</span>
+<span class="w">    </span><span class="c1">// This can happen if this is the second time AddTrack has created a sender</span>
+<span class="w">    </span><span class="c1">// for this track.</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">FindSenderById</span><span class="p">(</span><span class="n">sender_id</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">sender_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">CreateRandomUuid</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// 3.3 创建新的RtpSender，传入track</span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">sender</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">CreateSender</span><span class="p">(</span><span class="n">media_type</span><span class="p">,</span><span class="w"> </span><span class="n">sender_id</span><span class="p">,</span><span class="w"> </span><span class="n">track</span><span class="p">,</span><span class="w"> </span><span class="n">stream_ids</span><span class="p">,</span><span class="w"> </span><span class="p">{});</span>
+<span class="w">    </span><span class="c1">// 3.4 创建新的RtpReceiver，无track</span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">receiver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">CreateReceiver</span><span class="p">(</span><span class="n">media_type</span><span class="p">,</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">CreateRandomUuid</span><span class="p">());</span>
+<span class="w">    </span><span class="c1">// 3.5 根据新的RtpSender，RtpReceiver创建新的RtpTransceiver</span>
+<span class="w">    </span><span class="n">transceiver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">CreateAndAddTransceiver</span><span class="p">(</span><span class="n">sender</span><span class="p">,</span><span class="w"> </span><span class="n">receiver</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// 3.6 设置RtpTransceiver创建标识</span>
+<span class="w">    </span><span class="n">transceiver</span><span class="o">-&gt;</span><span class="n">internal</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">set_created_by_addtrack</span><span class="p">(</span><span class="nb">true</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// 3.7 新创建的RtpTransceiver的方向设置为既接收又发送</span>
+<span class="w">    </span><span class="n">transceiver</span><span class="o">-&gt;</span><span class="n">internal</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">set_direction</span><span class="p">(</span><span class="n">RtpTransceiverDirection</span><span class="o">::</span><span class="n">kSendRecv</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">transceiver</span><span class="o">-&gt;</span><span class="n">sender</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>大致过程就是判断是否存在可复用的RtpTransceiver，存在则添加track到可复用的RtpTransceiver，否则新建一个RtpTransceiver，添加进去。同时注意，需要修改RtpTransceiver的一些属性。</p>
+<p><strong>如何判断该RtpTransceiver是可复用的？判断依据是什么?</strong></p>
+<div class="highlight"><pre><code><span></span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">RtpTransceiverProxyWithInternal</span><span class="o">&lt;</span><span class="n">RtpTransceiver</span><span class="o">&gt;&gt;</span>
+<span class="n">PeerConnection</span><span class="o">::</span><span class="n">FindFirstTransceiverForAddedTrack</span><span class="p">(</span>
+<span class="w">    </span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">MediaStreamTrackInterface</span><span class="o">&gt;</span><span class="w"> </span><span class="n">track</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">track</span><span class="p">);</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="w"> </span><span class="n">transceiver</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">transceivers_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">transceiver</span><span class="o">-&gt;</span><span class="n">sender</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">track</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">        </span><span class="n">cricket</span><span class="o">::</span><span class="n">MediaTypeToString</span><span class="p">(</span><span class="n">transceiver</span><span class="o">-&gt;</span><span class="n">media_type</span><span class="p">())</span><span class="w"> </span><span class="o">==</span>
+<span class="w">            </span><span class="n">track</span><span class="o">-&gt;</span><span class="n">kind</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">        </span><span class="o">!</span><span class="n">transceiver</span><span class="o">-&gt;</span><span class="n">internal</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">has_ever_been_used_to_send</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">        </span><span class="o">!</span><span class="n">transceiver</span><span class="o">-&gt;</span><span class="n">stopped</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">transceiver</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">nullptr</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>如上源码所示，给本地track可复用的RtpTransceiver必须满足以下几个条件</p>
+<ol>
+<li>由于是Unified Plan，那么通过RtpTransceiver的sender()来获取RtpSender，sender(）方法将断言当前是否是Unified Plan，是否RtpTransceiver的RtpSender向量size为1，取该唯一的RtpSender，并判断存储的track是否为空，不为空，表示sender已经有track存在，不可复用。</li>
+<li>判断track的媒体类型是否跟该RtpTransceiver的媒体类型一致（音频、视频、数据三类），RtpTransceiver只可存储媒体类型一致的轨道，不相同则不可复用。</li>
+<li>判断RtpTransceiver之前的方向是不是被设置为包含发送（即kSendRecv or kSendOnly），若设置过，则不可复用。</li>
+<li>判断RtpTransceiver是否调用过Stop，如果RtpTransceiver已经停止过，则不复用。</li>
+</ol>
+<h4>2.3.3 PeerConnection::UpdateNegotiationNeeded</h4>
+<p>UpdateNegotiationNeeded()方法在往PC中添加/移除轨道、添加/移除流、添加/移除RtpTransceiver、应用local/remote sdp、状态需要进行回滚到KStable时都会被调用，经过各种条件检测后，更新PC的内部成员<code>is_negotiation_needed_</code>。更新后若<code>is_negotiation_needed_</code>为真，那么表示需要重新协商。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">PeerConnection::UpdateNegotiationNeeded</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK_RUN_ON</span><span class="p">(</span><span class="n">signaling_thread</span><span class="p">());</span>
+<span class="w">  </span><span class="c1">// 1 如果是Plan B则需要协商，直接通知外部的观察者需要重新协商，不需要关注本方法的功能：</span>
+<span class="w">  </span><span class="c1">//   检查有无重新协商的必要，更新字段is_negotiation_needed_。 后续分析将忽略Plan B</span>
+<span class="w">  </span><span class="c1">//   时如何处理，因为Plan B将被遗弃。</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">IsUnifiedPlan</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">Observer</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">OnRenegotiationNeeded</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 2 对PC的信令状态机的状态进行判断。</span>
+<span class="w">  </span><span class="c1">// 2.1 PC的信令状态为kClosed，表示会话已经被关闭了，无协商的必要了</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">IsClosed</span><span class="p">())</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 2.2 PC的信令状态没有处于kStable（初始化状态），也不需判断是否需要进行协商</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">signaling_state</span><span class="p">()</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">kStable</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 3. 使用CheckIfNegotiationIsNeeded()判断是否需要重新协商</span>
+<span class="w">  </span><span class="c1">// NOTE</span>
+<span class="w">  </span><span class="c1">// The negotiation-needed flag will be updated once the state transitions to</span>
+<span class="w">  </span><span class="c1">// &quot;stable&quot;, as part of the steps for setting an RTCSessionDescription.</span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">is_negotiation_needed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">CheckIfNegotiationIsNeeded</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// 4. 根据之前是否需要协商的状态，以及当前是否需要协商的结论，进行不同的响应</span>
+<span class="w">  </span><span class="c1">//    只有当false——&gt;true的状态时，直接通知观察者进行重新协商。</span>
+<span class="w">  </span><span class="c1">// 4.1 如果当前结论不需要协商，则is_negotiation_needed_更新为false，返回</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">is_negotiation_needed</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">is_negotiation_needed_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// 4.2 如果当前需要协商，之前也是需要协商的状态，那就不必进行状态更新了</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_negotiation_needed_</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 4.3 如果当前需要协商，之前时不需要协商的状态，那么更新为需要进行协商，同时通知观察者</span>
+<span class="w">  </span><span class="c1">//     进行协商——即，调用观察者的OnRenegotiationNeeded()方法。</span>
+<span class="w">  </span><span class="n">is_negotiation_needed_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">  </span><span class="n">Observer</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">OnRenegotiationNeeded</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>根据源码分析可以得出以下结论：</p>
+<ul>
+<li>只有PC的信令状态处于稳定状态KStable时，我们认为有重新协商的必要；</li>
+<li>CheckIfNegotiationIsNeeded()方法进行当前是否需要重新协商的检查；</li>
+<li>如果是否需要协商的状态由false——&gt;true，那么直接通知观察者进行协商。</li>
+</ul>
+<p>上述源码以及论述中，提到了PC信令状态，以及方法 CheckIfNegotiationIsNeeded()，接下来进行一定程度的讨论。</p>
+<h5>2 .3.3.1 PC的信令状态——SignalingState</h5>
+<p>PC根据JESP会话进行程度，维护了一个信令状态机，状态迁移图如下所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200912-184408-13.png" alt="在这里插入图片描述"></p>
+<p>各个状态代表的含义如下表格所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200912-184409-14.png" alt="在这里插入图片描述"></p>
+<p>从呼叫和被呼端的视角分别去跟踪这个状态机会更好理解：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200912-184412-15.png" alt="在这里插入图片描述"></p>
+<p>PS: 参阅 <a href="https://w3c.github.io/webrtc-pc/#dom-rtcsignalingstate">https://w3c.github.io/webrtc-pc/#dom-rtcsignalingstate</a></p>
+<h5>2.3.3.2 是否需要协商？——CheckIfNegotiationIsNeeded()</h5>
+<p>是否需要重新协商？依据是什么？问这个问题之前，我们需要搞清楚另外一个问题，即协商的内容是什么？我们知道WebRTC中协商的内容是多样的媒体信息，传输信息，具体可见文章：<a href="https://blog.csdn.net/chinabinlang/article/details/79151589">WebRTC56版本SDP详细解析</a></p>
+<p>协商的手段是收集sdp数据进行互换来达成的，而webrtc中收集sdp数据时，pc用本地会话对象和远端会话对象来存储sdp数据，这些数据的来源就是我们的PC中的ice相关信息，rtptranceiver对象等等，当应用层添加删除轨道等操作时，相应的数据来源会发生变化，但是这个变化并不会同步到存储sdp的近端/远端会话对象中，如此带来了信息的差异。此时，我们就需要重新进行协商，让会话对象存储的信息与数据源保持一致。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">bool</span><span class="w"> </span><span class="nf">PeerConnection::CheckIfNegotiationIsNeeded</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK_RUN_ON</span><span class="p">(</span><span class="n">signaling_thread</span><span class="p">());</span>
+<span class="w">  </span><span class="c1">// 1. If any implementation-specific negotiation is required, as described at</span>
+<span class="w">  </span><span class="c1">// the start of this section, return true.</span>
+
+<span class="w">  </span><span class="c1">// 2. If connection&#39;s [[RestartIce]] internal slot is true, return true.</span>
+<span class="w">  </span><span class="c1">//    如果有ICE的凭证了，则是需要协商的</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">local_ice_credentials_to_replace_</span><span class="o">-&gt;</span><span class="n">HasIceCredentials</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 3. Let description be connection.[[CurrentLocalDescription]].</span>
+<span class="w">  </span><span class="c1">//    如果还没有本地的SDP，则是需要协商的</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">SessionDescriptionInterface</span><span class="o">*</span><span class="w"> </span><span class="n">description</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">current_local_description</span><span class="p">();</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">description</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 4. If connection has created any RTCDataChannels, and no m= section in</span>
+<span class="w">  </span><span class="c1">// description has been negotiated yet for data, return true.</span>
+<span class="w">  </span><span class="c1">//    如果创建了DataChannel，但是sdp中没有对应的mLine，则需要协商。</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">data_channel_controller_</span><span class="p">.</span><span class="n">HasSctpDataChannels</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">cricket</span><span class="o">::</span><span class="n">GetFirstDataContent</span><span class="p">(</span><span class="n">description</span><span class="o">-&gt;</span><span class="n">description</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">contents</span><span class="p">()))</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 5. For each transceiver in connection&#39;s set of transceivers, perform the</span>
+<span class="w">  </span><span class="c1">// following checks:</span>
+<span class="w">  </span><span class="c1">//    对PC中的每个Rtptranceiver进行如下判断：</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">transceiver</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">transceivers_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 获取Rtptranceiver在local sdp中的mline内容描述结构体ContentInfo</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">ContentInfo</span><span class="o">*</span><span class="w"> </span><span class="n">current_local_msection</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">FindTransceiverMSection</span><span class="p">(</span><span class="n">transceiver</span><span class="p">.</span><span class="n">get</span><span class="p">(),</span><span class="w"> </span><span class="n">description</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// 获取Rtptranceiver在remote sdp中的mline内容描述结构体ContentInfo</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">ContentInfo</span><span class="o">*</span><span class="w"> </span><span class="n">current_remote_msection</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FindTransceiverMSection</span><span class="p">(</span>
+<span class="w">        </span><span class="n">transceiver</span><span class="p">.</span><span class="n">get</span><span class="p">(),</span><span class="w"> </span><span class="n">current_remote_description</span><span class="p">());</span>
+
+<span class="w">    </span><span class="c1">// 5.3 If transceiver is stopped and is associated with an m= section,</span>
+<span class="w">    </span><span class="c1">// but the associated m= section is not yet rejected in</span>
+<span class="w">    </span><span class="c1">// connection.[[CurrentLocalDescription]] or</span>
+<span class="w">    </span><span class="c1">// connection.[[CurrentRemoteDescription]], return true.</span>
+<span class="w">    </span><span class="c1">//     如果Rtptranceiver已经是停止状态，但是在local sdp或者是remote sdp中</span>
+<span class="w">    </span><span class="c1">//     不处于rejected状态，也即是有效的，这状况显然是不对的，因此需要进行协商。</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">transceiver</span><span class="o">-&gt;</span><span class="n">stopped</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">current_local_msection</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="n">current_local_msection</span><span class="o">-&gt;</span><span class="n">rejected</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">          </span><span class="p">((</span><span class="n">current_remote_msection</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="n">current_remote_msection</span><span class="o">-&gt;</span><span class="n">rejected</span><span class="p">)</span><span class="w"> </span><span class="o">||</span>
+<span class="w">           </span><span class="o">!</span><span class="n">current_remote_msection</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 5.1 If transceiver isn&#39;t stopped and isn&#39;t yet associated with an m=</span>
+<span class="w">    </span><span class="c1">// section in description, return true.</span>
+<span class="w">    </span><span class="c1">//     如果Rtptranceiver没有停止，并且在本地SDP中没有相应的mline，那么肯定需要</span>
+<span class="w">    </span><span class="c1">//     进行协商</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">current_local_msection</span><span class="p">)</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">MediaContentDescription</span><span class="o">*</span><span class="w"> </span><span class="n">current_local_media_description</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">current_local_msection</span><span class="o">-&gt;</span><span class="n">media_description</span><span class="p">();</span>
+<span class="w">    </span><span class="c1">// 5.2 If transceiver isn&#39;t stopped and is associated with an m= section</span>
+<span class="w">    </span><span class="c1">// in description then perform the following checks:</span>
+<span class="w">    </span><span class="c1">// 如果Rtptranceiver没有停止，并且也与本地sdp的mline进行了关联，那么获取对应的</span>
+<span class="w">    </span><span class="c1">// MediaContentDescription进行更细节性的排查</span>
+
+<span class="w">    </span><span class="c1">// 5.2.1 If transceiver.[[Direction]] is &quot;sendrecv&quot; or &quot;sendonly&quot;, and the</span>
+<span class="w">    </span><span class="c1">// associated m= section in description either doesn&#39;t contain a single</span>
+<span class="w">    </span><span class="c1">// &quot;a=msid&quot; line, or the number of MSIDs from the &quot;a=msid&quot; lines in this</span>
+<span class="w">    </span><span class="c1">// m= section, or the MSID values themselves, differ from what is in</span>
+<span class="w">    </span><span class="c1">// transceiver.sender.[[AssociatedMediaStreamIds]], return true.</span>
+<span class="w">    </span><span class="c1">// 如果Rtptranceiver包含有效的RtpSender（即Rtptranceiver的方向包含send方向）</span>
+<span class="w">    </span><span class="c1">// 但是SDP中与其关联的mline没有包含单独的a=msid行，或者mline的a=msid行的msid值与</span>
+<span class="w">    </span><span class="c1">// Rtptranceiver的RtpSender的关联的媒体流id值不一致。需要进行协商</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">RtpTransceiverDirectionHasSend</span><span class="p">(</span><span class="n">transceiver</span><span class="o">-&gt;</span><span class="n">direction</span><span class="p">()))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">//如果mline所属流ID数量为0，即不归属于某个流，则需要进行协商</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">current_local_media_description</span><span class="o">-&gt;</span><span class="n">streams</span><span class="p">().</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">      </span><span class="c1">//遍历并提取所有关联的流ID到临时向量保存</span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&gt;</span><span class="w"> </span><span class="n">msection_msids</span><span class="p">;</span>
+<span class="w">      </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">stream</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">current_local_media_description</span><span class="o">-&gt;</span><span class="n">streams</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&amp;</span><span class="w"> </span><span class="n">msid</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">stream</span><span class="p">.</span><span class="n">stream_ids</span><span class="p">())</span>
+<span class="w">          </span><span class="n">msection_msids</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">msid</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="c1">//若sender所属的流，ID数量和ID值与sdp中抽取的不一致，则需要进行协商。</span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&gt;</span><span class="w"> </span><span class="n">transceiver_msids</span><span class="w"> </span><span class="o">=</span>
+<span class="w">          </span><span class="n">transceiver</span><span class="o">-&gt;</span><span class="n">sender</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">stream_ids</span><span class="p">();</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">msection_msids</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">transceiver_msids</span><span class="p">.</span><span class="n">size</span><span class="p">())</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+
+<span class="w">      </span><span class="n">absl</span><span class="o">::</span><span class="n">c_sort</span><span class="p">(</span><span class="n">transceiver_msids</span><span class="p">);</span>
+<span class="w">      </span><span class="n">absl</span><span class="o">::</span><span class="n">c_sort</span><span class="p">(</span><span class="n">msection_msids</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">transceiver_msids</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">msection_msids</span><span class="p">)</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 5.2.2 If description is of type &quot;offer&quot;, and the direction of the</span>
+<span class="w">    </span><span class="c1">// associated m= section in neither connection.[[CurrentLocalDescription]]</span>
+<span class="w">    </span><span class="c1">// nor connection.[[CurrentRemoteDescription]] matches</span>
+<span class="w">    </span><span class="c1">// transceiver.[[Direction]], return true.</span>
+<span class="w">    </span><span class="c1">//</span>
+<span class="w">    </span><span class="c1">// 本地sdp为offer sdp（即当前pc为呼叫发起方），Rtptranceiver的mid必须</span>
+<span class="w">    </span><span class="c1">// 在本地sdp中有对应的mline，在远端sdp中也应该有对应的mline。并且Rtptranceiver的</span>
+<span class="w">    </span><span class="c1">// 方向必须与本地sdp mline中的方向一致，与远端sdp mline中的方向相反。</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">description</span><span class="o">-&gt;</span><span class="n">GetType</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">SdpType</span><span class="o">::</span><span class="n">kOffer</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">current_remote_description</span><span class="p">())</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">current_remote_msection</span><span class="p">)</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+
+<span class="w">      </span><span class="n">RtpTransceiverDirection</span><span class="w"> </span><span class="n">current_local_direction</span><span class="w"> </span><span class="o">=</span>
+<span class="w">          </span><span class="n">current_local_media_description</span><span class="o">-&gt;</span><span class="n">direction</span><span class="p">();</span>
+<span class="w">      </span><span class="n">RtpTransceiverDirection</span><span class="w"> </span><span class="n">current_remote_direction</span><span class="w"> </span><span class="o">=</span>
+<span class="w">          </span><span class="n">current_remote_msection</span><span class="o">-&gt;</span><span class="n">media_description</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">direction</span><span class="p">();</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">transceiver</span><span class="o">-&gt;</span><span class="n">direction</span><span class="p">()</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">current_local_direction</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">          </span><span class="n">transceiver</span><span class="o">-&gt;</span><span class="n">direction</span><span class="p">()</span><span class="w"> </span><span class="o">!=</span>
+<span class="w">              </span><span class="n">RtpTransceiverDirectionReversed</span><span class="p">(</span><span class="n">current_remote_direction</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 5.2.3 If description is of type &quot;answer&quot;, and the direction of the</span>
+<span class="w">    </span><span class="c1">// associated m= section in the description does not match</span>
+<span class="w">    </span><span class="c1">// transceiver.[[Direction]] intersected with the offered direction (as</span>
+<span class="w">    </span><span class="c1">// described in [JSEP] (section 5.3.1.)), return true.</span>
+<span class="w">    </span><span class="c1">// </span>
+<span class="w">    </span><span class="c1">// 本地sdp为answer sdp（即当前pc为被呼方），那么远端sdp为offer sdp</span>
+<span class="w">    </span><span class="c1">// 此时，近端sdp的mline的方向如果与 “Rtptranceiver方向&amp;&amp;远端mline方向的交集” </span>
+<span class="w">    </span><span class="c1">// 不一致，则需要进行协商（此处较难理解，应反复斟酌）</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">description</span><span class="o">-&gt;</span><span class="n">GetType</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">SdpType</span><span class="o">::</span><span class="n">kAnswer</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// 远端sdp不存在，则需要进行协商</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">remote_description</span><span class="p">())</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">      </span><span class="c1">// 获取远端sdp，也即offer sdp中对应的mline描述</span>
+<span class="w">      </span><span class="k">const</span><span class="w"> </span><span class="n">ContentInfo</span><span class="o">*</span><span class="w"> </span><span class="n">offered_remote_msection</span><span class="w"> </span><span class="o">=</span>
+<span class="w">          </span><span class="n">FindTransceiverMSection</span><span class="p">(</span><span class="n">transceiver</span><span class="p">.</span><span class="n">get</span><span class="p">(),</span><span class="w"> </span><span class="n">remote_description</span><span class="p">());</span>
+<span class="w">      </span><span class="c1">// 如果远端offser sdp中mline描述存在，则获取mline中描述的方向，否则认为offer sdp</span>
+<span class="w">      </span><span class="c1">// 中该mline是无效的。</span>
+<span class="w">      </span><span class="n">RtpTransceiverDirection</span><span class="w"> </span><span class="n">offered_direction</span><span class="w"> </span><span class="o">=</span>
+<span class="w">          </span><span class="n">offered_remote_msection</span>
+<span class="w">              </span><span class="o">?</span><span class="w"> </span><span class="n">offered_remote_msection</span><span class="o">-&gt;</span><span class="n">media_description</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">direction</span><span class="p">()</span>
+<span class="w">              </span><span class="o">:</span><span class="w"> </span><span class="n">RtpTransceiverDirection</span><span class="o">::</span><span class="n">kInactive</span><span class="p">;</span>
+
+<span class="w">     </span><span class="c1">// 近端sdp的mline的方向如果与 “Rtptranceiver方向&amp;&amp;远端mline方向的交集” </span>
+<span class="w">    </span><span class="c1">// 不一致，则需要进行协商</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">current_local_media_description</span><span class="o">-&gt;</span><span class="n">direction</span><span class="p">()</span><span class="w"> </span><span class="o">!=</span>
+<span class="w">           </span><span class="c1">// 求二者方向的交集</span>
+<span class="w">          </span><span class="p">(</span><span class="n">RtpTransceiverDirectionIntersection</span><span class="p">(</span>
+<span class="w">              </span><span class="n">transceiver</span><span class="o">-&gt;</span><span class="n">direction</span><span class="p">(),</span>
+<span class="w">              </span><span class="c1">// 先对远端offer sdp的mline方向取反</span>
+<span class="w">              </span><span class="n">RtpTransceiverDirectionReversed</span><span class="p">(</span><span class="n">offered_direction</span><span class="p">))))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<h4>2.3.4 StatsCollector::AddTrack</h4>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">StatsCollector::AddTrack</span><span class="p">(</span><span class="n">MediaStreamTrackInterface</span><span class="o">*</span><span class="w"> </span><span class="n">track</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">track</span><span class="o">-&gt;</span><span class="n">kind</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">MediaStreamTrackInterface</span><span class="o">::</span><span class="n">kAudioKind</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">CreateTrackReport</span><span class="p">(</span><span class="n">static_cast</span><span class="o">&lt;</span><span class="n">AudioTrackInterface</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">track</span><span class="p">),</span><span class="w"> </span><span class="o">&amp;</span><span class="n">reports_</span><span class="p">,</span>
+<span class="w">                      </span><span class="o">&amp;</span><span class="n">track_ids_</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">track</span><span class="o">-&gt;</span><span class="n">kind</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">MediaStreamTrackInterface</span><span class="o">::</span><span class="n">kVideoKind</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">CreateTrackReport</span><span class="p">(</span><span class="n">static_cast</span><span class="o">&lt;</span><span class="n">VideoTrackInterface</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">track</span><span class="p">),</span><span class="w"> </span><span class="o">&amp;</span><span class="n">reports_</span><span class="p">,</span>
+<span class="w">                      </span><span class="o">&amp;</span><span class="n">track_ids_</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_NOTREACHED</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Illegal track kind&quot;</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>将该轨道纳入统计数据收集器，如此，可以出具关于该track的统计数据报表。详细分析可见后续WebRTC关于数据统计的分析，此处不赘述。</p>
+<h2>3. 总结</h2>
+<p>经过上述长篇论述，我们大致对WebRTC中的音频源，音频轨的继承结构，创建过程有了大致的了解；并且对PC如何添加、存储音频轨有了比较深刻的理解；同时，当音频轨被添加到PC中后，我们需要判断PC中近远端SDP会话对象 与 RtpTranceiver中保存的信息是否一致，从而决定了是否需要进行重新协商。有一些观点需要再次强调，也有一些疑惑需要列举出来，以备往后源码分析中一一解惑。</p>
+<ul>
+<li>WebRTC的有个重要的观念：<strong>媒体数据总是由“源”流向“轨道”，然后再从“轨道”流出</strong>。疑惑的点在于，近端的源LocalAudioSource根本没有提供这样的能力，那么近端的音频数据流转是如何实现的仍然是个谜团。</li>
+<li>WebRTC中使用SDP进行数据交换，有两种格式的SDP：Unified Plan 和 Plan B。目前，已经大多转向使用Unified Plan，因此，往后的源码分析都只分析Unified Plan。</li>
+<li>Unified Plan格式下，RtpTranceiver具有一个RtpSender和一个RtpReceiver，分别用来存储本地发送Track和接收对端数据的Track，RtpTranceiver以mLine的形式出现的本地SDP中，也会出现在远端SDP中，RtpTranceiver反应在近远端的mLine具有相同的mid，但RtpTranceiver方向在近远端SDP中必须有相反方向的属性，比如近端SDP中是SendOnly，则远端SDP中肯定是RecvOnly。</li>
+<li>文中也详细的论述了为什么添加轨道到PC将触发重新协商，详细分析了需要进行重新协商的条件是如何判断的——SDP对象与构建SDP对象所需要的信息源，二者之间信息不对等，不匹配时就需要重新协商，让SDP对象中存储的数据与信息源相一致。</li>
+</ul>
+<hr/>
+
+<h4><p>原文出处：<a href='https://blog.csdn.net/ice_ly000/article/details/105929651' target='blank'>WebRTC源码分析-呼叫建立过程之四（中）(创建并添加本地视频轨到PeerConnection)</a></p></h4>
+<h4>目录</h4>
+<ul>
+<li><ol>
+<li>引言</li>
+</ol>
+</li>
+<li><ol>
+<li>视频轨道的创建和添加</li>
+</ol>
+</li>
+<li><ul>
+<li>2.1 视频源的创建</li>
+<li><ul>
+<li>2.1.1 创建视频采集</li>
+</ul>
+</li>
+<li><ul>
+<li>2.1.1.1 视频采集UML</li>
+</ul>
+</li>
+<li>2.1.1.2 采集模块的内部数据流</li>
+<li>2.1.2 创建视频源</li>
+<li>2.1.3 创建视频轨源</li>
+<li>2.2 视频轨的创建</li>
+<li><ul>
+<li>2.2.1 PeerConnection::CreateVideoTrack</li>
+</ul>
+</li>
+<li>2.2.2 视频轨的继承树</li>
+<li>2.3 视频数据的流动</li>
+<li>2.4 添加视频轨到PeerConnection</li>
+</ul>
+</li>
+<li>3 总结</li>
+</ul>
+<h2>1. 引言</h2>
+<p>创建完PeerConnectionFactory 和 PeerConnection这两个API层的操盘对象之后，紧接着需要初始化本地的媒体，也即创建本地的音频轨、视频轨、数据通道，并将这些本地的媒体轨道添加到PeerConnection对象中。如图中红色标注所示。</p>
+<p>本文将详细描述上述<strong>视频</strong>轨道的创建细节 以及 轨道被添加到PeerConnection中的存储情况。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200912-190258-10.jpg" alt="在这里插入图片描述"></p>
+<h2>2. 视频轨道的创建和添加</h2>
+<div class="highlight"><pre><code><span></span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">CapturerTrackSource</span><span class="o">&gt;</span><span class="w"> </span><span class="n">video_device</span><span class="w"> </span><span class="o">=</span>
+<span class="w">    </span><span class="n">CapturerTrackSource</span><span class="o">::</span><span class="n">Create</span><span class="p">();</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">video_device</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">webrtc</span><span class="o">::</span><span class="n">VideoTrackInterface</span><span class="o">&gt;</span><span class="w"> </span><span class="n">video_track_</span><span class="p">(</span>
+<span class="w">      </span><span class="n">peer_connection_factory_</span><span class="o">-&gt;</span><span class="n">CreateVideoTrack</span><span class="p">(</span><span class="n">kVideoLabel</span><span class="p">,</span><span class="w"> </span><span class="n">video_device</span><span class="p">));</span>
+<span class="w">  </span><span class="n">main_wnd_</span><span class="o">-&gt;</span><span class="n">StartLocalRenderer</span><span class="p">(</span><span class="n">video_track_</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">result_or_error</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">peer_connection_</span><span class="o">-&gt;</span><span class="n">AddTrack</span><span class="p">(</span><span class="n">video_track_</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="n">kStreamId</span><span class="p">});</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">result_or_error</span><span class="p">.</span><span class="n">ok</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_ERROR</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Failed to add video track to PeerConnection: &quot;</span>
+<span class="w">                      </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">result_or_error</span><span class="p">.</span><span class="n">error</span><span class="p">().</span><span class="n">message</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_ERROR</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;OpenVideoCaptureDevice failed&quot;</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ol>
+<li>创建视频轨道源——CapturerTrackSource是示例工程中实现了VideoTrackSourceInterface接口的应用层类，非WebRTC内部提供的对象。该类不是直接实现VideoSourceInterface接口，而是VideoTrackSourceInterface接口。</li>
+<li>创建视频轨——PeerConnectionFactory::CreateVideoTrack。</li>
+<li>添加视频轨到PeerConnection——PeerConnection::AddTrack。</li>
+</ol>
+<h3>2.1 视频源的创建</h3>
+<div class="highlight"><pre><code><span></span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">CapturerTrackSource</span><span class="o">&gt;</span><span class="w"> </span><span class="n">video_device</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">CapturerTrackSource</span><span class="o">::</span><span class="n">Create</span><span class="p">();</span>
+
+<span class="k">static</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">CapturerTrackSource</span><span class="o">&gt;</span><span class="w"> </span><span class="n">Create</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 1. 预设视频参数</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">kWidth</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">640</span><span class="p">;</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">kHeight</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">480</span><span class="p">;</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">kFps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">30</span><span class="p">;</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">webrtc</span><span class="o">::</span><span class="n">test</span><span class="o">::</span><span class="n">VcmCapturer</span><span class="o">&gt;</span><span class="w"> </span><span class="n">capturer</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 2. 获取视频设备信息对象info，并获取机器上视频设备个数</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">webrtc</span><span class="o">::</span><span class="n">VideoCaptureModule</span><span class="o">::</span><span class="n">DeviceInfo</span><span class="o">&gt;</span><span class="w"> </span><span class="n">info</span><span class="p">(</span>
+<span class="w">      </span><span class="n">webrtc</span><span class="o">::</span><span class="n">VideoCaptureFactory</span><span class="o">::</span><span class="n">CreateDeviceInfo</span><span class="p">());</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">info</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">num_devices</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">info</span><span class="o">-&gt;</span><span class="n">NumberOfDevices</span><span class="p">();</span>
+<span class="w">  </span><span class="c1">// 3. 枚举音频设备，查找支持预设视频参数的设备，创建对应的视频源，然后创建对应的轨道源</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">num_devices</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 3.1 创建满足预设视频参数的视频源对象VcmCapturer</span>
+<span class="w">    </span><span class="n">capturer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">absl</span><span class="o">::</span><span class="n">WrapUnique</span><span class="p">(</span>
+<span class="w">        </span><span class="n">webrtc</span><span class="o">::</span><span class="n">test</span><span class="o">::</span><span class="n">VcmCapturer</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span><span class="n">kWidth</span><span class="p">,</span><span class="w"> </span><span class="n">kHeight</span><span class="p">,</span><span class="w"> </span><span class="n">kFps</span><span class="p">,</span><span class="w"> </span><span class="n">i</span><span class="p">));</span>
+<span class="w">    </span><span class="c1">// 3.2 创建视频轨源对象CapturerTrackSource</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">capturer</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">new</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">RefCountedObject</span><span class="o">&lt;</span><span class="n">CapturerTrackSource</span><span class="o">&gt;</span><span class="p">(</span>
+<span class="w">          </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">capturer</span><span class="p">));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">nullptr</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>从上创建视频源的代码可以知道如下几点：</p>
+<ul>
+<li>通过设备信息类VideoCaptureModule::DeviceInfo获取音视频设备个数</li>
+<li>需要根据预设的视频参数宽高，帧率去创建视频源对象VcmCapturer，一旦音频源对象VcmCapturer创建成功，则认为找到了底层适用于该预设视频参数的音频采集VideoCapture设备。</li>
+<li>以创建的视频源对象VcmCapturer为入参，构建视频轨源对象CapturerTrackSource。VcmCapturer成为CapturerTrackSource的私有成员。</li>
+</ul>
+<p>CapturerTrackSource、VcmCapturer、VideoCapture对象的继承树，以及这三者的关系如下UML类图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200912-190309-11.png" alt="在这里插入图片描述"></p>
+<h4>2.1.1 创建视频采集</h4>
+<p>视频采集模块是数据流水线的起始点，负责从视频源采集原始视频帧，推送给流水线的下一站：可以是本地渲染模块进行本地回显，也可以是编码模块进行数据编码压缩。</p>
+<p>视频源可以是摄像头，也可以是桌面、窗口抓屏(远程桌面，基于视频流的电子白板等应用)，甚至可以是磁盘上的视频文件，图片文件。WebRTC中提供了基于摄像头的视频采集框架，是本文要讨论的重点。当然WebRTC也提供了桌面，窗口抓屏框架，这套框架对外所提供的接口与基于摄像头的采集接口有所不同。整个视频流水线建立是以摄像头采集接口为基础的，从而导致这么个问题：当需要将抓屏数据当做视频源往外推送时，需要使用适配器模式来实现一套基于摄像头的视频采集接口。</p>
+<p>视频采集模块是平台相关的模块，MacOS/IOS一般使用AVFoundation框架或者QuikTime框架，Linux平台一般使用V4L2库，Android上一般使用Camera1或者Camera2框架，Windows平台则使用DS（DirectShow）或者是MF（MediaFoundation）。由于WebRTC是个非常活跃的工程，代码架构一直在不停的变动之中，比如2019年4月份的代码还有VideoCaptureMF的代码，并且还注释着Vista及以上的版本建议使用MediaFoundation采集框架，而2019年11月份的代码MediaFoundation相关的代码已经被移除。再比如MacOs/IOS，Android的相关代码已经被移动到sdk/objc和sdk/android目录下。本文以<code>modules/video_capture</code>下的代码来做阐述，平台无关的代码在该直接目录下，平台相关的实现在<code>modules/video_capture/windows</code>，<code>modules/video_capture/linux</code>目录下，如图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200912-190329-12.png" alt="在这里插入图片描述"></p>
+<h5>2.1.1.1 视频采集UML</h5>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200912-190335-13.png" alt="在这里插入图片描述"></p>
+<p>DeviceInfo接口提供了设备枚举相关功能，其平台相关子类实例以组合的形式提供给VideoCapture。</p>
+<ul>
+<li>枚举设备个数，获取某个设备名称。</li>
+<li>枚举某个设备所支持的所有能力（VideoCaptureCapability: 分辨率，最大帧率，颜色空间，是否逐行扫描)</li>
+<li>获取某个设备的所有能力中与外部设置的能力最匹配的那个能力。</li>
+</ul>
+<p>VideoCaptureModule视频采集模块的虚基类，它定义一系列视频采集的通用接口函数：</p>
+<ul>
+<li>Start/StopCapture用来开始/结束视频采集（平台相关）；</li>
+<li>CaptureStarted用来判断当前capture运行状态（平台相关）；</li>
+<li>Register/DeCaptureDataCallback用来注册/注销数据回调模块（平台无关）；</li>
+<li>Set/GetApplyRotation用来设置视频旋转角度（平台无关）。</li>
+</ul>
+<p>VideoCaptureImpl类是VideoCaptureModule的实现子类。做了3个事：</p>
+<ul>
+<li>声明静态Ctreate方法，用于创建平台相关的VideoCaptureImpl子类，在Windows平台上为VideoCaptureDS，在Linux平台上实现的子类是VideoCaptureV4L2。该方法一处声明，多处实现，在相应平台编译时，只会加载对应平台的实现代码；</li>
+<li>平台相关的接口，留待平台相关的子类中实现，主要是开始/结束视频采集；</li>
+<li>实现平台无关的接口：注册视频数据回调，应用视频旋转相关函数。其中注册数据回调将一个实现了VideoSinkInterface<VideoFrame>接口的对象赋予<code>VideoCaptureImpl::_dataCallBack</code>成员。当采集模块得到一帧视频数据，就可以通过该对象的OnFrame()方法推送出来。</li>
+</ul>
+<h5>2.1.1.2 采集模块的内部数据流</h5>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200912-190342-14.png" alt="在这里插入图片描述"></p>
+<ol>
+<li>以VideoCaptureDS为例，平台相关的采集模块采集到一帧视频后，平台相关的函数ProcessCapturedFrame()方法进行处理。ProcessCapturedFrame()将视频帧直接传递给VideoCaptureImpl::IncomingFrame()方法</li>
+<li>VideoCaptureImpl::IncomingFrame()方法将对视频帧按需求进行旋转，并利用libyuv库转换成I420类型，再给视频帧加上NTP时间戳。经过上述处理后，IncomingFrame()将视频帧进一步传递给VideoCaptureImpl::DeliverCapturedFrame()</li>
+<li>VideoCaptureImpl::DeliverCapturedFrame()将调用VideoSinkInterface::OnFrame()，将视频帧传递给回调对象<code>_dataCallBack</code>，即数据的下一站，从而将视频帧推送出采集模块。</li>
+</ol>
+<h4>2.1.2 创建视频源</h4>
+<p>VcmCapturer是创建的视频源对象，虽然从名字上来看像是视频采集类，但实质上它实现了VideoSourceInterface接口。我们认为其是一个视频
+源。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200912-190345-15.png" alt="在这里插入图片描述"></p>
+<p>VideoCaptureModule作为数据源头组合到视频源对象VcmCapturer中，同时VcmCapturer又实现了VideoSinkInterface<VideoFrame>接口，可以把自己注册到VideoCaptureModule中。从而实现了视频帧从VideoCaptureModule-&gt;VideoSource的流动。</p>
+<p>VcmCapturer在构造成功时就会启动VideoCaptureModule进行视频采集。</p>
+<p>视频源VcmCapturer持有一个非常重要的成员VideoBroadcaster对象，该对象的UML类图如下。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200912-190351-16.png" alt="在这里插入图片描述"></p>
+<p>一方面VideoBroadcaster实现了VideoSinkInterface接口，成为一个Sink，这样VideoSource得到采集模块的视频帧后，首先会流入到内部的VideoBroadcaster成员对象，而非直接从VideoSource流出；另一方面VideoSource和VideoBroadcaster都实现了VideoSourceInterface接口，对外VideoSource作为视频源存在，向数据流下一站提供注册方法AddOrUpdateSink()；该方法内部调用VideoBroadcaster的AddOrUpdateSink()，从而将数据流下一站VideoSink注册到VideoBroadcaster，存入成员std::vector<SinkPair> sinks_中。到此，应该不难想到VideoBroadcaster既有了数据流入，还知道数据的下一站(可能多个)，那么VideoBroadcaster::OnFrame()中就可以通过循环调用下一站的OnFrame方法将视频帧广播出去。</p>
+<p>为什么要如此设计？因为，在WebRTC 1.0的官方规范中说明了一个视频源是可以被多个视频轨共用的。通过上述方式可以实现共用的概念。</p>
+<h4>2.1.3 创建视频轨源</h4>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200912-190357-17.png" alt="在这里插入图片描述"></p>
+<p>VideoTrackSource没有实现VideoSinkInterface接口，因此，实质上视频数据是不会流入到VideoTrackSource中的，但其组合了VideoSource对象，并且实现了VideoSourceInterface接口，添加到VideoTrackSource中的VideoSink会被添加到VideoSource，然后进一步添加到VideoBroadcast中。对外部来说，VideoTrackSource就是视频源。</p>
+<p>VideoTrackSource另外实现了视频源状态相关的接口，以及状态通告相关的接口NotifierInterface，用于向更高一层（VideoTrack）通告视频源的状态。</p>
+<h3>2.2 视频轨的创建</h3>
+<h4>2.2.1 PeerConnection::CreateVideoTrack</h4>
+<div class="highlight"><pre><code><span></span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">webrtc</span><span class="o">::</span><span class="n">VideoTrackInterface</span><span class="o">&gt;</span><span class="w"> </span><span class="n">video_track_</span><span class="p">(</span>
+<span class="w">    </span><span class="n">peer_connection_factory_</span><span class="o">-&gt;</span><span class="n">CreateVideoTrack</span><span class="p">(</span><span class="n">kVideoLabel</span><span class="p">,</span><span class="w"> </span><span class="n">video_device</span><span class="p">));</span>
+
+<span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">VideoTrackInterface</span><span class="o">&gt;</span><span class="w"> </span><span class="n">PeerConnectionFactory</span><span class="o">::</span><span class="n">CreateVideoTrack</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&amp;</span><span class="w"> </span><span class="n">id</span><span class="p">,</span>
+<span class="w">    </span><span class="n">VideoTrackSourceInterface</span><span class="o">*</span><span class="w"> </span><span class="n">source</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">signaling_thread_</span><span class="o">-&gt;</span><span class="n">IsCurrent</span><span class="p">());</span>
+<span class="w">  </span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">VideoTrackInterface</span><span class="o">&gt;</span><span class="w"> </span><span class="n">track</span><span class="p">(</span>
+<span class="w">      </span><span class="n">VideoTrack</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">source</span><span class="p">,</span><span class="w"> </span><span class="n">worker_thread_</span><span class="p">));</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">VideoTrackProxy</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span><span class="n">signaling_thread_</span><span class="p">,</span><span class="w"> </span><span class="n">worker_thread_</span><span class="p">,</span><span class="w"> </span><span class="n">track</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">VideoTrack</span><span class="o">&gt;</span><span class="w"> </span><span class="n">VideoTrack</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&amp;</span><span class="w"> </span><span class="n">id</span><span class="p">,</span>
+<span class="w">    </span><span class="n">VideoTrackSourceInterface</span><span class="o">*</span><span class="w"> </span><span class="n">source</span><span class="p">,</span>
+<span class="w">    </span><span class="n">rtc</span><span class="o">::</span><span class="n">Thread</span><span class="o">*</span><span class="w"> </span><span class="n">worker_thread</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">rtc</span><span class="o">::</span><span class="n">RefCountedObject</span><span class="o">&lt;</span><span class="n">VideoTrack</span><span class="o">&gt;*</span><span class="w"> </span><span class="n">track</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">new</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">RefCountedObject</span><span class="o">&lt;</span><span class="n">VideoTrack</span><span class="o">&gt;</span><span class="p">(</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">source</span><span class="p">,</span><span class="w"> </span><span class="n">worker_thread</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">track</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="n">VideoTrack</span><span class="o">::</span><span class="n">VideoTrack</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&amp;</span><span class="w"> </span><span class="n">label</span><span class="p">,</span>
+<span class="w">                       </span><span class="n">VideoTrackSourceInterface</span><span class="o">*</span><span class="w"> </span><span class="n">video_source</span><span class="p">,</span>
+<span class="w">                       </span><span class="n">rtc</span><span class="o">::</span><span class="n">Thread</span><span class="o">*</span><span class="w"> </span><span class="n">worker_thread</span><span class="p">)</span>
+<span class="w">    </span><span class="o">:</span><span class="w"> </span><span class="n">MediaStreamTrack</span><span class="o">&lt;</span><span class="n">VideoTrackInterface</span><span class="o">&gt;</span><span class="p">(</span><span class="n">label</span><span class="p">),</span>
+<span class="w">      </span><span class="n">worker_thread_</span><span class="p">(</span><span class="n">worker_thread</span><span class="p">),</span>
+<span class="w">      </span><span class="n">video_source_</span><span class="p">(</span><span class="n">video_source</span><span class="p">),</span>
+<span class="w">      </span><span class="n">content_hint_</span><span class="p">(</span><span class="n">ContentHint</span><span class="o">::</span><span class="n">kNone</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">video_source_</span><span class="o">-&gt;</span><span class="n">RegisterObserver</span><span class="p">(</span><span class="n">this</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>由上视频轨创建过程可知，</p>
+<ul>
+<li>我们最终创建的实体视频轨是VideoTrack这个类的对象，但是向应用层返回的是相对应的代理对象VideoTrackProxy，这是WebRTC防止线程乱入的常规操作，原因不再多赘述。</li>
+<li>另外由代理对象的构建方式可知，VideoTrack的部分方法需要在信令线程执行，部分方法需要在工作者线程执行。</li>
+<li>VideoTrack成为源的观察者，可以获知源的状态改变。</li>
+</ul>
+<h4>2.2.2 视频轨的继承树</h4>
+<p>如下是VideoTrack类的UML类图。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200912-190358-18.png" alt="在这里插入图片描述"></p>
+<p>从上VideoTrack类的UML类图我们可以得知如下几个结论：</p>
+<ul>
+<li>VideoTrack一方面要实现ObserverInterface接口，让自己可以成为视频源的观察者，让自己的状态可以随着源的状态进行同步改变；另一方面又要实现NotifierInterface接口，让自己成为一个通知者，当自己的状态改变时，能够通知那些观察自己状态变化的对象。</li>
+<li>如同VideoTrackSource一般，VideoTrack也没有实现VideoSinkInterface接口，因此，视频数据也不会流入到VideoTrack中，但其组合了VideoTrackSource，并且间接实现了VideoSourceInterface接口。想要从VideoTrack中获取视频流的站点，只要实现VideoSinkInterface接口，通过VideoTrack的AddOrUpdateSink()注册进来即可，因为该VideoSink会经过VideoTrackSource-&gt;VideoSource-&gt;VideoBroadcaster，最终可以从VideoBroadcaster获得视频流。</li>
+<li>VideoTrack还实现了VideoTrackInterface接口，其中提供了一个重要的属性：ContentHint。这个属性告知编码器在码率降低时，应该如何应对：降低帧率？降低分辨率？对于桌面采集应用来说，我们应该设置该属性为kDetailed或者是kText，这样编码器编码该视频流的时候不会降低分辨率，量化参数qp值也不会设置的过大。</li>
+<li>我认为VideoTrack没有直接继承实现VideoSourceInterface接口，或者像AudioTrack那样直接提供AddOrUpdateSink/RemoveSink方法，而是继承了VideoSourceBase类，这样，往VideoTrack中的添加的VideoSink在VideoBroadcaster保存一份，也会在VideoTrack中保存一份。在VideoTrack保存这一份实质上没有什么作用，并且这样的继承关系跟AudioTrack的继承关系不对称，毫无美感而言。</li>
+</ul>
+<h3>2.3 视频数据的流动</h3>
+<p>纵观上述几个对象，我们可以得出如下的类图：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200912-190359-19.png" alt="在这里插入图片描述"></p>
+<p>我们可以认为视频数据原始帧从VideoCapture流向了VideoSource，然后又流向了VideoTrackSource，然后流向VideoTrack。向VideoTrack注册的Sink又可以进一步获取到视频原始帧。</p>
+<p>虽然比较细致地拆解了视频源为VideoTrackSource、VideoSource、VideoCapture，但从宏观概念上，我们要知晓：可以直接认为VideoTrackSource是视频源。数据从视频源流向视频轨。</p>
+<p>视频轨既要从视频源获取视频数据，还要观察视频源地状态，从而同步更改自己地状态。</p>
+<h3>2.4 添加视频轨到PeerConnection</h3>
+<p>由于VideoTrack同AudioTrack一样，都实现了MediaStreamTrackInterface接口，对于PC而言，视频轨和音频轨并无实质区别，因为都是通过如下方法进行添加的。因此，在此处就不再赘述VideoTrack如何被添加？存储在PC的何处？是否将引发PC状态的改变？ 等等，见上篇文章：<a href="https://blog.csdn.net/ice_ly000/article/details/105763733">WebRTC源码分析-呼叫建立过程之四（上）(创建并添加本地音频轨到PeerConnection)</a></p>
+<div class="highlight"><pre><code><span></span><span class="n">RTCErrorOr</span><span class="o">&lt;</span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">RtpSenderInterface</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">AddTrack</span><span class="p">(</span>
+<span class="w">    </span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">MediaStreamTrackInterface</span><span class="o">&gt;</span><span class="w"> </span><span class="n">track</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">stream_ids</span><span class="p">)</span><span class="w"> </span><span class="n">override</span><span class="p">;</span>
+</code></pre></div>
+<h2>3 总结</h2>
+<p>行文知此，大致对如何创建一个视频轨并添加到PC进行了一个较细致的分析。即便忘记了细节，那么如下要点是需要记住的</p>
+<ul>
+<li>视频轨的实体对象是VideoTrack类，对于应用层返回的是其代理对象VideoTrackProxy，这是WebRTC为了防止线程乱入所作的常规操作。</li>
+<li>WebRTC中，媒体数据总是从Source流向Sink。</li>
+<li>某个对象要想从VideoTrack获取到视频帧，那么它需要实现VideoSinkInterface，并注册到VideoTrack中。实质上向VideoTrack注册的Sink会被传递到VideoTrack所持有的VideoSource的VideoBroadcast成员对象中，从那儿可以获得从VideoCapture传递来的视频帧。</li>
+<li>记住VideoTrack提供了ContentHint这样一个属性以及设置这个属性的接口。该属性描绘了视频帧的内容，这个会影响到编码器的降级策略（当网络带宽资源 &amp;&amp; CPU资源受限时，无法按照既定的编码参数进行编码输出，那么就需要降级编码）是保持帧率，还是保持分辨率。当我们做远程桌面、电子白板这种应用时，我们认为内容清晰度比流畅性更重要，此时就需要保持分辨率，降低一些帧率。那么将VideoTrack的ContentHint属性设置为kDetailed or kText，那么就暗示了编码器保持分辨率；当我们做音视频会话时，我们需要保证音视频的流畅性、连贯性，因此，一般会采取保帧率，降分辨率的策略，那么可以将VideoTrack的ContentHint属性设置为kFluid，那么暗示编码器保持帧率。</li>
+</ul>
+<hr/>
+
+
+<h4><p>原文出处：<a href='https://blog.csdn.net/ice_ly000/article/details/105967584' target='blank'>WebRTC源码分析-呼叫建立过程之四（下）(创建数据通道DataChannel)</a></p></h4>
+<h3>目录</h3>
+<ul>
+<li><ol>
+<li>引言</li>
+</ol>
+</li>
+<li><ol>
+<li>数据通道的创建</li>
+</ol>
+</li>
+<li><ul>
+<li>2.1 PeerConnection::CreateDataChannel方法</li>
+<li><ul>
+<li>2.1.1 初始化参数DataChannelInit</li>
+</ul>
+</li>
+<li>2.1.2 PeerConnection.data<em>channel_controller</em>.data<em>channel_type</em></li>
+<li>2.2 DataChannelController::InternalCreateDataChannel方法</li>
+<li>2.3 DataChannel::Create方法</li>
+<li><ul>
+<li>2.3.1 DataChannel构造</li>
+</ul>
+</li>
+<li>2.3.2 DataChannel初始化</li>
+<li>2.3.3 DataChannel与底层Transport的关联</li>
+</ul>
+</li>
+<li><ol>
+<li>总结</li>
+</ol>
+</li>
+</ul>
+<h2>1. 引言</h2>
+<p>创建完PeerConnectionFactory 和 PeerConnection这两个API层的操盘对象之后，紧接着需要初始化本地的媒体，也即创建本地的音频轨、视频轨、数据通道，并将这些本地的媒体轨道添加到PeerConnection对象中。如图中红色标注所示。</p>
+<p>本文将详细描述上述数据通道的创建细节。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200912-192027-10.png" alt="在这里插入图片描述"></p>
+<h2>2. 数据通道的创建</h2>
+<p>应用层通过调用PC的CreateDataChannel方法来创建DataChannel，PC有两个CreateDataChannel方法，其中一个入参是mid值，另外一个如下源码所示。</p>
+<h3>2.1 PeerConnection::CreateDataChannel方法</h3>
+<div class="highlight"><pre><code><span></span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">DataChannelInterface</span><span class="o">&gt;</span><span class="w"> </span><span class="n">PeerConnection</span><span class="o">::</span><span class="n">CreateDataChannel</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&amp;</span><span class="w"> </span><span class="n">label</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">DataChannelInit</span><span class="o">*</span><span class="w"> </span><span class="n">config</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 1. 判断是否运行于信令线程，输出日志</span>
+<span class="w">  </span><span class="n">RTC_DCHECK_RUN_ON</span><span class="p">(</span><span class="n">signaling_thread</span><span class="p">());</span>
+<span class="w">  </span><span class="n">TRACE_EVENT0</span><span class="p">(</span><span class="s">&quot;webrtc&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;PeerConnection::CreateDataChannel&quot;</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 2. 是否为第一个数据通道？</span>
+<span class="w">  </span><span class="c1">//    PC.data_channel_controller_有三个成员变量记录了DataChannel，分别是</span>
+<span class="w">  </span><span class="c1">//    map&lt;std::string, rtc::scoped_refptr&lt;DataChannel&gt;&gt; rtp_data_channels_；</span>
+<span class="w">  </span><span class="c1">//    vector&lt;rtc::scoped_refptr&lt;DataChannel&gt;&gt; sctp_data_channels_；</span>
+<span class="w">  </span><span class="c1">//    vector&lt;rtc::scoped_refptr&lt;DataChannel&gt;&gt; sctp_data_channels_to_free_；</span>
+<span class="w">  </span><span class="c1">//    第一个记录的是rtp作为datachannel底层传输的数据通道，并且记录label-&gt;DataChannel的映射</span>
+<span class="w">  </span><span class="c1">//    第二个记录的是sctp作为datachannel底层传输的数据通道</span>
+<span class="w">  </span><span class="c1">//    第三个记录的是已经需要进行释放的sctp作为datachannel底层传输的数据通道</span>
+<span class="w">  </span><span class="c1">//</span>
+<span class="w">  </span><span class="c1">//    是否是第一个，取决于rtp_data_channels_和sctp_data_channels_是否为空，为空，则是第一个；</span>
+<span class="w">  </span><span class="c1">//    不需要判断第三个记录，因为已经是需要销毁释放的datachannel了。</span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">first_datachannel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">!</span><span class="n">data_channel_controller_</span><span class="p">.</span><span class="n">HasDataChannels</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// 3. 创建DataChannel对象</span>
+<span class="w">  </span><span class="c1">// 3.1 创建内部使用的DataChannel初始化参数InternalDataChannelInit</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">InternalDataChannelInit</span><span class="o">&gt;</span><span class="w"> </span><span class="n">internal_config</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">config</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">internal_config</span><span class="p">.</span><span class="n">reset</span><span class="p">(</span><span class="n">new</span><span class="w"> </span><span class="n">InternalDataChannelInit</span><span class="p">(</span><span class="o">*</span><span class="n">config</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// 3.2 通过InternalCreateDataChannel方法来创建DataChannel</span>
+<span class="w">  </span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">DataChannelInterface</span><span class="o">&gt;</span><span class="w"> </span><span class="n">channel</span><span class="p">(</span>
+<span class="w">      </span><span class="n">data_channel_controller_</span><span class="p">.</span><span class="n">InternalCreateDataChannel</span><span class="p">(</span><span class="n">label</span><span class="p">,</span><span class="w"> </span><span class="n">internal_config</span><span class="p">.</span><span class="n">get</span><span class="p">()));</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">channel</span><span class="p">.</span><span class="n">get</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// 3.3 如果创建的是RTP DataChannel或者是第一个SCTP DataChannel，需要报告给PC的观察者</span>
+<span class="w">  </span><span class="c1">//     进行重新协商</span>
+<span class="w">  </span><span class="c1">// Trigger the onRenegotiationNeeded event for every new RTP DataChannel, or</span>
+<span class="w">  </span><span class="c1">// the first SCTP DataChannel.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">data_channel_type</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">cricket</span><span class="o">::</span><span class="n">DCT_RTP</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">first_datachannel</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">Observer</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">OnRenegotiationNeeded</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// 3.4 记录DATA_ADDED事件到PC的成员usage_event_accumulator_</span>
+<span class="w">  </span><span class="n">NoteUsageEvent</span><span class="p">(</span><span class="n">UsageEvent</span><span class="o">::</span><span class="n">DATA_ADDED</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 4. 返回DataChannel的代理对象DataChannelProxy</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">DataChannelProxy</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span><span class="n">signaling_thread</span><span class="p">(),</span><span class="w"> </span><span class="n">channel</span><span class="p">.</span><span class="n">get</span><span class="p">());</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>分四步对CreateDataChannel()方法进行了初步分析，其中一些知识点拎出来再说明下：</p>
+<ul>
+<li>从判断是否已经存在DataChannel这么一个判断的方式上看，PC的<code>data_channel_controller_</code>有两个成员存储了DataChannel，分别是成员<code>rtp_data_channels_</code>和成员<code>sctp_data_channels_</code>，从名称上可以看出这两个成员是用来保存不同传输协议实现的DataChannel：基于sctp 和 基于rtp。</li>
+<li>创建DataChannel过程中出现了两个特别重要的参数，一个是应用层传入的DataChannelInit，一个是PC的成员<code>data_channel_type_</code>。后续将对这两个主要的参数进行详细的阐述。</li>
+<li>WebRTC的PC成员<code>usage_event_accumulator_</code>会以位去记录发生的事件，只要事件发生过一次，就会被<code>usage_event_accumulator_</code>标记上，这些事件大致如下：  </li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200912-192028-11.png" alt="在这里插入图片描述"></p>
+<ul>
+<li>最终返给用户层的是DataChannelProxy，这是WebRTC防止线程乱入的一贯做法，此处不展开详述了。</li>
+</ul>
+<p>接下来是时候好好看看那两个重要的参数了：DataChannelInit &amp;&amp; <code>data_channel_type_</code></p>
+<h4>2.1.1 初始化参数DataChannelInit</h4>
+<p>当我们在网上搜索SCTP时，会看到相关的描述，将SCTP介绍为与UDP，TCP同一层次的传输层协议。最早STCP是把窄带7号信令的可靠性传输机制引入到IP协议、优化TCP协议的不能分帧传输的局限性提出来的，不过后来应用不是很广泛。在WebRTC中实现数据通道使用的SCTP是基于改良剪切版的，有两个草案描述了该改良版本《draft-ietf-rtcweb-data-channel-13》、《draft-ietf-rtcweb-data-protocol-09》（此处描述来源于<a href="https://blog.csdn.net/CrystalShaw/article/details/104655418">webrtc数据通道之SCTP over DTLS简介</a>）。WebRTC要求使用SCTP必须开启DTLS，协议的分层图如下：可以得知WebRTC中的SCTP实际上是基于UDP在应用层提供的相关实现，而非常规意义上的OSI模型中的传输层。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200912-192033-12.png" alt=""></p>
+<p>WebRTC根据实际的应用场景，提供了不同可靠程度的传输模式：可靠传输模式、部分可靠传输模式、不可靠传输模式。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200912-192033-12-1.png" alt="在这里插入图片描述"></p>
+<p>采用哪种模式取决于结构体参数DataChannelInit，该参数包含的字段如下源码：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">DataChannelInit</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Deprecated. Reliability is assumed, and channel will be unreliable if</span>
+<span class="w">  </span><span class="c1">// maxRetransmitTime or MaxRetransmits is set.</span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">reliable</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// True if ordered delivery is required.</span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">ordered</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// The max period of time in milliseconds in which retransmissions will be</span>
+<span class="w">  </span><span class="c1">// sent. After this time, no more retransmissions will be sent.</span>
+<span class="w">  </span><span class="c1">//</span>
+<span class="w">  </span><span class="c1">// Cannot be set along with |maxRetransmits|.</span>
+<span class="w">  </span><span class="c1">// This is called |maxPacketLifeTime| in the WebRTC JS API.</span>
+<span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">maxRetransmitTime</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// The max number of retransmissions.</span>
+<span class="w">  </span><span class="c1">//</span>
+<span class="w">  </span><span class="c1">// Cannot be set along with |maxRetransmitTime|.</span>
+<span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">maxRetransmits</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// This is set by the application and opaque to the WebRTC implementation.</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">protocol</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// True if the channel has been externally negotiated and we do not send an</span>
+<span class="w">  </span><span class="c1">// in-band signalling in the form of an &quot;open&quot; message. If this is true, |id|</span>
+<span class="w">  </span><span class="c1">// below must be set; otherwise it should be unset and will be negotiated</span>
+<span class="w">  </span><span class="c1">// in-band.</span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">negotiated</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// The stream id, or SID, for SCTP data channels. -1 if unset (see above).</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">-1</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<ul>
+<li>reliable、ordered 、maxRetransmitTime、maxRetransmits确定了传输是否是可靠的，不可靠情况下如何重传，包是否要求有序到达。</li>
+</ul>
+<table><thead><tr><th>参数取值</th><th>传输可靠性</th></tr></thead><tbody><tr><td>reliable为true</td><td>可靠传输</td></tr><tr><td>reliable为false，maxRetransmitTime 或 maxRetransmits存在且有效</td><td>部分可靠传输</td></tr><tr><td>reliable为false，且maxRetransmitTime &amp;&amp; maxRetransmits均无效</td><td>不可靠传输</td></tr></tbody></table><ul>
+<li>protocol 字段描述DataChannel中传输数据的子协议，对于WebRTC来说是透明的</li>
+<li>negotiated 和 id字段确定了通道协商的手段是通过带外数据协商，还是通过DataChannel本身传输数据协商。当negotiated为真时，说明通过SDP进行带外数据协商，此时，id必须提供有效的SID值；当negotiated为假时，需要建立DataChannel时，在底层通道链路建立后发送Open消息进行带内协商。</li>
+</ul>
+<p>InternalDataChannelInit结构参数扩展了DataChannelInit ，增加了一个字段OpenHandshakeRole：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">InternalDataChannelInit</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">public</span><span class="w"> </span><span class="n">DataChannelInit</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">enum</span><span class="w"> </span><span class="n">OpenHandshakeRole</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">kOpener</span><span class="p">,</span><span class="w"> </span><span class="n">kAcker</span><span class="p">,</span><span class="w"> </span><span class="n">kNone</span><span class="w"> </span><span class="p">};</span>
+<span class="w">  </span><span class="c1">// The default role is kOpener because the default |negotiated| is false.</span>
+<span class="w">  </span><span class="n">InternalDataChannelInit</span><span class="p">()</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">open_handshake_role</span><span class="p">(</span><span class="n">kOpener</span><span class="p">)</span><span class="w"> </span><span class="p">{}</span>
+<span class="w">  </span><span class="n">explicit</span><span class="w"> </span><span class="n">InternalDataChannelInit</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">DataChannelInit</span><span class="o">&amp;</span><span class="w"> </span><span class="n">base</span><span class="p">);</span>
+<span class="w">  </span><span class="n">OpenHandshakeRole</span><span class="w"> </span><span class="n">open_handshake_role</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>在需要带外协商时，<code>open_handshake_role</code>为kNone；带内协商时<code>open_handshake_role</code>默认为kOpener（一方为kOpener、另一方为kAcker），kOpener主动向kAcker发送Open控制消息，进行带内协商。</p>
+<h4>2.1.2 PeerConnection.data<em>channel_controller</em>.data<em>channel_type</em></h4>
+<p><code>PeerConnection.data_channel_controller_.data_channel_type_</code>成员是一个枚举类型的变量，该变量影响到在创建DataChannel时，DataChannel底层使用的协议。</p>
+<div class="highlight"><pre><code><span></span><span class="k">enum</span><span class="w"> </span><span class="n">DataChannelType</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 不允许创建DataChannel；</span>
+<span class="w">  </span><span class="n">DCT_NONE</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="c1">// 基于RTP协议的DataChannel；</span>
+<span class="w">  </span><span class="n">DCT_RTP</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="c1">// 基于SCTP协议的DataChannel；</span>
+<span class="w">  </span><span class="n">DCT_SCTP</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">  </span><span class="c1">// 有待解惑</span>
+<span class="w">  </span><span class="c1">// Data channel transport over media transport.</span>
+<span class="w">  </span><span class="n">DCT_MEDIA_TRANSPORT</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">  </span><span class="c1">// 基于UDP协议的DataChannel，与上一个相比行为一致，但不使用DTLS</span>
+<span class="w">  </span><span class="c1">// Data channel transport over datagram transport (with no fallback).  This is</span>
+<span class="w">  </span><span class="c1">// the same behavior as data channel transport over media transport, and is</span>
+<span class="w">  </span><span class="c1">// usable without DTLS.</span>
+<span class="w">  </span><span class="n">DCT_DATA_CHANNEL_TRANSPORT</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span>
+<span class="w">  </span><span class="c1">// 基于UDP传输(使用SCTP协商语法，并可回退到SCTP)。必须使用DTLS。</span>
+<span class="w">  </span><span class="c1">// Data channel transport over datagram transport (with SCTP negotiation</span>
+<span class="w">  </span><span class="c1">// semantics and a fallback to SCTP).  Only usable with DTLS.</span>
+<span class="w">  </span><span class="n">DCT_DATA_CHANNEL_TRANSPORT_SCTP</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span>
+<span class="p">};</span>
+</code></pre></div>
+<p><code>PeerConnection.data_channel_controller_.data_channel_type_</code>参数在PC初始化函数中赋值，之前在分析创建PC的文章中粗略地分析过PeerConnection::Initialize()方法，再次把其中与当前议题相关的部分截取出来以供分析：</p>
+<div class="highlight"><pre><code><span></span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">use_datagram_transport_for_data_channels_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">configuration</span><span class="p">.</span><span class="n">enable_rtp_data_channel</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_ERROR</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;enable_rtp_data_channel and &quot;</span>
+<span class="w">                          </span><span class="s">&quot;use_datagram_transport_for_data_channels are &quot;</span>
+<span class="w">                          </span><span class="s">&quot;incompatible and cannot both be set to true&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">configuration</span><span class="p">.</span><span class="n">enable_dtls_srtp</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!*</span><span class="n">configuration</span><span class="p">.</span><span class="n">enable_dtls_srtp</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Using data channel transport with no fallback&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="n">data_channel_controller_</span><span class="p">.</span><span class="n">set_data_channel_type</span><span class="p">(</span>
+<span class="w">        </span><span class="n">cricket</span><span class="o">::</span><span class="n">DCT_DATA_CHANNEL_TRANSPORT</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Using data channel transport with fallback to SCTP&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="n">data_channel_controller_</span><span class="p">.</span><span class="n">set_data_channel_type</span><span class="p">(</span>
+<span class="w">        </span><span class="n">cricket</span><span class="o">::</span><span class="n">DCT_DATA_CHANNEL_TRANSPORT_SCTP</span><span class="p">);</span>
+<span class="w">    </span><span class="n">config</span><span class="p">.</span><span class="n">sctp_factory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sctp_factory_</span><span class="p">.</span><span class="n">get</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">configuration</span><span class="p">.</span><span class="n">enable_rtp_data_channel</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Enable creation of RTP data channels if the kEnableRtpDataChannels is</span>
+<span class="w">  </span><span class="c1">// set. It takes precendence over the disable_sctp_data_channels</span>
+<span class="w">  </span><span class="c1">// PeerConnectionFactoryInterface::Options.</span>
+<span class="w">  </span><span class="n">data_channel_controller_</span><span class="p">.</span><span class="n">set_data_channel_type</span><span class="p">(</span><span class="n">cricket</span><span class="o">::</span><span class="n">DCT_RTP</span><span class="p">);</span>
+<span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// DTLS has to be enabled to use SCTP.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">options</span><span class="p">.</span><span class="n">disable_sctp_data_channels</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">dtls_enabled_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">data_channel_controller_</span><span class="p">.</span><span class="n">set_data_channel_type</span><span class="p">(</span><span class="n">cricket</span><span class="o">::</span><span class="n">DCT_SCTP</span><span class="p">);</span>
+<span class="w">    </span><span class="n">config</span><span class="p">.</span><span class="n">sctp_factory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sctp_factory_</span><span class="p">.</span><span class="n">get</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>首先，<code>use_datagram_transport_for_data_channels_</code>参数是否为真，决定了是否使用DatagramTrasnport接口来收发DataChannel数据（该套接口是后引入的，早期版本应该只有rtp和sctp-dtls）。该参数是否为真一方面取决于应用层给PC传入的RTCConfiguration配置参数中同名字段取值，另一方面还需PeerConnectionFactory中提供MediaTransportFactory用于创建DatagramTrasnport。当二者都具备时，<code>use_datagram_transport_for_data_channels_</code>为真，此时，将创建基于DatagramTrasnport接口的底层收发包对象。如上代码所示，实质上只会创建<code>DCT_DATA_CHANNEL_TRANSPORT</code>或者<code>DCT_DATA_CHANNEL_TRANSPORT_SCTP</code>类别的DataChannel，分别是直接基于UDP的DatagramTrasnport接口和<code>基于SCTP的DatagramTrasnport接口。没有</code>DCT_MEDIA_TRANSPORT`这个类别的实现。</li>
+<li>其次，当决定不使用DatagramTrasnport接口的实现时，判断是否使用RTP实现，即<code>DCT_RTP</code>类别。取决于应用层给PC传入的RTCConfiguration配置参数是否开启<code>enable_rtp_data_channel</code>。</li>
+<li>最后，当既不使用DatagramTrasnport接口，又不使用RTP传输时，启用SCTP-DTLS实现。</li>
+</ul>
+<p><strong>总之：</strong><br>
+DataChannel最终的类别取决于PC的RTCConfiguration配置参数中的两个取值：<code>use_datagram_transport_for_data_channels_</code>和<code>enable_rtp_data_channel</code>；以及PC工厂类是否提供了MediaTransportFactory。</p>
+<p>由于使用DatagramTrasnport接口来收发DataChannel数据的方式是后引入的，是一个实验特性，需要特意设置<code>use_datagram_transport_for_data_channels_</code>以及提供MediaTransportFactory来开启；</p>
+<p>由于WebRTC中使用RTP来实现DataChannel是一个计划要淘汰的方式，因此，也需要外部设置<code>RTCConfiguration.enable_rtp_data_channel</code>来启用</p>
+<p>由于SCTP是实现DataChannel最正式的方式，因此，在外界不提供额外设置的情况下，默认使用该方式。</p>
+<h3>2.2 DataChannelController::InternalCreateDataChannel方法</h3>
+<div class="highlight"><pre><code><span></span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">DataChannel</span><span class="o">&gt;</span><span class="w"> </span><span class="n">DataChannelController</span><span class="o">::</span><span class="n">InternalCreateDataChannel</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&amp;</span><span class="w"> </span><span class="n">label</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">InternalDataChannelInit</span><span class="o">*</span><span class="w"> </span><span class="n">config</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 1.判断PC状态是否已经关闭了</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">IsClosed</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 2. 若data_channel_type_为DCT_NONE，表示禁用DataChannel</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">data_channel_type</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">cricket</span><span class="o">::</span><span class="n">DCT_NONE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_ERROR</span><span class="p">)</span>
+<span class="w">        </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;InternalCreateDataChannel: Data is not supported in this call.&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 3. 判断外部是否提供了InternalDataChannelInit，否则提供默认的</span>
+<span class="w">  </span><span class="n">InternalDataChannelInit</span><span class="w"> </span><span class="n">new_config</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">config</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">config</span><span class="p">)</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">InternalDataChannelInit</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// 4. 如果DataChannel是类sctp类型，我们需要对sid进行处理</span>
+<span class="w">  </span><span class="c1">//    类sctp已经在上文描述过</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">DataChannel</span><span class="o">::</span><span class="n">IsSctpLike</span><span class="p">(</span><span class="n">data_channel_type_</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 4.1 如果new_config.id &lt; 0，是无效的sid值，根据SSLRole是服务器还是客户端</span>
+<span class="w">    </span><span class="c1">// 分配有效的sid</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">new_config</span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">rtc</span><span class="o">::</span><span class="n">SSLRole</span><span class="w"> </span><span class="n">role</span><span class="p">;</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">GetSctpSslRole</span><span class="p">(</span><span class="o">&amp;</span><span class="n">role</span><span class="p">))</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">          </span><span class="o">!</span><span class="n">sid_allocator_</span><span class="p">.</span><span class="n">AllocateSid</span><span class="p">(</span><span class="n">role</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">new_config</span><span class="p">.</span><span class="n">id</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_ERROR</span><span class="p">)</span>
+<span class="w">            </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;No id can be allocated for the SCTP data channel.&quot;</span><span class="p">;</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">nullptr</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// 4.2 如果new_config.id &gt; 0，判断外部提供的new_config.id是否有效</span>
+<span class="w">    </span><span class="c1">//     也即new_config.id是否超界或者已经被使用</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">sid_allocator_</span><span class="p">.</span><span class="n">ReserveSid</span><span class="p">(</span><span class="n">new_config</span><span class="p">.</span><span class="n">id</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_ERROR</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Failed to create a SCTP data channel &quot;</span>
+<span class="w">                           </span><span class="s">&quot;because the id is already in use or out of range.&quot;</span><span class="p">;</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">nullptr</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 5. DataChannel::Create根据datachannel类别，标签，参数来创建DataChannel</span>
+<span class="w">  </span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">DataChannel</span><span class="o">&gt;</span><span class="w"> </span><span class="n">channel</span><span class="p">(</span>
+<span class="w">      </span><span class="n">DataChannel</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span><span class="n">this</span><span class="p">,</span><span class="w"> </span><span class="n">data_channel_type</span><span class="p">(),</span><span class="w"> </span><span class="n">label</span><span class="p">,</span><span class="w"> </span><span class="n">new_config</span><span class="p">));</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">channel</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">sid_allocator_</span><span class="p">.</span><span class="n">ReleaseSid</span><span class="p">(</span><span class="n">new_config</span><span class="p">.</span><span class="n">id</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 6. 存储创建的DataChannel</span>
+<span class="w">  </span><span class="c1">// 6.1 如果创建的是cricket::DCT_RTP类别的DataChannel，则放入成员rtp_data_channels_中</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">channel</span><span class="o">-&gt;</span><span class="n">data_channel_type</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">cricket</span><span class="o">::</span><span class="n">DCT_RTP</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">rtp_data_channels_</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">channel</span><span class="o">-&gt;</span><span class="n">label</span><span class="p">())</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">rtp_data_channels_</span><span class="p">.</span><span class="n">end</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_ERROR</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;DataChannel with label &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">channel</span><span class="o">-&gt;</span><span class="n">label</span><span class="p">()</span>
+<span class="w">                        </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot; already exists.&quot;</span><span class="p">;</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">nullptr</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">rtp_data_channels_</span><span class="p">[</span><span class="n">channel</span><span class="o">-&gt;</span><span class="n">label</span><span class="p">()]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">channel</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 6.2 如果创建的是类sctp的DataChannel，则放入成员sctp_data_channels_中</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">DataChannel</span><span class="o">::</span><span class="n">IsSctpLike</span><span class="p">(</span><span class="n">data_channel_type_</span><span class="p">));</span>
+<span class="w">    </span><span class="n">sctp_data_channels_</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">channel</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// 绑定通道的关闭信号和PC对应的槽，让PC知道SCTP通道的关闭事件</span>
+<span class="w">    </span><span class="n">channel</span><span class="o">-&gt;</span><span class="n">SignalClosed</span><span class="p">.</span><span class="n">connect</span><span class="p">(</span><span class="n">this</span><span class="p">,</span>
+<span class="w">                                  </span><span class="o">&amp;</span><span class="n">PeerConnection</span><span class="o">::</span><span class="n">OnSctpDataChannelClosed</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 7. 发送通道创建的信号，一方面PC封装了DataChannelController的SignalDataChannelCreated_</span>
+<span class="w">  </span><span class="c1">//    信号，PC肯定能获知该信号进行响应；另一方面RTCStatsCollector等对象通过关联PC封装的 </span>
+<span class="w">  </span><span class="c1">//    SignalDataChannelCreated信号也可以处理数据通道被创建的消息。</span>
+<span class="w">  </span><span class="n">SignalDataChannelCreated_</span><span class="p">(</span><span class="n">channel</span><span class="p">.</span><span class="n">get</span><span class="p">());</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">channel</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>该函数就不展开分析了，最终调用了DataChannel::Create()方法来创建DataChannel。后续来看下DataChannel::Create()方法的内容。</p>
+<h3>2.3 DataChannel::Create方法</h3>
+<p>分两步：构造DataChannel + 初始化DataChannel</p>
+<div class="highlight"><pre><code><span></span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">DataChannel</span><span class="o">&gt;</span><span class="w"> </span><span class="n">DataChannel</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span>
+<span class="w">    </span><span class="n">DataChannelProviderInterface</span><span class="o">*</span><span class="w"> </span><span class="n">provider</span><span class="p">,</span>
+<span class="w">    </span><span class="n">cricket</span><span class="o">::</span><span class="n">DataChannelType</span><span class="w"> </span><span class="n">dct</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&amp;</span><span class="w"> </span><span class="n">label</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">InternalDataChannelInit</span><span class="o">&amp;</span><span class="w"> </span><span class="n">config</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 1. 调用DataChannel的构造函数</span>
+<span class="w">  </span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">DataChannel</span><span class="o">&gt;</span><span class="w"> </span><span class="n">channel</span><span class="p">(</span>
+<span class="w">      </span><span class="n">new</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">RefCountedObject</span><span class="o">&lt;</span><span class="n">DataChannel</span><span class="o">&gt;</span><span class="p">(</span><span class="n">provider</span><span class="p">,</span><span class="w"> </span><span class="n">dct</span><span class="p">,</span><span class="w"> </span><span class="n">label</span><span class="p">));</span>
+<span class="w">  </span><span class="c1">// 2. 调用初始化方法    </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">channel</span><span class="o">-&gt;</span><span class="n">Init</span><span class="p">(</span><span class="n">config</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">channel</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<h4>2.3.1 DataChannel构造</h4>
+<p>初始化成员，各成员的用途</p>
+<div class="highlight"><pre><code><span></span><span class="n">DataChannel</span><span class="o">::</span><span class="n">DataChannel</span><span class="p">(</span><span class="n">DataChannelProviderInterface</span><span class="o">*</span><span class="w"> </span><span class="n">provider</span><span class="p">,</span>
+<span class="w">                          </span><span class="n">cricket</span><span class="o">::</span><span class="n">DataChannelType</span><span class="w"> </span><span class="n">dct</span><span class="p">,</span>
+<span class="w">                          </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&amp;</span><span class="w"> </span><span class="n">label</span><span class="p">)</span>
+<span class="w">    </span><span class="o">:</span><span class="w"> </span><span class="n">internal_id_</span><span class="p">(</span><span class="n">GenerateUniqueId</span><span class="p">()),</span><span class="w"> </span>
+<span class="w">      </span><span class="n">label_</span><span class="p">(</span><span class="n">label</span><span class="p">),</span>
+<span class="w">      </span><span class="n">observer_</span><span class="p">(</span><span class="n">nullptr</span><span class="p">),</span>
+<span class="w">      </span><span class="n">state_</span><span class="p">(</span><span class="n">kConnecting</span><span class="p">),</span>
+<span class="w">      </span><span class="n">messages_sent_</span><span class="p">(</span><span class="mi">0</span><span class="p">),</span>
+<span class="w">      </span><span class="n">bytes_sent_</span><span class="p">(</span><span class="mi">0</span><span class="p">),</span>
+<span class="w">      </span><span class="n">messages_received_</span><span class="p">(</span><span class="mi">0</span><span class="p">),</span>
+<span class="w">      </span><span class="n">bytes_received_</span><span class="p">(</span><span class="mi">0</span><span class="p">),</span>
+<span class="w">      </span><span class="n">buffered_amount_</span><span class="p">(</span><span class="mi">0</span><span class="p">),</span>
+<span class="w">      </span><span class="n">data_channel_type_</span><span class="p">(</span><span class="n">dct</span><span class="p">),</span>
+<span class="w">      </span><span class="n">provider_</span><span class="p">(</span><span class="n">provider</span><span class="p">),</span>
+<span class="w">      </span><span class="n">handshake_state_</span><span class="p">(</span><span class="n">kHandshakeInit</span><span class="p">),</span>
+<span class="w">      </span><span class="n">connected_to_provider_</span><span class="p">(</span><span class="nb">false</span><span class="p">),</span>
+<span class="w">      </span><span class="n">send_ssrc_set_</span><span class="p">(</span><span class="nb">false</span><span class="p">),</span>
+<span class="w">      </span><span class="n">receive_ssrc_set_</span><span class="p">(</span><span class="nb">false</span><span class="p">),</span>
+<span class="w">      </span><span class="n">writable_</span><span class="p">(</span><span class="nb">false</span><span class="p">),</span>
+<span class="w">      </span><span class="n">send_ssrc_</span><span class="p">(</span><span class="mi">0</span><span class="p">),</span>
+<span class="w">      </span><span class="n">receive_ssrc_</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{}</span>
+</code></pre></div>
+<ul>
+<li><code>internal_id_</code>：内部使用的自增id，从0开始，每创建一个DataChanel单调递增1；</li>
+<li><code>label_</code>：通道的标识，与Track的label一样；</li>
+<li><code>observer_</code>：通道的观察者，包含通道状态改变回调、通道获取数据回调、通道缓冲数据大小改变时回调；</li>
+<li><code>state_</code>：通道的状态，包含kConnecting（通道连接中状态，无法发送数据）、kOpen（通道已连接状态，可发送数据，<code>send_ssrc_</code>和<code>receive_ssrc_</code>均有值）、kClosing（通道关闭中状态，不允许继续发送数据，但已在buffer中的数据将被发送）、kClosed（通道已关闭状态）；</li>
+<li><code>messages_sent_ &amp;&amp; bytes_sent_</code>：发送消息个数和字节数；</li>
+<li><code>messages_received_ &amp;&amp; bytes_received_</code>：接收消息个数和字节数；</li>
+<li><code>buffered_amount_</code>: DataChanel层发送缓存中缓存的还未发送的数据的字节数，当Transport要发送数据前该值增加，当发送成功后该值相应的减小；</li>
+<li><code>data_channel_type_</code>：通道类型RTP？SCTP？还是基于DatagramTransport的那3钟</li>
+<li><code>provider_</code>：实际上就DataChannelController，它继承实现了DataChannelProviderInterface，提供了实际上的数据发送功能，将把DataChannel要发送的数据代理到DataChannelTransport去发哦是那个。相当重要；</li>
+<li><code>handshake_state_</code>：握手状态，需要进行带内协商时该状态起着作用；</li>
+<li><code>connected_to_provider_</code>：是否与provider相关上；</li>
+<li><code>send_ssrc_set_ &amp;&amp; receive_ssrc_set_</code>：<code>send_ssrc_ &amp;&amp; receive_ssrc_</code>是否已经设置， RTP协议类别的使用；</li>
+<li><code>writable_</code>：通道是否已经准备ok，可以发送数据；</li>
+<li><code>send_ssrc_ &amp;&amp; receive_ssrc_</code>：发送端ssrc和接收端ssrc，RTP协议类别的使用，SCTP协议类别使用SID，保存在成员<code>config_.sid</code>中，见后面的DataChannel::Init方法。</li>
+</ul>
+<h4>2.3.2 DataChannel初始化</h4>
+<div class="highlight"><pre><code><span></span><span class="kt">bool</span><span class="w"> </span><span class="nf">DataChannel::Init</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">InternalDataChannelInit</span><span class="o">&amp;</span><span class="w"> </span><span class="n">config</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 根据通道类别进行分类处理</span>
+<span class="w">  </span><span class="c1">// 1. RTP类别的通道</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">data_channel_type_</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">cricket</span><span class="o">::</span><span class="n">DCT_RTP</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 1.1 入参判断：</span>
+<span class="w">    </span><span class="c1">//     RTP通道不能提供可靠传输，因此，reliable不能为真；</span>
+<span class="w">    </span><span class="c1">//     RTP通道id必须为-1，因为sid是为sctp准备的，RTP通道不应该设置该值；</span>
+<span class="w">    </span><span class="c1">//     RTP通道不提供按重传次数或者最大重传时间这种部分可靠性，因此，maxRetransmits</span>
+<span class="w">    </span><span class="c1">//           maxRetransmitTime不可存在。</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">config</span><span class="p">.</span><span class="n">reliable</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">config</span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">-1</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">config</span><span class="p">.</span><span class="n">maxRetransmits</span><span class="w"> </span><span class="o">||</span>
+<span class="w">        </span><span class="n">config</span><span class="p">.</span><span class="n">maxRetransmitTime</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_ERROR</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Failed to initialize the RTP data channel due to &quot;</span>
+<span class="w">                           </span><span class="s">&quot;invalid DataChannelInit.&quot;</span><span class="p">;</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">//1.2 RTP通道不需要带内协商，因此，握手状态为kHandshakeReady即可</span>
+<span class="w">    </span><span class="n">handshake_state_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kHandshakeReady</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 2. 类sctp类别的通道</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">IsSctpLike</span><span class="p">(</span><span class="n">data_channel_type_</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 2.1 判断参数的有效性</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">config</span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">-1</span><span class="w"> </span><span class="o">||</span>
+<span class="w">        </span><span class="p">(</span><span class="n">config</span><span class="p">.</span><span class="n">maxRetransmits</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">*</span><span class="n">config</span><span class="p">.</span><span class="n">maxRetransmits</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="o">||</span>
+<span class="w">        </span><span class="p">(</span><span class="n">config</span><span class="p">.</span><span class="n">maxRetransmitTime</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">*</span><span class="n">config</span><span class="p">.</span><span class="n">maxRetransmitTime</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_ERROR</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Failed to initialize the SCTP data channel due to &quot;</span>
+<span class="w">                           </span><span class="s">&quot;invalid DataChannelInit.&quot;</span><span class="p">;</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// 2.2 按最大重传次数或最大重传时间来确定重传规则，二者不能同时存在</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">config</span><span class="p">.</span><span class="n">maxRetransmits</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">config</span><span class="p">.</span><span class="n">maxRetransmitTime</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_ERROR</span><span class="p">)</span>
+<span class="w">          </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;maxRetransmits and maxRetransmitTime should not be both set.&quot;</span><span class="p">;</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">config_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">config</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// 2.3 根据握手角色，确定本端握手初始状态</span>
+<span class="w">    </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">config_</span><span class="p">.</span><span class="n">open_handshake_role</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// 2.3.1 KNone表示不在此进行协商，进行带外协商，因此，状态置为已协商完成的</span>
+<span class="w">      </span><span class="c1">//       kHandshakeReady状态即可。</span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="no">webrtc</span><span class="o">::</span><span class="no">InternalDataChannelInit</span><span class="o">::</span><span class="no">kNone</span><span class="p">:</span><span class="w">  </span><span class="c1">// pre-negotiated</span>
+<span class="w">        </span><span class="n">handshake_state_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kHandshakeReady</span><span class="p">;</span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span>
+<span class="w">      </span><span class="c1">// 2.3.2 kOpener表示通道打开者，主动发送Open消息方，状态置为kHandshakeShouldSendOpen</span>
+<span class="w">      </span><span class="c1">//       表示需要但还未发送Open消息</span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="no">webrtc</span><span class="o">::</span><span class="no">InternalDataChannelInit</span><span class="o">::</span><span class="no">kOpener</span><span class="p">:</span>
+<span class="w">        </span><span class="n">handshake_state_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kHandshakeShouldSendOpen</span><span class="p">;</span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span>
+<span class="w">      </span><span class="c1">// 2.3.3 kAcker表示通道的被动打开方，因此状态设置为kHandshakeShouldSendAck</span>
+<span class="w">      </span><span class="c1">//       表示下一次要发送Ack，但还未发送的状态</span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="no">webrtc</span><span class="o">::</span><span class="no">InternalDataChannelInit</span><span class="o">::</span><span class="no">kAcker</span><span class="p">:</span>
+<span class="w">        </span><span class="n">handshake_state_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kHandshakeShouldSendAck</span><span class="p">;</span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 2.4 尝试关联provider提供的底层transport，以防transport已经创建好了，错过其发出的</span>
+<span class="w">    </span><span class="c1">//   ready信号</span>
+<span class="w">    </span><span class="c1">// Try to connect to the transport in case the transport channel already</span>
+<span class="w">    </span><span class="c1">// exists.</span>
+<span class="w">    </span><span class="n">OnTransportChannelCreated</span><span class="p">();</span>
+
+<span class="w">    </span><span class="c1">// 2.5 如果底层transport已经是可以发送数据的状态（因为初始化通道ok的信号可能先于</span>
+<span class="w">    </span><span class="c1">//    DataChannel创建被发送），以异步的方式来执行OnChannelReady(true)是因为</span>
+<span class="w">    </span><span class="c1">//    在当前方法返回前，上层的对象还没建立起连接.</span>
+<span class="w">    </span><span class="c1">// Checks if the transport is ready to send because the initial channel</span>
+<span class="w">    </span><span class="c1">// ready signal may have been sent before the DataChannel creation.</span>
+<span class="w">    </span><span class="c1">// This has to be done async because the upper layer objects (e.g.</span>
+<span class="w">    </span><span class="c1">// Chrome glue and WebKit) are not wired up properly until after this</span>
+<span class="w">    </span><span class="c1">// function returns.</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">provider_</span><span class="o">-&gt;</span><span class="n">ReadyToSendData</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">invoker_</span><span class="p">.</span><span class="n">AsyncInvoke</span><span class="o">&lt;</span><span class="kt">void</span><span class="o">&gt;</span><span class="p">(</span><span class="n">RTC_FROM_HERE</span><span class="p">,</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">Thread</span><span class="o">::</span><span class="n">Current</span><span class="p">(),</span>
+<span class="w">                                 </span><span class="p">[</span><span class="n">this</span><span class="p">]</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">OnChannelReady</span><span class="p">(</span><span class="nb">true</span><span class="p">);</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>之前我们提到RTP是会被淘汰的方式，SCTP是当前主流方式，因此，我们逮着SCTP来说明。DataChannel初始过程中，最重要的莫过于调用OnTransportChannelCreated()，使得provider将上层的DataChannel与底层的Transport对象给联系起来。我们来重点看下该方法。</p>
+<h4>2.3.3 DataChannel与底层Transport的关联</h4>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">DataChannel::OnTransportChannelCreated</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 1. 只有类SCTP才需要进行关联</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">IsSctpLike</span><span class="p">(</span><span class="n">data_channel_type_</span><span class="p">));</span>
+<span class="w">  </span><span class="c1">// 2. 进行关联</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">connected_to_provider_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">connected_to_provider_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">provider_</span><span class="o">-&gt;</span><span class="n">ConnectDataChannel</span><span class="p">(</span><span class="n">this</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// 3. 关联时，sid会被清掉，因此，再设置一次。</span>
+<span class="w">  </span><span class="c1">// The sid may have been unassigned when provider_-&gt;ConnectDataChannel was</span>
+<span class="w">  </span><span class="c1">// done. So always add the streams even if connected_to_provider_ is true.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">config_</span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">provider_</span><span class="o">-&gt;</span><span class="n">AddSctpDataStream</span><span class="p">(</span><span class="n">config_</span><span class="p">.</span><span class="n">id</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>进一步看下真正的关联实现：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">bool</span><span class="w"> </span><span class="nf">DataChannelController::ConnectDataChannel</span><span class="p">(</span>
+<span class="w">    </span><span class="n">DataChannel</span><span class="o">*</span><span class="w"> </span><span class="n">webrtc_data_channel</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 1. 必须运行在信令线程</span>
+<span class="w">  </span><span class="n">RTC_DCHECK_RUN_ON</span><span class="p">(</span><span class="n">signaling_thread</span><span class="p">());</span>
+
+<span class="w">  </span><span class="c1">// 2. 如果底层传输通道还不存在，则不需要绑定了</span>
+<span class="w">  </span><span class="c1">//    rtp_data_channel是RTP协议的底层Transport</span>
+<span class="w">  </span><span class="c1">//    data_channel_transport是sctp协议的底层transport</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">rtp_data_channel</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="n">data_channel_transport</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Don&#39;t log an error here, because DataChannels are expected to call</span>
+<span class="w">    </span><span class="c1">// ConnectDataChannel in this state. It&#39;s the only way to initially tell</span>
+<span class="w">    </span><span class="c1">// whether or not the underlying transport is ready.</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 3. 如果sctp协议的底层transport存在，则进行相关信号绑定。请注意：</span>
+<span class="w">  </span><span class="c1">//    信号的发射者是DataChannelController，而非transport本身；</span>
+<span class="w">  </span><span class="c1">//    信号的接收者是上层的DataChannel对象；</span>
+<span class="w">  </span><span class="c1">//    势必.....DataChannelController还得与底层transport进行</span>
+<span class="w">  </span><span class="c1">//    对应的关联...如何关联，往后看</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">data_channel_transport</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 3.1 底层Transport处于可写状态</span>
+<span class="w">    </span><span class="n">SignalDataChannelTransportWritable_s</span><span class="p">.</span><span class="n">connect</span><span class="p">(</span><span class="n">webrtc_data_channel</span><span class="p">,</span>
+<span class="w">                                                 </span><span class="o">&amp;</span><span class="n">DataChannel</span><span class="o">::</span><span class="n">OnChannelReady</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// 3.2 底层Transport收到data                                             </span>
+<span class="w">    </span><span class="n">SignalDataChannelTransportReceivedData_s</span><span class="p">.</span><span class="n">connect</span><span class="p">(</span>
+<span class="w">        </span><span class="n">webrtc_data_channel</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">DataChannel</span><span class="o">::</span><span class="n">OnDataReceived</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// 3.3 底层Transport处于关闭过程中</span>
+<span class="w">    </span><span class="n">SignalDataChannelTransportChannelClosing_s</span><span class="p">.</span><span class="n">connect</span><span class="p">(</span>
+<span class="w">        </span><span class="n">webrtc_data_channel</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">DataChannel</span><span class="o">::</span><span class="n">OnClosingProcedureStartedRemotely</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// 3.4 底层Transport处于已关闭状态</span>
+<span class="w">    </span><span class="n">SignalDataChannelTransportChannelClosed_s</span><span class="p">.</span><span class="n">connect</span><span class="p">(</span>
+<span class="w">        </span><span class="n">webrtc_data_channel</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">DataChannel</span><span class="o">::</span><span class="n">OnClosingProcedureComplete</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 4. 如果是rtp协议的底层传输通道存在，则也进行相关信号绑定，状态没有sctp那么多</span>
+<span class="w">  </span><span class="c1">//    并且与3应该是不会同时存在的，并且注意：</span>
+<span class="w">  </span><span class="c1">//    信号发送者是底层传输通道，不需要provider做二道贩子</span>
+<span class="w">  </span><span class="c1">//    信号接收者是上层DataChannel。</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">rtp_data_channel</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 4.1 底层通道已处于可发送状态</span>
+<span class="w">    </span><span class="n">rtp_data_channel</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">SignalReadyToSendData</span><span class="p">.</span><span class="n">connect</span><span class="p">(</span>
+<span class="w">        </span><span class="n">webrtc_data_channel</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">DataChannel</span><span class="o">::</span><span class="n">OnChannelReady</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// 4.2 底层通道有数据到达</span>
+<span class="w">    </span><span class="n">rtp_data_channel</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">SignalDataReceived</span><span class="p">.</span><span class="n">connect</span><span class="p">(</span>
+<span class="w">        </span><span class="n">webrtc_data_channel</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">DataChannel</span><span class="o">::</span><span class="n">OnDataReceived</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>代码分析到这儿，DataChannel创建过程也分析完了，可能还会有懵逼的地方。比如，对于SCTP协议的传输，如上代码所示，DataChannelController做了二道贩子，在底层的Transport与DataChannel之间拉起了皮条。那么DataChannelController是如何与Transport勾搭上的呢？还有几个问题：</p>
+<ul>
+<li>DataChannelController这个对象是什么时候创建的呢？</li>
+<li>SCTP底层传输对象DataChannelTransportInterface到底实体类是哪个？什么时候创建的？</li>
+<li>DataChannelController与DataChannelTransportInterface是如何建立关联，又是在何时建立的关联？</li>
+</ul>
+<p>由于本篇文章已经很长了，打算另起一篇文章来说明下DataChannel相关的这几个类，并回答上述几个问题。<a href="https://blog.csdn.net/ice_ly000/article/details/106129811">WebRTC源码分析——DataChannel及其相关类</a></p>
+<h2>3. 总结</h2>
+<p>回顾下上述所说内容，捡要点做下总结：</p>
+<ul>
+<li>DataChannel的底层传输实际上可以是SCTP传输，也可以是RTP传输。但是我们需要了解到RTP传输方式是将要被淘汰的方式。因此，以后分析只需要关注SCTP是如何做的即可。</li>
+<li>创建PC时，应用层传输的RTCConfiguration中的几个字段决定了我们创建DataChannel是采用何种底层传输，细节可以再看看上文。当然，默认情况是采用SCTP。</li>
+<li>创建DataChannel时传入的结构体DataChannelInit决定了底层传输数据的可靠级别：可靠、部分可靠、不可靠；也决定了协商方式：是进行带外协商，还是带内协商。</li>
+<li>当使用带内协商时，SCTP传输在协商阶段是有角色的，一方是主动打开方，一方是被动打开方。主动打开方在底层通道链接建立后，需要主动发送Open消息，被动打开方需要回复Ack。</li>
+<li>WebRTC中的SCTP并非是OSI模型中的传输层协议，而是应用层协议，并且使用STCP时，必须使用DLS。如下图所示：  </li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200912-192038-14.png" alt="在这里插入图片描述"></p>
+<ul>
+<li>DataChannel是WebRTC数据通道的顶层对象，底层根据选择的传输方式创建的底层传输对象是不一样的，比如支持SCTP协议的传输对象是实现了接口DataChannelTransportInterface的SctpDataChannelTransport对象；而支持RTP协议的传输对象层对象是RtpDataChannel对象。</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200912-192042-15.png" alt="在这里插入图片描述"></p>
+<ul>
+<li>DataChannel需要与底层传输对象SctpDataChannelTransport建立关联以便监控传输状态以及收发数据包。但二者中间隔了DataChannelController对象，DataChannelController起着桥梁作用。</li>
+</ul>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "WebRTC源码分析-呼叫建立过程2.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

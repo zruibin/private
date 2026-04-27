@@ -1,0 +1,1121 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>C++ folly库解读02 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="C++ folly库解读02,C/C++,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="C++ folly库解读（二） small_vector —— 小数据集下的std::vector替代方案<br/>C++ folly库解读（三）Synchronized —— 比标准库更易用、功能更强大的同步机制" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>C++ folly库解读02</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2023-12-25 22:00
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://mp.weixin.qq.com/s/kPwiBuUcn8Y8NGzdshwY1g' target='blank'>C++ folly库解读（二） small_vector —— 小数据集下的std::vector替代方案</a></p></h4>
+<h2>目录</h2>
+<ul>
+<li>使用场景</li>
+<li>为什么不是 std::array</li>
+<li>其他用法</li>
+<li>其他类似库</li>
+<li>small_vector</li>
+<li>small_vector_base</li>
+<li>InlineStorageType</li>
+<li>capacity<ul>
+<li>capacity 内联在对象中</li>
+<li>通过 malloc_usable_size 获取 capacity</li>
+<li>将 capacity 放到堆上</li>
+</ul>
+</li>
+<li>size()相关</li>
+<li>capacity()函数<ul>
+<li>数据内联在对象中</li>
+<li>为 capacity 分配了内存</li>
+<li>不为 capacity 分配空间</li>
+</ul>
+</li>
+<li>先迁移原有数据还是先放入新数据</li>
+<li>makeGuard</li>
+<li>clear 优化</li>
+<li><code>__attribute__((__pack__))/pragma(pack(push, x))</code></li>
+<li>boost::mpl 元编程库</li>
+<li>boost/operators<ul>
+<li>c++20 的&lt;=&gt; (three-way comparison)</li>
+</ul>
+</li>
+</ul>
+<h2>介绍</h2>
+<ul>
+<li>folly/small_vector.h[1]</li>
+<li>folly/small_vector.md[2]</li>
+</ul>
+<p>行为与 std::vector 类似，但是使用了 small buffer optimization（类似于 fbstring 中的 SSO[3]），将指定个数的数据内联在对象中，而不是像 std::vector 直接将对象分配在堆上，避免了 malloc/free 的开销。</p>
+<p><code>small_vector</code> 基本兼容 std::vector 的接口。</p>
+<div class="highlight"><pre><code><span></span><span class="n">small_vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="p">,</span><span class="mi">2</span><span class="o">&gt;</span><span class="w"> </span><span class="n">vec</span><span class="p">;</span><span class="w">  </span>
+<span class="n">vec</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span><span class="w">     </span><span class="c1">// Stored in-place on stack  </span>
+<span class="n">vec</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span><span class="w">     </span><span class="c1">// Still on the stack  </span>
+<span class="n">vec</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="mi">2</span><span class="p">);</span><span class="w">    </span><span class="c1">// Switches to heap buffer.</span>
+</code></pre></div>
+<p><code>small_vector&lt;int,2&gt; vec</code>指定可以内联在对象中 2 个数据：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2100-1.png" alt="图片"></p>
+<p>当超过 2 个后，后续添加的数据会被分配到堆上，之前的 2 个数据也会被一起 move 到堆上：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2100-2.png" alt="图片"></p>
+<h3>使用场景</h3>
+<p>根据官方文档的介绍[4]，small_vector 在下面 3 种场景中很有用：</p>
+<ul>
+<li>需要使用的 vector 的生命周期很短（比如在函数中使用），并且存放的数据占用空间较小，那么此时节省一次 malloc 是值得的。</li>
+<li>如果 vector 大小固定且需要频繁查询，那么在绝大多数情况下会减少一次 cpu cache miss，因为数据是内联在对象中的。</li>
+<li>如果需要创建上亿个 vector，而且不想在记录 capacity 上浪费对象空间（一般的 vector 对象内会有三个字段：<code>pointer _Myfirst</code>、<code>pointer _Mylast</code>、<code>pointer _Myend</code>）。<code>small_vector</code> 允许让 malloc 来追踪<code>allocation capacity</code>（这会显著的降低 <code>insertion/reallocation</code> 效率，如果对这两个操作的效率比较在意，你应该使用<code>FBVector[5]</code>，FBVector 在官方描述中可以完全代替 <code>std::vector</code>）</li>
+</ul>
+<p>比如在io/async/AsyncSocket.h[6]中，根据条件的不同使用 <code>small_vector</code> 或者 <code>std::vector</code>：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// Lifecycle observers.  </span>
+<span class="w">  </span><span class="c1">//  </span>
+<span class="w">  </span><span class="c1">// Use small_vector to avoid heap allocation for up to two observers, unless  </span>
+<span class="w">  </span><span class="c1">// mobile, in which case we fallback to std::vector to prioritize code size.  </span>
+<span class="k">using</span><span class="w"> </span><span class="n">LifecycleObserverVecImpl</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">conditional_t</span><span class="o">&lt;</span><span class="w">  </span>
+<span class="w">      </span><span class="o">!</span><span class="n">kIsMobile</span><span class="p">,</span><span class="w">  </span>
+<span class="w">      </span><span class="n">folly</span><span class="o">::</span><span class="n">small_vector</span><span class="o">&lt;</span><span class="n">AsyncTransport</span><span class="o">::</span><span class="n">LifecycleObserver</span><span class="o">*</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="o">&gt;</span><span class="p">,</span><span class="w">  </span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">AsyncTransport</span><span class="o">::</span><span class="n">LifecycleObserver</span><span class="o">*&gt;&gt;</span><span class="p">;</span><span class="w">  </span>
+
+<span class="n">LifecycleObserverVecImpl</span><span class="w"> </span><span class="n">lifecycleObservers_</span><span class="p">;</span><span class="w">  </span>
+
+<span class="c1">// push_back  </span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">AsyncSocket::addLifecycleObserver</span><span class="p">(</span><span class="w">  </span>
+<span class="w">    </span><span class="n">AsyncTransport</span><span class="o">::</span><span class="n">LifecycleObserver</span><span class="o">*</span><span class="w"> </span><span class="n">observer</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">lifecycleObservers_</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">observer</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="c1">// for loop  </span>
+<span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">cb</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">lifecycleObservers_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">cb</span><span class="o">-&gt;</span><span class="n">connect</span><span class="p">(</span><span class="k">this</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="c1">// iterator / erase  </span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="w"> </span><span class="n">eraseIt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">remove</span><span class="p">(</span><span class="w">  </span>
+<span class="w">      </span><span class="n">lifecycleObservers_</span><span class="p">.</span><span class="n">begin</span><span class="p">(),</span><span class="w"> </span><span class="n">lifecycleObservers_</span><span class="p">.</span><span class="n">end</span><span class="p">(),</span><span class="w"> </span><span class="n">observer</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">eraseIt</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">lifecycleObservers_</span><span class="p">.</span><span class="n">end</span><span class="p">())</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>为什么不是 std::array</h3>
+<p>下面两种情况，<code>small_vector</code> 比 std::array 更合适：</p>
+<ul>
+<li>需要空间后续动态增长，不仅仅是编译期的固定 size。</li>
+<li>像上面的例子，根据不同条件使用 <code>std::vector/small_vector</code>，且使用的 API 接口是统一的。</li>
+</ul>
+<h3>其他用法</h3>
+<ul>
+<li><code>NoHeap</code> : 当 vector 中数据个数超过指定个数时，不会再使用堆。<strong>如果个数超过指定个数，会抛出<code>std::length_error</code>异常。</strong></li>
+<li><code>&lt;Any integral type&gt;</code> : 指定 <code>small_vector</code> 中 size 和 capacity 的数据类型。</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="c1">// With space for 32 in situ unique pointers, and only using a 4-byte size_type.  </span>
+<span class="n">small_vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="mi">32</span><span class="p">,</span><span class="w"> </span><span class="kt">uint32_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">v</span><span class="p">;</span><span class="w">  </span>
+
+<span class="c1">// A inline vector of up to 256 ints which will not use the heap.  </span>
+<span class="n">small_vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="p">,</span><span class="w"> </span><span class="mi">256</span><span class="p">,</span><span class="w"> </span><span class="n">NoHeap</span><span class="o">&gt;</span><span class="w"> </span><span class="n">v</span><span class="p">;</span><span class="w">  </span>
+
+<span class="c1">// Same as the above, but making the size_type smaller too.  </span>
+<span class="n">small_vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="p">,</span><span class="w"> </span><span class="mi">256</span><span class="p">,</span><span class="w"> </span><span class="n">NoHeap</span><span class="p">,</span><span class="w"> </span><span class="kt">uint16_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">v</span><span class="p">;</span>
+</code></pre></div>
+<p><strong>其中，依赖 boost::mpl 元编程库，可以让后两个模板变量任意排序。</strong></p>
+<h3>其他类似库</h3>
+<ul>
+<li>SmallVec from LLVM[7]</li>
+<li>boost::container::small_vector[8]</li>
+<li>fixed_vector from EASTL[9]</li>
+</ul>
+<h2>Benchmark</h2>
+<p>没有找到官方的 benchmark，自己简单的写了一个，不测试数据溢出到堆上的情况。</p>
+<p>插入 4 个 int，std::vector 使用 reserve(4)预留空间。</p>
+<div class="highlight"><pre><code><span></span><span class="n">BENCHMARK</span><span class="p">(</span><span class="n">stdVector</span><span class="p">,</span><span class="w"> </span><span class="n">n</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">FOR_EACH_RANGE</span><span class="p">(</span><span class="n">i</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">n</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">vec</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">vec</span><span class="p">.</span><span class="n">reserve</span><span class="p">(</span><span class="mi">4</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="n">vec</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="n">doNotOptimizeAway</span><span class="p">(</span><span class="n">vec</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="n">BENCHMARK_DRAW_LINE</span><span class="p">();</span><span class="w">  </span>
+
+<span class="n">BENCHMARK_RELATIVE</span><span class="p">(</span><span class="n">smallVector</span><span class="p">,</span><span class="w"> </span><span class="n">n</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">FOR_EACH_RANGE</span><span class="p">(</span><span class="n">i</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">n</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">small_vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="p">,</span><span class="w"> </span><span class="mi">4</span><span class="o">&gt;</span><span class="w"> </span><span class="n">vec</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="n">vec</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="n">doNotOptimizeAway</span><span class="p">(</span><span class="n">vec</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>结果是：small_vector 比 std::vector 快了 40%：</p>
+<div class="highlight"><pre><code><span></span><span class="o">============================================================================</span><span class="w">  </span>
+<span class="n">delve_folly</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">cc</span><span class="w">                        </span><span class="n">relative</span><span class="w">  </span><span class="n">time</span><span class="o">/</span><span class="n">iter</span><span class="w">  </span><span class="n">iters</span><span class="o">/</span><span class="n">s</span><span class="w">  </span>
+<span class="o">============================================================================</span><span class="w">  </span>
+<span class="n">stdVector</span><span class="w">                                                  </span><span class="mf">440.79</span><span class="n">ns</span><span class="w">    </span><span class="mf">2.27</span><span class="n">M</span><span class="w">  </span>
+<span class="o">----------------------------------------------------------------------------</span><span class="w">  </span>
+<span class="n">smallVector</span><span class="w">                                      </span><span class="mf">140.48</span><span class="o">%</span><span class="w">   </span><span class="mf">313.77</span><span class="n">ns</span><span class="w">    </span><span class="mf">3.19</span><span class="n">M</span><span class="w">  </span>
+<span class="o">============================================================================</span>
+</code></pre></div>
+<p>如果把 stdVector 中的<code>vec.reserve(4);</code>去掉，那么 <code>small_vector</code> 速度比 std::vector 快了 3 倍。在我的环境上，std::vector 的扩容因子为 2，如果不加 reserve，那么 std::vector 会有 2 次扩容的过程（貌似很多人不习惯加 reserve，是有什么特别的原因吗 : ）)：</p>
+<div class="highlight"><pre><code><span></span><span class="o">============================================================================</span><span class="w">  </span>
+<span class="n">delve_folly</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">cc</span><span class="w">                        </span><span class="n">relative</span><span class="w">  </span><span class="n">time</span><span class="o">/</span><span class="n">iter</span><span class="w">  </span><span class="n">iters</span><span class="o">/</span><span class="n">s</span><span class="w">  </span>
+<span class="o">============================================================================</span><span class="w">  </span>
+<span class="n">stdVector</span><span class="w">                                                    </span><span class="mf">1.26</span><span class="n">us</span><span class="w">  </span><span class="mf">795.06</span><span class="n">K</span><span class="w">  </span>
+<span class="o">----------------------------------------------------------------------------</span><span class="w">  </span>
+<span class="n">smallVector</span><span class="w">                                      </span><span class="mf">417.25</span><span class="o">%</span><span class="w">   </span><span class="mf">301.44</span><span class="n">ns</span><span class="w">    </span><span class="mf">3.32</span><span class="n">M</span><span class="w">  </span>
+<span class="o">============================================================================</span>
+</code></pre></div>
+<h2>代码关注点</h2>
+<p><code>small_vector</code> 代码比较少，大概 1300 多行。主要关注以下几个方面：</p>
+<ul>
+<li>主要类。</li>
+<li>数据存储结构，capacity 的存储会复杂一些。</li>
+<li>扩容过程，包括数据从对象中迁移到堆上。</li>
+<li>常用的函数，例如 push_back、reserve、resize。</li>
+<li>使用 makeGuard 代替了原版的 try-catch。</li>
+<li>通过 boost::mpl 支持模板参数任意排序。</li>
+<li>通过 boost-operators 简化 operator 以及 C++20 的&lt;=&gt;。</li>
+</ul>
+<h2>主要类</h2>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2100-3.png" alt="图片"></p>
+<ul>
+<li><code>small_vector</code> : 包含的核心字段为<code>union Data</code>、<code>struct HeapPtr</code>、<code>struct HeapPtrWithCapacity</code>，这三个字段负责数据的存储。此外 <code>small_vector</code> 对外暴露 API 接口，例如 <code>push_back</code>、<code>reserve</code>、<code>resize</code> 等。</li>
+<li><code>small_vector_base</code> : <strong>没有对外提供任何函数接口，类内做的就是配合 boost::mpl 元编程库在编译期解析模板参数</strong>，同时生成 <code>boost::totally_ordered1</code> 供 <code>small_vector</code> 继承，精简 <code>operator</code> 代码。</li>
+<li><code>IntegralSizePolicyBase</code>：负责 <code>size/extern/heapifiedCapacity</code> 相关的操作。</li>
+<li><code>IntegralSizePolicy</code> : 负责内联数据溢出到堆的过程。</li>
+</ul>
+<h3>small_vector</h3>
+<p>声明：</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">class</span><span class="w"> </span><span class="nc">Value</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="w"> </span><span class="n">RequestedMaxInline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="k">class</span><span class="w"> </span><span class="nc">PolicyA</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">void</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="k">class</span><span class="w"> </span><span class="nc">PolicyB</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">void</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="k">class</span><span class="w"> </span><span class="nc">PolicyC</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">void</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="k">class</span><span class="w"> </span><span class="nc">small_vector</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">detail</span><span class="o">::</span><span class="n">small_vector_base</span><span class="o">&lt;</span><span class="w">  </span>
+<span class="w">                          </span><span class="n">Value</span><span class="p">,</span><span class="w">  </span>
+<span class="w">                          </span><span class="n">RequestedMaxInline</span><span class="p">,</span><span class="w">  </span>
+<span class="w">                          </span><span class="n">PolicyA</span><span class="p">,</span><span class="w">  </span>
+<span class="w">                          </span><span class="n">PolicyB</span><span class="p">,</span><span class="w">  </span>
+<span class="w">                          </span><span class="n">PolicyC</span><span class="o">&gt;::</span><span class="n">type</span>
+</code></pre></div>
+<p>声明中有三个策略模板参数是因为在一次提交中删除了一个无用的策略，<code>OneBitMutex：Delete small_vector's OneBitMutex policy[10]</code>。</p>
+<h3>small_vector_base</h3>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">class</span><span class="w"> </span><span class="nc">Value</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="w"> </span><span class="n">RequestedMaxInline</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="k">class</span><span class="w"> </span><span class="nc">InPolicyA</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="k">class</span><span class="w"> </span><span class="nc">InPolicyB</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="k">class</span><span class="w"> </span><span class="nc">InPolicyC</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">small_vector_base</span><span class="p">;</span>
+</code></pre></div>
+<p>boost::mpl 放到最后说吧 ：）</p>
+<h2>数据结构</h2>
+<p><code>small_vector</code> 花了一些心思在 capacity 的设计上，尽可能减小对象内存，降低内联数据带来的影响。</p>
+<p><code>union Data</code>负责存储数据：</p>
+<div class="highlight"><pre><code><span></span><span class="k">union</span><span class="w"> </span><span class="nc">Data</span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">PointerType</span><span class="w"> </span><span class="n">pdata_</span><span class="p">;</span><span class="w">          </span><span class="c1">// 溢出到堆后的数据  </span>
+<span class="w">    </span><span class="n">InlineStorageType</span><span class="w"> </span><span class="n">storage_</span><span class="p">;</span><span class="w">  </span><span class="c1">// 内联数据  </span>
+<span class="p">}</span><span class="n">u</span><span class="p">;</span>
+</code></pre></div>
+<h3>InlineStorageType</h3>
+<p>使用<code>std::aligned_storage[11]</code>进行初始化，占用空间是<code>sizeof(value_type) *MaxInline</code>，对齐要求为<code>alignof(value_type)</code>[12]：</p>
+<div class="highlight"><pre><code><span></span><span class="k">typedef</span><span class="w"> </span><span class="n">typename</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">aligned_storage</span><span class="o">&lt;</span><span class="k">sizeof</span><span class="p">(</span><span class="n">value_type</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">MaxInline</span><span class="p">,</span><span class="w"> </span><span class="k">alignof</span><span class="p">(</span><span class="n">value_type</span><span class="p">)</span><span class="o">&gt;::</span><span class="n">type</span><span class="w"> </span><span class="n">InlineStorageType</span><span class="p">;</span>
+</code></pre></div>
+<h3>capacity</h3>
+<p>与 std::vector 用结构体字段表示 capacity 不同，<code>small_vector</code> 的 capacity 存放分为三种情况。</p>
+<h4>capacity 内联在对象中</h4>
+<p>这是最简单的一种情况：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2100-4.png" alt="图片"></p>
+<p>条件为<code>sizeof(HeapPtrWithCapacity) &lt; sizeof(InlineStorageType)</code>
+（这里我不明白为什么等于的情况不算在内）：</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="k">constexpr</span><span class="w"> </span><span class="n">kHasInlineCapacity</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">HeapPtrWithCapacity</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">InlineStorageType</span><span class="p">);</span><span class="w">  </span>
+
+<span class="k">typedef</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">std</span><span class="o">::</span><span class="n">conditional</span><span class="o">&lt;</span><span class="n">kHasInlineCapacity</span><span class="p">,</span><span class="w"> </span><span class="n">HeapPtrWithCapacity</span><span class="p">,</span><span class="w"> </span><span class="n">HeapPtr</span><span class="o">&gt;::</span><span class="n">type</span><span class="w"> </span><span class="n">PointerType</span><span class="p">;</span><span class="w">  </span>
+
+<span class="k">struct</span><span class="w"> </span><span class="nc">HeapPtrWithCapacity</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">value_type</span><span class="o">*</span><span class="w"> </span><span class="n">heap_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">InternalSizeType</span><span class="w"> </span><span class="n">capacity_</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span><span class="w"> </span>
+
+<span class="k">union</span><span class="w"> </span><span class="nc">Data</span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">PointerType</span><span class="w"> </span><span class="n">pdata_</span><span class="p">;</span><span class="w">           </span><span class="c1">// 溢出到堆后的数据  </span>
+<span class="w">    </span><span class="n">InlineStorageType</span><span class="w"> </span><span class="n">storage_</span><span class="p">;</span><span class="w">   </span><span class="c1">// 内联数据  </span>
+<span class="p">}</span><span class="n">u</span><span class="p">;</span>
+</code></pre></div>
+<h4>通过 malloc_usable_size 获取 capacity</h4>
+<p>假如上述<code>kHasInlineCapacity == false</code>，即<code>sizeof(InlineStorageType) &lt;= sizeof(HeapPtrWithCapacity)</code>时，考虑到节省对象空间，capacity 不会内联在对象中，此时 PointerType 的类型为 HeapPtr，内部只保留一个指针：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">HeapPtr</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">value_type</span><span class="o">*</span><span class="w"> </span><span class="n">heap_</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span><span class="w"> </span><span class="p">;</span><span class="w">  </span>
+
+<span class="k">union</span><span class="w"> </span><span class="nc">Data</span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">PointerType</span><span class="w"> </span><span class="n">pdata_</span><span class="p">;</span><span class="w">           </span><span class="c1">// 溢出到堆后的数据  </span>
+<span class="w">    </span><span class="n">InlineStorageType</span><span class="w"> </span><span class="n">storage_</span><span class="p">;</span><span class="w">   </span><span class="c1">// 内联数据  </span>
+<span class="p">}</span><span class="n">u</span><span class="p">;</span>
+</code></pre></div>
+<p>那么此时 capacity 存放在哪里了呢？这里又分了两种情况，第一种就是这里要说明的：直接通过<code>malloc_usable_size</code>[13]获取从堆上分配的内存区域的可用数据大小，这个结果就被当做 <code>small_vector</code> 当前的 capacity：</p>
+<div class="highlight"><pre><code><span></span><span class="n">malloc_usable_size</span><span class="p">(</span><span class="n">heap_</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">value_type</span><span class="p">);</span><span class="w">    </span><span class="c1">// heap_指向堆上的数据</span>
+</code></pre></div>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2100-5.png" alt="图片"></p>
+<p>但是有一个问题，由于内存分配存在 alignment 和 minimum size constraints 的情况，<code>malloc_usable_size</code> 返回的大小可能会大于申请时指定的大小，但是 folly 会利用这部分多余的空间来存放数据（如果能放的下）。</p>
+<p><strong>比如在不使用 jemalloc 的情况下</strong>，在扩容的函数内，将向系统申请的字节数、<code>malloc_usable_size</code> 返回的可用空间、<code>small_vector</code> 的 capacity 打印出来：</p>
+<div class="highlight"><pre><code><span></span><span class="n">folly</span><span class="o">::</span><span class="n">small_vector</span><span class="o">&lt;</span><span class="kt">uint32_t</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="o">&gt;</span><span class="w"> </span><span class="n">vec</span><span class="p">;</span><span class="w">     </span><span class="c1">// uint32_t =&gt; four bytes  </span>
+<span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">200</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">vec</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">vec</span><span class="p">.</span><span class="n">capacity</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="c1">// 代码进行了简化  </span>
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">EmplaceFunc</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="n">makeSizeInternal</span><span class="p">(</span><span class="n">size_type</span><span class="w"> </span><span class="n">newSize</span><span class="p">,</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">insert</span><span class="p">,</span><span class="w"> </span><span class="n">EmplaceFunc</span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">emplaceFunc</span><span class="p">,</span><span class="w"> </span><span class="n">size_type</span><span class="w"> </span><span class="n">pos</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="w"> </span><span class="n">needBytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">newSize</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">value_type</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">goodAllocationSizeBytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">goodMallocSize</span><span class="p">(</span><span class="n">needBytes</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">newCapacity</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">goodAllocationSizeBytes</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">value_type</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">sizeBytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">newCapacity</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">value_type</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">newh</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">checkedMalloc</span><span class="p">(</span><span class="n">sizeBytes</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;sizeBytes:&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">sizeBytes</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot; malloc_usable_size:&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">malloc_usable_size</span><span class="p">(</span><span class="n">newh</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot; &quot;</span><span class="w">  </span>
+<span class="w">              </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">kMustTrackHeapifiedCapacity</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// move元素等操作，略过....  </span>
+<span class="p">}</span>
+
+<span class="c1">// output :  </span>
+<span class="mi">2</span><span class="w">  </span>
+<span class="mi">2</span><span class="w">  </span>
+<span class="nl">sizeBytes</span><span class="p">:</span><span class="mi">16</span><span class="w"> </span><span class="n">malloc_usable_size</span><span class="o">:</span><span class="mi">24</span><span class="w"> </span><span class="mi">0</span><span class="w">  </span>
+<span class="mi">6</span><span class="w">  </span>
+<span class="mi">6</span><span class="w">  </span>
+<span class="mi">6</span><span class="w">  </span>
+<span class="mi">6</span><span class="w">  </span>
+<span class="nl">sizeBytes</span><span class="p">:</span><span class="mi">40</span><span class="w"> </span><span class="n">malloc_usable_size</span><span class="o">:</span><span class="mi">40</span><span class="w"> </span><span class="mi">0</span><span class="w">  </span>
+<span class="mi">10</span><span class="w">  </span>
+<span class="mi">10</span><span class="w">  </span>
+<span class="mi">10</span><span class="w">  </span>
+<span class="mi">10</span><span class="w">  </span>
+<span class="nl">sizeBytes</span><span class="p">:</span><span class="mi">64</span><span class="w"> </span><span class="n">malloc_usable_size</span><span class="o">:</span><span class="mi">72</span><span class="w"> </span><span class="mi">0</span><span class="w">  </span>
+<span class="mi">18</span><span class="w">  </span>
+<span class="mi">18</span><span class="w">  </span>
+<span class="mi">18</span><span class="w">  </span>
+<span class="mi">18</span><span class="w">  </span>
+<span class="mi">18</span><span class="w">  </span>
+<span class="mi">18</span><span class="w">  </span>
+<span class="mi">18</span><span class="w">  </span>
+<span class="mi">18</span><span class="w">  </span>
+<span class="p">......</span><span class="w">  </span>
+<span class="p">......</span>
+</code></pre></div>
+<p><strong>可以看出，扩容时即使向系统申请 16 字节的空间，<code>malloc_usable_size</code> 返回的是 24 字节，而 <code>small_vector</code> 此时的 capacity 也是 24，即会利用多余的 8 个字节额外写入 2 个数据。</strong></p>
+<p><strong>如果使用了 jemalloc </strong>,那么会根据size classes[14]分配空间。</p>
+<p>这种方式也是有使用条件的，即<code>needbytes &gt;= kHeapifyCapacityThreshold</code>, <code>kHeapifyCapacityThreshold</code> 的定义为：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// This value should we multiple of word size.  </span>
+<span class="k">static</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="k">constexpr</span><span class="w"> </span><span class="n">kHeapifyCapacitySize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="k">typename</span><span class="w"> </span><span class="nc">std</span><span class="o">::</span><span class="n">aligned_storage</span><span class="o">&lt;</span><span class="k">sizeof</span><span class="p">(</span><span class="n">InternalSizeType</span><span class="p">),</span><span class="w"> </span><span class="k">alignof</span><span class="p">(</span><span class="n">value_type</span><span class="p">)</span><span class="o">&gt;::</span><span class="n">type</span><span class="p">);</span><span class="w">  </span>
+
+<span class="c1">// Threshold to control capacity heapifying.  </span>
+<span class="k">static</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="k">constexpr</span><span class="w"> </span><span class="n">kHeapifyCapacityThreshold</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">kHeapifyCapacitySize</span><span class="p">;</span>
+</code></pre></div>
+<p>我没想明白这个 100 是怎么定下来的 :(</p>
+<h4>将 capacity 放到堆上</h4>
+<p>当需要申请的内存<code>needbytes &gt;= kHeapifyCapacityThreshold</code>时，就会直接将 capacity 放到堆上进行管理：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2100-6.png" alt="图片"></p>
+<p>此时需要多申请 sizeof(InternalSizeType)字节来存放 capacity，并且需要对内存分配接口返回的指针加上 sizeof(InternalSizeType)从而指向真正的数据:</p>
+<div class="highlight"><pre><code><span></span><span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="nf">shiftPointer</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">sizeBytes</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">char</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">p</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">sizeBytes</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span><span class="w"> </span>
+
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">EmplaceFunc</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="kt">void</span><span class="w"> </span><span class="n">makeSizeInternal</span><span class="p">(</span><span class="n">size_type</span><span class="w"> </span><span class="n">newSize</span><span class="p">,</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">insert</span><span class="p">,</span><span class="w"> </span><span class="n">EmplaceFunc</span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">emplaceFunc</span><span class="p">,</span><span class="w"> </span><span class="n">size_type</span><span class="w"> </span><span class="n">pos</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="p">....</span><span class="w">  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">heapifyCapacity</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">!</span><span class="n">kHasInlineCapacity</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">needBytes</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">kHeapifyCapacityThreshold</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 申请内存  </span>
+<span class="w">    </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">newh</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">checkedMalloc</span><span class="p">(</span><span class="n">sizeBytes</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="n">value_type</span><span class="o">*</span><span class="w"> </span><span class="n">newp</span><span class="w"> </span><span class="o">=</span><span class="w">  </span>
+<span class="w">        </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">value_type</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">heapifyCapacity</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">detail</span><span class="o">::</span><span class="n">shiftPointer</span><span class="p">(</span><span class="n">newh</span><span class="p">,</span><span class="w"> </span><span class="n">kHeapifyCapacitySize</span><span class="p">)</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">newh</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// move元素等操作，略过....  </span>
+<span class="w">    </span><span class="n">u</span><span class="p">.</span><span class="n">pdata_</span><span class="p">.</span><span class="n">heap_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">newp</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// ....  </span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>size()相关</h3>
+<p>那么如何区分数据是内联在对象中还是溢出到堆上，如何区分上面三种 capacity 存储策略呢？</p>
+<p>采取的做法是向 size 借用两位来区分：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2100-7.png" alt="图片"></p>
+<ul>
+<li>kExternMask : 数据是否溢出到堆上，相关函数为 isExtern/setExtern.</li>
+<li>kCapacityMask : capacity 是否在堆上额外分配了内存来管理。相关函数为 isHeapifiedCapacity/setHeapifiedCapacity.</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">SizeType</span><span class="p">,</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">ShouldUseHeap</span><span class="o">&gt;</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">IntegralSizePolicyBase</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">IntegralSizePolicyBase</span><span class="p">()</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">size_</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{}</span>
+<span class="w"> </span><span class="k">protected</span><span class="o">:</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="k">constexpr</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="w"> </span><span class="n">policyMaxSize</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">SizeType</span><span class="p">(</span><span class="o">~</span><span class="n">kClearMask</span><span class="p">);</span><span class="w"> </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="w"> </span><span class="n">doSize</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">size_</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="o">~</span><span class="n">kClearMask</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="w"> </span><span class="n">isExtern</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">kExternMask</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">size_</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="n">setExtern</span><span class="p">(</span><span class="kt">bool</span><span class="w"> </span><span class="n">b</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">b</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">size_</span><span class="w"> </span><span class="o">|=</span><span class="w"> </span><span class="n">kExternMask</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">size_</span><span class="w"> </span><span class="o">&amp;=</span><span class="w"> </span><span class="o">~</span><span class="n">kExternMask</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="w"> </span><span class="n">isHeapifiedCapacity</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">kCapacityMask</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">size_</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="n">setHeapifiedCapacity</span><span class="p">(</span><span class="kt">bool</span><span class="w"> </span><span class="n">b</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">b</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">size_</span><span class="w"> </span><span class="o">|=</span><span class="w"> </span><span class="n">kCapacityMask</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">size_</span><span class="w"> </span><span class="o">&amp;=</span><span class="w"> </span><span class="o">~</span><span class="n">kCapacityMask</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="n">setSize</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="w"> </span><span class="n">sz</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">assert</span><span class="p">(</span><span class="n">sz</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">policyMaxSize</span><span class="p">());</span>
+<span class="w">    </span><span class="n">size_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">kClearMask</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">size_</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">SizeType</span><span class="p">(</span><span class="n">sz</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w"> </span><span class="k">private</span><span class="o">:</span>
+<span class="w">  </span><span class="c1">// We reserve two most significant bits of size_.</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="n">SizeType</span><span class="w"> </span><span class="k">constexpr</span><span class="w"> </span><span class="n">kExternMask</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">kShouldUseHeap</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">SizeType</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="n">SizeType</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="n">SizeType</span><span class="w"> </span><span class="k">constexpr</span><span class="w"> </span><span class="n">kCapacityMask</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">kShouldUseHeap</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">SizeType</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="n">SizeType</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+
+<span class="w">  </span><span class="n">SizeType</span><span class="w"> </span><span class="n">size_</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>都是很简单的位运算。只需要注意下 policyMaxSize 函数，因为向 size 借了 2 位，所以最大的 size 不是 SizeType 类型的最大值，需要有额外的判断。</p>
+<h3>capacity()函数</h3>
+<p>因为 capacity 有三种存储方式，所以需要根据各自情况去获取：</p>
+<div class="highlight"><pre><code><span></span><span class="n">size_type</span><span class="w"> </span><span class="nf">capacity</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="o">-&gt;</span><span class="n">isExtern</span><span class="p">())</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">hasCapacity</span><span class="p">())</span><span class="w"> </span><span class="p">{</span><span class="w">       </span><span class="c1">// 为capacity分配内存的情况  </span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">u</span><span class="p">.</span><span class="n">getCapacity</span><span class="p">();</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">AllocationSize</span><span class="p">{}(</span><span class="n">u</span><span class="p">.</span><span class="n">pdata_</span><span class="p">.</span><span class="n">heap_</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">value_type</span><span class="p">);</span><span class="w">   </span><span class="c1">// 不为capacity分配空间的情况  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">MaxInline</span><span class="p">;</span><span class="w">    </span><span class="c1">// 数据内联的情况  </span>
+<span class="p">}</span>
+</code></pre></div>
+<h4>数据内联在对象中</h4>
+<p>这是最简单的情况，根据上面说过的 isExtern()判断数据是否内联，是的话直接返回 MaxInline。</p>
+<p>这里的 MaxInline 还不是上游传过来的 RequestedMaxInline。因为不管是什么 capacity 存储策略，union Data 必然会有一个有指针，最小也是<code>sizeof(void*)</code>，假如用户传的是 <code>small_vector&lt;uint8_t, 1&gt;</code>，会替用户修改 MaxInine = 8，最大限度利用对象空间:</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/*  </span>
+<span class="cm">  * Figure out the max number of elements we should inline.  (If  </span>
+<span class="cm">  * the user asks for less inlined elements than we can fit unioned  </span>
+<span class="cm">  * into our value_type*, we will inline more than they asked.)  </span>
+<span class="cm">  */</span><span class="w">  </span>
+<span class="k">static</span><span class="w"> </span><span class="k">constexpr</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="w"> </span><span class="n">MaxInline</span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">constexpr_max</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="n">Value</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">Value</span><span class="p">),</span><span class="w"> </span><span class="n">RequestedMaxInline</span><span class="p">)};</span>
+</code></pre></div>
+<h4>为 capacity 分配了内存</h4>
+<p>这里包括 capacity 分配的内存在堆上或者内联在对象中。通过 hasCapacity()判断，isHeapifiedCapacity 上面说过：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">bool</span><span class="w"> </span><span class="nf">hasCapacity</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">kHasInlineCapacity</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">isHeapifiedCapacity</span><span class="p">();</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>如果 hasCapacity()为 true，则调用 u.getCapacity()，可以猜到这个方法调用 PointerType(HeapPtr/HeapPtrWithCapacity)对应的 getCapacity()方法。</p>
+<div class="highlight"><pre><code><span></span><span class="k">union</span><span class="w"> </span><span class="nc">Data</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">PointerType</span><span class="w"> </span><span class="n">pdata_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">InlineStorageType</span><span class="w"> </span><span class="n">storage_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">InternalSizeType</span><span class="w"> </span><span class="nf">getCapacity</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">pdata_</span><span class="p">.</span><span class="n">getCapacity</span><span class="p">();</span><span class="w"> </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="n">u</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span><span class="w">  </span>
+
+<span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="nf">unshiftPointer</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">sizeBytes</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">char</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">p</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">sizeBytes</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="k">struct</span><span class="w"> </span><span class="nc">HeapPtr</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// heap[-kHeapifyCapacitySize] contains capacity  </span>
+<span class="w">  </span><span class="n">value_type</span><span class="o">*</span><span class="w"> </span><span class="n">heap_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">InternalSizeType</span><span class="w"> </span><span class="nf">getCapacity</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="o">*</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">InternalSizeType</span><span class="o">*&gt;</span><span class="p">(</span><span class="w">  </span>
+<span class="w">        </span><span class="n">detail</span><span class="o">::</span><span class="n">unshiftPointer</span><span class="p">(</span><span class="n">heap_</span><span class="p">,</span><span class="w"> </span><span class="n">kHeapifyCapacitySize</span><span class="p">));</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="p">};</span><span class="w">  </span>
+
+<span class="k">struct</span><span class="w"> </span><span class="nc">HeapPtrWithCapacity</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">value_type</span><span class="o">*</span><span class="w"> </span><span class="n">heap_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">InternalSizeType</span><span class="w"> </span><span class="n">capacity_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">InternalSizeType</span><span class="w"> </span><span class="nf">getCapacity</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">capacity_</span><span class="p">;</span><span class="w"> </span><span class="p">}</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>注意 unshiftPointer 是 shiftPointer 的反过程，将指针从指向真正的数据回退到指向 capacity。</p>
+<h4>不为 capacity 分配空间</h4>
+<p>即通过 <code>malloc *usable_size</code> 获取 <code>capacity</code>。<code>AllocationSize{}(u.pdata*.heap*)/sizeof(value_type);</code>直接理解为<code>malloc_usable_size(u.pdata*.heap\\_)/sizeof(value_type)</code>即可，加 AllocationSize 是为了解决一个<code>Android not having malloc_usable_size below API17</code>[15]，不是重点。</p>
+<div class="highlight"><pre><code><span></span><span class="n">size_type</span><span class="w"> </span><span class="nf">capacity</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="o">-&gt;</span><span class="n">isExtern</span><span class="p">())</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">hasCapacity</span><span class="p">())</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">u</span><span class="p">.</span><span class="n">getCapacity</span><span class="p">();</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">AllocationSize</span><span class="p">{}(</span><span class="n">u</span><span class="p">.</span><span class="n">pdata_</span><span class="p">.</span><span class="n">heap_</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">value_type</span><span class="p">);</span><span class="w">   </span><span class="c1">// 此种场景  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">MaxInline</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<h2>扩容</h2>
+<p>与 std::vector 扩容的不同点：</p>
+<ul>
+<li><code>small_vector</code> 根据模板参数是否满足<code>is_trivially_copyable</code>[16]进行了不同的实现：<ul>
+<li><code>is_trivially_copyable</code>：调用<a href="https://en.cppreference.com/w/cpp/string/byte/memmove">std::memmove</a>迁移数据，std::vector 没有这个逻辑。</li>
+<li>否则，循环迁移元素。</li>
+</ul>
+</li>
+<li>std::vector 迁移元素时，会根据是否有<code>noexcept move constructor</code>来决定调用<code>move constructor</code>还是<code>copy constructor</code>（之前这篇文章提到过：c++ 从 vector 扩容看 noexcept 应用场景[17]）。但 <code>small_vector</code> 没有这个过程，有<code>move constructor</code>就直接调用，不判断是否有 noexcept。<strong>所以，当调用<code>move constructor</code>有异常时，原有内存区域的数据会被破坏</strong></li>
+<li>扩容因子不同。std::vector 一般为 2 或者 1.5，不同平台不一样。<code>small_vector</code> 的 capacity 上面已经提到过。</li>
+</ul>
+<p>最终扩容流程都会走到 moveToUninitialized 函数。</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/*  </span>
+<span class="cm">  * Move a range to a range of uninitialized memory.  Assumes the  </span>
+<span class="cm">  * ranges don&#39;t overlap.  </span>
+<span class="cm">  */</span><span class="w">  </span>
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">T</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="k">typename</span><span class="w"> </span><span class="nc">std</span><span class="o">::</span><span class="n">enable_if</span><span class="o">&lt;!</span><span class="n">folly</span><span class="o">::</span><span class="n">is_trivially_copyable</span><span class="o">&lt;</span><span class="n">T</span><span class="o">&gt;::</span><span class="n">value</span><span class="o">&gt;::</span><span class="n">type</span><span class="w"> </span><span class="n">moveToUninitialized</span><span class="p">(</span><span class="n">T</span><span class="o">*</span><span class="w"> </span><span class="n">first</span><span class="p">,</span><span class="w"> </span><span class="n">T</span><span class="o">*</span><span class="w"> </span><span class="n">last</span><span class="p">,</span><span class="w"> </span><span class="n">T</span><span class="o">*</span><span class="w"> </span><span class="n">out</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="w"> </span><span class="n">idx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">rollback</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">makeGuard</span><span class="p">([</span><span class="o">&amp;</span><span class="p">]</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">idx</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="n">out</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="o">~</span><span class="n">T</span><span class="p">();</span><span class="w">  </span>
+<span class="w">      </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="p">});</span><span class="w">  </span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(;</span><span class="w"> </span><span class="n">first</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">last</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">first</span><span class="p">,</span><span class="w"> </span><span class="o">++</span><span class="n">idx</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="k">new</span><span class="w"> </span><span class="p">(</span><span class="o">&amp;</span><span class="n">out</span><span class="p">[</span><span class="n">idx</span><span class="p">])</span><span class="w"> </span><span class="n">T</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="o">*</span><span class="n">first</span><span class="p">));</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="n">rollback</span><span class="p">.</span><span class="n">dismiss</span><span class="p">();</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="c1">// Specialization for trivially copyable types.  </span>
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">T</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="k">typename</span><span class="w"> </span><span class="nc">std</span><span class="o">::</span><span class="n">enable_if</span><span class="o">&lt;</span><span class="n">folly</span><span class="o">::</span><span class="n">is_trivially_copyable</span><span class="o">&lt;</span><span class="n">T</span><span class="o">&gt;::</span><span class="n">value</span><span class="o">&gt;::</span><span class="n">type</span><span class="w"> </span><span class="n">moveToUninitialized</span><span class="p">(</span><span class="n">T</span><span class="o">*</span><span class="w"> </span><span class="n">first</span><span class="p">,</span><span class="w"> </span><span class="n">T</span><span class="o">*</span><span class="w"> </span><span class="n">last</span><span class="p">,</span><span class="w"> </span><span class="n">T</span><span class="o">*</span><span class="w"> </span><span class="n">out</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">memmove</span><span class="p">(</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">void</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">out</span><span class="p">),</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">void</span><span class="w"> </span><span class="k">const</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">first</span><span class="p">),</span><span class="w"> </span><span class="p">(</span><span class="n">last</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">first</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">sizeof</span><span class="w"> </span><span class="o">*</span><span class="n">first</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>这里我不太理解的一点是，既然注释中提到假设前后内存没有 overlap,那么在 <code>is_trivially_copyable</code> 的版本中为什么不用 std::memcpy 呢？效率还能高一点。</strong></p>
+<h3>先迁移原有数据还是先放入新数据</h3>
+<p>在之前的版本中，流程是申请新内存、<strong>迁移原有数据、放入新数据：</strong></p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="p">...</span><span class="n">Args</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="kt">void</span><span class="w"> </span><span class="n">emplaceBack</span><span class="p">(</span><span class="n">Args</span><span class="o">&amp;&amp;</span><span class="p">...</span><span class="w"> </span><span class="n">args</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">makeSize</span><span class="p">(</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span><span class="w">        </span><span class="c1">// 申请新内存 + 迁移原有数据，内部会调用上面的moveToUninitialized  </span>
+<span class="w">  </span><span class="k">new</span><span class="w"> </span><span class="p">(</span><span class="n">end</span><span class="p">())</span><span class="w"> </span><span class="n">value_type</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">forward</span><span class="o">&lt;</span><span class="n">Args</span><span class="o">&gt;</span><span class="p">(</span><span class="n">args</span><span class="p">)...);</span><span class="w">    </span><span class="c1">//放入新数据  </span>
+<span class="w">  </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">setSize</span><span class="p">(</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在<code>small_vector improvements</code>[18]提交中，<strong>改为了申请新内存、放入新数据、迁移原有数据。理由是有可能 <code>emplace_back</code> 的数据是 <code>small_vector</code> 中的某一个数据的引用</strong>, 比如这次提交中加 ForwardingEmplaceInsideVector test[19]，不过这属于 corner case。</p>
+<h3>makeGuard</h3>
+<p>在Support -fno-exceptions in folly/small_vector.h[20]提交里，使用 makeGuard 代替了原有的try-catch。makeGuard 定义在folly/ScopeGuard.h[21]中。</p>
+<p>之前 try-catch 版本：</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">T</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="k">typename</span><span class="w"> </span><span class="nc">std</span><span class="o">::</span><span class="n">enable_if</span><span class="o">&lt;!</span><span class="n">folly</span><span class="o">::</span><span class="n">is_trivially_copyable</span><span class="o">&lt;</span><span class="n">T</span><span class="o">&gt;::</span><span class="n">value</span><span class="o">&gt;::</span><span class="n">type</span><span class="w">  </span>
+<span class="n">moveToUninitialized</span><span class="p">(</span><span class="n">T</span><span class="o">*</span><span class="w"> </span><span class="n">first</span><span class="p">,</span><span class="w"> </span><span class="n">T</span><span class="o">*</span><span class="w"> </span><span class="n">last</span><span class="p">,</span><span class="w"> </span><span class="n">T</span><span class="o">*</span><span class="w"> </span><span class="n">out</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="w"> </span><span class="n">idx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(;</span><span class="w"> </span><span class="n">first</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">last</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">first</span><span class="p">,</span><span class="w"> </span><span class="o">++</span><span class="n">idx</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="k">new</span><span class="w"> </span><span class="p">(</span><span class="o">&amp;</span><span class="n">out</span><span class="p">[</span><span class="n">idx</span><span class="p">])</span><span class="w"> </span><span class="n">T</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="o">*</span><span class="n">first</span><span class="p">));</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(...)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">idx</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="n">out</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="o">~</span><span class="n">T</span><span class="p">();</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="k">throw</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>可以对比上面的 makeGuard 版本，逻辑没有变化。</p>
+<p>Andrei Alexandrescu 和 Petru Marginean 在 2000 年写的Generic: Change the Way You Write Exception-Safe Code — Forever[22]中，介绍了编写 Exception-Safe Code 常见的方法并提出了 ScopeGuard 的概念:</p>
+<ul>
+<li>什么都不加，战略上藐视敌人，战术上也藐视敌人。</li>
+<li>try-catch : 最常见，缺点是：异常路径性能损失较大（stack-unwinding）、编译后的二进制文件体积膨胀等。</li>
+<li>RAII : 需要针对每一种异常写一个小类去处理，繁琐。</li>
+<li>scopeGuard : 上面提到的用法，也是利用了 RAII 的思想，但是更加通用。应用程序只需要定义 rollback，并在成功后调用 dismiss 即可。</li>
+</ul>
+<h2>其他</h2>
+<h3>clear 优化</h3>
+<p>在optimize small_vector::clear[23]提交中，利用了 Clang/GCC 对 clear 函数进行了优化，生成更少的汇编指令（这都是怎么发现的？？？）：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 优化前  </span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">clear</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">erase</span><span class="p">(</span><span class="n">begin</span><span class="p">(),</span><span class="w"> </span><span class="n">end</span><span class="p">());</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="c1">// 优化后  </span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">clear</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// Equivalent to erase(begin(), end()), but neither Clang or GCC are able to optimize away the abstraction.  </span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="w"> </span><span class="n">it</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">begin</span><span class="p">();</span><span class="w"> </span><span class="n">it</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">end</span><span class="p">();</span><span class="w"> </span><span class="o">++</span><span class="n">it</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="n">it</span><span class="o">-&gt;~</span><span class="n">value_type</span><span class="p">();</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">setSize</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2100-8.png" alt="图片"></p>
+<h3><code>__attribute__((__pack__))/pragma(pack(push, x))</code></h3>
+<p>folly 中包装了编译器对齐系数，相关参数介绍 : C/C++内存对齐详解[24]</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// packing is very ugly in msvc  </span>
+<span class="cp">#ifdef _MSC_VER  </span>
+<span class="cp">#define FOLLY_PACK_ATTR </span><span class="cm">/**/</span><span class="cp">  </span>
+<span class="cp">#define FOLLY_PACK_PUSH __pragma(pack(push, 1))  </span>
+<span class="cp">#define FOLLY_PACK_POP __pragma(pack(pop))  </span>
+<span class="cp">#elif defined(__GNUC__)  </span>
+<span class="cp">#define FOLLY_PACK_ATTR __attribute__((__packed__))  </span>
+<span class="cp">#define FOLLY_PACK_PUSH </span><span class="cm">/**/</span><span class="cp">  </span>
+<span class="cp">#define FOLLY_PACK_POP </span><span class="cm">/**/</span><span class="cp">  </span>
+<span class="cp">#else  </span>
+<span class="cp">#define FOLLY_PACK_ATTR </span><span class="cm">/**/</span><span class="cp">  </span>
+<span class="cp">#define FOLLY_PACK_PUSH </span><span class="cm">/**/</span><span class="cp">  </span>
+<span class="cp">#define FOLLY_PACK_POP </span><span class="cm">/**/</span><span class="cp">  </span>
+<span class="cp">#endif</span>
+</code></pre></div>
+<p>在<code>Fix alignment issues in small_vector</code>[25]提交中，<code>small_vector</code> 改为了只在 64 位平台使用对齐系数（不知道为什么，哭。。。）：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#if (FOLLY_X64 || FOLLY_PPC64)  </span>
+<span class="cp">#define FOLLY_SV_PACK_ATTR FOLLY_PACK_ATTR  </span>
+<span class="cp">#define FOLLY_SV_PACK_PUSH FOLLY_PACK_PUSH  </span>
+<span class="cp">#define FOLLY_SV_PACK_POP FOLLY_PACK_POP  </span>
+<span class="cp">#else  </span>
+<span class="cp">#define FOLLY_SV_PACK_ATTR  </span>
+<span class="cp">#define FOLLY_SV_PACK_PUSH  </span>
+<span class="cp">#define FOLLY_SV_PACK_POP  </span>
+<span class="cp">#endif</span>
+</code></pre></div>
+<h3>boost::mpl 元编程库</h3>
+<p>boost mpl 文档[26]</p>
+<p><code>small_vector_base</code> 的代码很少，关注下 boost::mpl 的使用：</p>
+<div class="highlight"><pre><code><span></span><span class="k">namespace</span><span class="w"> </span><span class="nn">mpl</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nn">boost</span><span class="o">::</span><span class="nn">mpl</span><span class="p">;</span><span class="w">  </span>
+
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">class</span><span class="w"> </span><span class="nc">Value</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="w"> </span><span class="n">RequestedMaxInline</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="k">class</span><span class="w"> </span><span class="nc">InPolicyA</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="k">class</span><span class="w"> </span><span class="nc">InPolicyB</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="k">class</span><span class="w"> </span><span class="nc">InPolicyC</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">small_vector_base</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+
+<span class="w">  </span><span class="k">typedef</span><span class="w"> </span><span class="n">mpl</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">InPolicyA</span><span class="p">,</span><span class="w"> </span><span class="n">InPolicyB</span><span class="p">,</span><span class="w"> </span><span class="n">InPolicyC</span><span class="o">&gt;</span><span class="w"> </span><span class="n">PolicyList</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">  </span><span class="cm">/*  </span>
+<span class="cm">    * Determine the size type  </span>
+<span class="cm">    */</span><span class="w">  </span>
+<span class="w">  </span><span class="k">typedef</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">mpl</span><span class="o">::</span><span class="n">filter_view</span><span class="o">&lt;</span><span class="w">  </span>
+<span class="w">      </span><span class="n">PolicyList</span><span class="p">,</span><span class="w">  </span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">is_integral</span><span class="o">&lt;</span><span class="n">mpl</span><span class="o">::</span><span class="n">placeholders</span><span class="o">::</span><span class="n">_1</span><span class="o">&gt;&gt;::</span><span class="n">type</span><span class="w"> </span><span class="n">Integrals</span><span class="p">;</span><span class="w"> </span>
+
+<span class="w">  </span><span class="k">typedef</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">mpl</span><span class="o">::</span><span class="n">eval_if</span><span class="o">&lt;</span><span class="w">  </span>
+<span class="w">      </span><span class="n">mpl</span><span class="o">::</span><span class="n">empty</span><span class="o">&lt;</span><span class="n">Integrals</span><span class="o">&gt;</span><span class="p">,</span><span class="w">  </span>
+<span class="w">      </span><span class="n">mpl</span><span class="o">::</span><span class="n">identity</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="kt">size_t</span><span class="o">&gt;</span><span class="p">,</span><span class="w">  </span>
+<span class="w">      </span><span class="n">mpl</span><span class="o">::</span><span class="n">front</span><span class="o">&lt;</span><span class="n">Integrals</span><span class="o">&gt;&gt;::</span><span class="n">type</span><span class="w"> </span><span class="n">SizeType</span><span class="p">;</span><span class="w"> </span>
+
+<span class="w">  </span><span class="cm">/*  </span>
+<span class="cm">    * Determine whether we should allow spilling to the heap or not.  </span>
+<span class="cm">    */</span><span class="w">  </span>
+<span class="w">  </span><span class="k">typedef</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">mpl</span><span class="o">::</span><span class="n">count</span><span class="o">&lt;</span><span class="n">PolicyList</span><span class="p">,</span><span class="w"> </span><span class="n">small_vector_policy</span><span class="o">::</span><span class="n">NoHeap</span><span class="o">&gt;::</span><span class="n">type</span><span class="w">  </span>
+<span class="w">      </span><span class="n">HasNoHeap</span><span class="p">;</span><span class="w"> </span>
+
+<span class="w">  </span><span class="cm">/*  </span>
+<span class="cm">    * Make the real policy base classes.  </span>
+<span class="cm">    */</span><span class="w">  </span>
+<span class="w">  </span><span class="k">typedef</span><span class="w"> </span><span class="n">IntegralSizePolicy</span><span class="o">&lt;</span><span class="n">SizeType</span><span class="p">,</span><span class="w"> </span><span class="o">!</span><span class="n">HasNoHeap</span><span class="o">::</span><span class="n">value</span><span class="o">&gt;</span><span class="w"> </span><span class="n">ActualSizePolicy</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">  </span><span class="cm">/*  </span>
+<span class="cm">    * Now inherit from them all.  This is done in such a convoluted  </span>
+<span class="cm">    * way to make sure we get the empty base optimizaton on all these  </span>
+<span class="cm">    * types to keep sizeof(small_vector&lt;&gt;) minimal.  </span>
+<span class="cm">    */</span><span class="w">  </span>
+<span class="w">  </span><span class="k">typedef</span><span class="w"> </span><span class="n">boost</span><span class="o">::</span><span class="n">totally_ordered1</span><span class="o">&lt;</span><span class="w">  </span>
+<span class="w">      </span><span class="n">small_vector</span><span class="o">&lt;</span><span class="n">Value</span><span class="p">,</span><span class="w"> </span><span class="n">RequestedMaxInline</span><span class="p">,</span><span class="w"> </span><span class="n">InPolicyA</span><span class="p">,</span><span class="w"> </span><span class="n">InPolicyB</span><span class="p">,</span><span class="w"> </span><span class="n">InPolicyC</span><span class="o">&gt;</span><span class="p">,</span><span class="w">  </span>
+<span class="w">      </span><span class="n">ActualSizePolicy</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="w">      </span><span class="n">type</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>解析模板参数的思路为：</p>
+<ul>
+<li><code>typedef mpl::vector&lt;InPolicyA, InPolicyB, InPolicyC&gt; PolicyList;</code> : 将策略放入到 mpl::vector 中，例如 Noheap、指定 size 的数据类型（<code>uint32_t</code>、<code>uint16_t</code> 等）</li>
+</ul>
+<p>接下来可以分为两块，获取 SizeType 和获取 HasNoHeap：</p>
+<p>获取 SizeType：</p>
+<ul>
+<li><code>typedef typename mpl::filter_view&lt;PolicyList, std::is_integral&lt;mpl::placeholders::_1&gt;&gt;::type Integrals;</code> : 将符合<code>std::is_integral</code>条件的筛选出来，比如 <code>uint8_t</code>。<ul>
+<li><code>mpl::filter_view</code>被定义为<code>template&lt; typename Sequence, typename Pred&gt;</code>，其中，Pred 需要是<code>Unary Lambda Expression</code>，即为编译期可调用的 entity，分为<code>Metafunction Class</code>和<code>Placeholder Expression</code>，上面的<code>std::is_integral&lt;mpl::placeholders::_1&gt;</code>即为<code>Placeholder Expression</code>。</li>
+</ul>
+</li>
+<li><code>typedef typename mpl::eval_if&lt;mpl::empty&lt;Integrals&gt;, mpl::identity&lt;std::size_t&gt;, mpl::front&lt;Integrals&gt;&gt;::type SizeType;</code>不用知道每个函数的意思，<strong>从字面也能看出来：假如应用层传入的模板参数没有 <code>std::is_integral</code>，那么 SizeType，即 size 的类型，就是 <code>size_t</code>，否则就是应用传入的类型，比如 <code>uint8_t</code>.</strong></li>
+</ul>
+<p>获取 HasNoHeap：</p>
+<ul>
+<li><code>typedef typename mpl::count&lt;PolicyList, small_vector_policy::NoHeap&gt;::type HasNoHeap;</code>，这个也能猜出来：应用层是否指定了 NoHeap.</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2100-9.png" alt="图片"></p>
+<p><strong>可以看出，解析模板参数并没有依赖参数的特定顺序。</strong></p>
+<h3>boost/operators</h3>
+<p>boost/operators 文档参考 ：Header[27]</p>
+<p><code>small_vector_base</code> 的最后两行代码，与 boost/operators 有关 :</p>
+<div class="highlight"><pre><code><span></span><span class="k">typedef</span><span class="w"> </span><span class="n">IntegralSizePolicy</span><span class="o">&lt;</span><span class="n">SizeType</span><span class="p">,</span><span class="w"> </span><span class="o">!</span><span class="n">HasNoHeap</span><span class="o">::</span><span class="n">value</span><span class="o">&gt;</span><span class="w"> </span><span class="n">ActualSizePolicy</span><span class="p">;</span><span class="w">  </span>
+
+<span class="k">typedef</span><span class="w"> </span><span class="n">boost</span><span class="o">::</span><span class="n">totally_ordered1</span><span class="o">&lt;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">small_vector</span><span class="o">&lt;</span><span class="n">Value</span><span class="p">,</span><span class="w"> </span><span class="n">RequestedMaxInline</span><span class="p">,</span><span class="w"> </span><span class="n">InPolicyA</span><span class="p">,</span><span class="w"> </span><span class="n">InPolicyB</span><span class="p">,</span><span class="w"> </span><span class="n">InPolicyC</span><span class="o">&gt;</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="n">ActualSizePolicy</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">type</span><span class="p">;</span>
+</code></pre></div>
+<p><code>boost/operators</code> 为精简 operator 代码而设计，比如我们想要支持 <code>x &lt; y</code>，那么 <code>x &gt; y</code>、<code>x &gt;= y</code>、和 <code>x &lt;= y</code> 同样也需要。但是理想情况下，我们只需要重载<code>operator&lt;</code>就行了，后面三个操作可以根据 <code>x&lt;y</code> 推导出来，<code>boost/operators</code> 可以为我们生成类似下面的代码：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">bool</span><span class="w"> </span><span class="k">operator</span><span class="o">&gt;</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">T</span><span class="o">&amp;</span><span class="w"> </span><span class="n">x</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">T</span><span class="o">&amp;</span><span class="w"> </span><span class="n">y</span><span class="p">)</span><span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">x</span><span class="p">;</span><span class="w"> </span><span class="p">}</span><span class="w">  </span>
+<span class="kt">bool</span><span class="w"> </span><span class="k">operator</span><span class="o">&lt;=</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">T</span><span class="o">&amp;</span><span class="w"> </span><span class="n">x</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">T</span><span class="o">&amp;</span><span class="w"> </span><span class="n">y</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="o">!</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">bool</span><span class="o">&gt;</span><span class="p">(</span><span class="n">y</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">x</span><span class="p">);</span><span class="w"> </span><span class="p">}</span><span class="w">  </span>
+<span class="kt">bool</span><span class="w"> </span><span class="k">operator</span><span class="o">&gt;=</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">T</span><span class="o">&amp;</span><span class="w"> </span><span class="n">x</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">T</span><span class="o">&amp;</span><span class="w"> </span><span class="n">y</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="o">!</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">bool</span><span class="o">&gt;</span><span class="p">(</span><span class="n">x</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">y</span><span class="p">);</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p><code>boost::totally_ordered1</code> 被 <code>small_vector</code> 继承。<strong>按照 <code>boost::totally_ordered1</code>
+的定义，只要实现<code>operator&lt;</code>和<code>operator=</code>，那么除了这两个操作，boost/operators
+也会自动生成<code>operator&gt;</code>、<code>operator&lt;=</code>、<code>operator&gt;=</code>、<code>operator!=</code></strong></p>
+<div class="highlight"><pre><code><span></span><span class="c1">// class small_vector  </span>
+<span class="kt">bool</span><span class="w"> </span><span class="k">operator</span><span class="o">==</span><span class="p">(</span><span class="n">small_vector</span><span class="w"> </span><span class="k">const</span><span class="o">&amp;</span><span class="w"> </span><span class="n">o</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">o</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">equal</span><span class="p">(</span><span class="n">begin</span><span class="p">(),</span><span class="w"> </span><span class="n">end</span><span class="p">(),</span><span class="w"> </span><span class="n">o</span><span class="p">.</span><span class="n">begin</span><span class="p">());</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="kt">bool</span><span class="w"> </span><span class="k">operator</span><span class="o">&lt;</span><span class="p">(</span><span class="n">small_vector</span><span class="w"> </span><span class="k">const</span><span class="o">&amp;</span><span class="w"> </span><span class="n">o</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">lexicographical_compare</span><span class="p">(</span><span class="n">begin</span><span class="p">(),</span><span class="w"> </span><span class="n">end</span><span class="p">(),</span><span class="w"> </span><span class="n">o</span><span class="p">.</span><span class="n">begin</span><span class="p">(),</span><span class="w"> </span><span class="n">o</span><span class="p">.</span><span class="n">end</span><span class="p">());</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>对比 std::vector，在 c++20 之前，std::vector 实现了所有的<code>operator==</code>、<code>operator!=</code>、<code>operator&lt;</code>、<code>operator&lt;=</code>、<code>operator&gt;</code>、<code>operator&gt;=</code>，比较繁琐。</p>
+<h4>c++20 的&lt;=&gt; (three-way comparison)</h4>
+<p>c++20 提供了一个新特性，three-way comparison，可以提供上面 boost/operators 的功能。可以参考：</p>
+<ul>
+<li>Default comparisons (since C++20)[28]</li>
+<li>operator&lt;=&gt; for C++20 入门篇[29]</li>
+</ul>
+<p>比如，std::vector 在 c++20 后，就废弃了<code>&lt;、&lt;=、 &gt;=、!= operators</code> (下面引用来自于operator==,!=,&lt;,&lt;=,&gt;,&gt;=,&lt;=&gt;(std::vector))：</p>
+<blockquote><p>The &lt;, &lt;=, &gt;, &gt;=, and != operators are synthesized from operator&lt;=&gt; and operator== respectively. (since C++20)</p>
+</blockquote>
+<p>（完）</p>
+<h2>参考资料</h2>
+<ol>
+<li><a href="https://github.com/facebook/folly/blob/master/folly/small_vector.h">folly/small_vector.h</a></li>
+<li>[folly/small_vector.md:<a href="https://github.com/facebook/folly/blob/master/folly/docs/small_vector.md">https://github.com/facebook/folly/blob/master/folly/docs/small_vector.md</a>)</li>
+<li><a href="https://zhuanlan.zhihu.com/p/348614098">类似于 fbstring 中的 SSO</a></li>
+<li><a href="https://github.com/facebook/folly/blob/master/folly/docs/small_vector.md">官方文档的介绍</a></li>
+<li><a href="https://github.com/facebook/folly/blob/master/folly/docs/FBVector.md">FBVector</a></li>
+<li><a href="https://github.com/facebook/folly/blob/master/folly/io/async/AsyncSocket.h">io/async/AsyncSocket.h</a></li>
+<li><a href="https://llvm.org/docs/ProgrammersManual.html#llvm-adt-smallvector-h">SmallVec from LLVM</a></li>
+<li><a href="http://www.boost.org/doc/libs/1_60_0/doc/html/boost/container/small_vector.html">boost::container::small_vector</a></li>
+<li><a href="https://github.com/paulhodge/EASTL/blob/community/include/EASTL/fixed_vector.h">fixed_vector from EASTL</a></li>
+<li><a href="https://github.com/facebook/folly/commit/714d6c807fe6602745495f11e206e472db69a955">Delete small_vector's OneBitMutex policy</a></li>
+<li><a href="https://en.cppreference.com/w/cpp/types/aligned_storage">std::aligned_storage</a></li>
+<li><a href="https://en.cppreference.com/w/cpp/language/alignof">alignof(value_type)</a></li>
+<li><a href="https://man7.org/linux/man-pages/man3/malloc_usable_size.3.html">malloc_usable_size</a></li>
+<li><a href="http://jemalloc.net/jemalloc.3.html#size_classes">size classes</a></li>
+<li><a href="https://github.com/facebook/folly/commit/5ead4c5ea445b6f8d527ce4c9c1356cf9d5a5a7e">Android not having malloc_usable_size below API17</a></li>
+<li><a href="https://en.cppreference.com/w/cpp/types/is_trivially_copyable">is_trivially_copyable</a></li>
+<li><a href="https://github.com/zhangyachen/zhangyachen.github.io/issues/149">c++ 从 vector 扩容看 noexcept 应用场景</a></li>
+<li><a href="https://github.com/facebook/folly/commit/0ef8ce0d60996be2467fd4ccff324d4786243f27">small_vector improvements</a></li>
+<li><a href="https://github.com/facebook/folly/commit/0ef8ce0d60996be2467fd4ccff324d4786243f27#diff-eead6036f601356b787ecefde5df2ebde862c1e3a98ae12abb45989ef0b188f7R760">ForwardingEmplaceInsideVector test</a></li>
+<li><a href="https://github.com/facebook/folly/commit/948bc7b65950d2bfda9e33c98b1c7bef66411f41">Support -fno-exceptions in folly/small_vector.h</a></li>
+<li><a href="https://github.com/facebook/folly/blob/master/folly/ScopeGuard.h">folly/ScopeGuard.h</a></li>
+<li><a href="https://www.drdobbs.com/cpp/generic-change-the-way-you-write-excepti/184403758?pgno=1">Generic: Change the Way You Write Exception-Safe Code — Forever</a></li>
+<li><a href="https://github.com/facebook/folly/commit/476964303e6da6913caf1a498e228bf79a748aca">optimize small_vector::clear</a></li>
+<li><a href="https://zhuanlan.zhihu.com/p/30007037">C/C++内存对齐详解</a>
+. [25. <a href="https://github.com/facebook/folly/commit/b25dd31ace56f935f7dddf21bc40489816017287#diff-4be96d9ae195087e2e0df410df4cbc93612974cf94fde9b7bab105812349bcc0">Fix alignment issues in small_vector</a></li>
+<li><a href="https://www.boost.org/doc/libs/1_63_0/libs/mpl/doc/tutorial/reference-manual.html">boost mpl 文档</a></li>
+<li><a href="https://www.boost.org/doc/libs/1_65_0/libs/utility/operators.htm">Header <boost/operators.hpp></a></li>
+<li><a href="https://en.cppreference.com/w/cpp/language/default_comparisons">Default comparisons (since C++20)</a></li>
+<li><a href="https://zhuanlan.zhihu.com/p/101004501?utm_source=com.evernote">operator&lt;=&gt; for C++20 入门篇</a></li>
+</ol>
+<hr/>
+
+
+<h4><p>原文出处：<a href='https://mp.weixin.qq.com/s/hwsEOPbSdGKP-Tc2ICUURQ' target='blank'>C++ folly库解读（三）Synchronized —— 比标准库更易用、功能更强大的同步机制</a></p></h4>
+<h2>目录</h2>
+<ul>
+<li>传统同步方案的缺点</li>
+<li>folly/Synchronized.h 简单使用</li>
+<li>Synchronized的模板参数</li>
+<li>withLock()/withRLock()/withWLock() —— 更易用的加锁方式</li>
+<li>升级锁</li>
+<li>ulock()和 withULockPtr()</li>
+<li>Timed Locking</li>
+<li>Synchronized 与 std::condition_variable</li>
+<li>acquireLocked() —— 同时锁多个数据</li>
+<li>使用一把锁，锁多个数据</li>
+<li>struct</li>
+<li>std::tuple</li>
+<li>Benchmark</li>
+</ul>
+<p>folly/Synchronized.h 提供了一种更简单、更不容易出错的同步机制，可以用来替代传统 C++标准库中使用较复杂、较容易出错的同步机制。</p>
+<h2>传统同步方案的缺点</h2>
+<p>一般是将需要同步的数据和锁<strong>一一配对</strong>，即 —— associate mutexes with data, not code :</p>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">RequestHandler</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="p">...</span><span class="w">  </span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="w"> </span><span class="n">requestMutex_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">RequestQueue</span><span class="w"> </span><span class="n">requestQueue_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">processRequest</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">Request</span><span class="o">&amp;</span><span class="w"> </span><span class="n">request</span><span class="p">);</span><span class="w">  </span>
+<span class="p">};</span><span class="w">  </span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">RequestHandler::processRequest</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">Request</span><span class="o">&amp;</span><span class="w"> </span><span class="n">request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">lock_guard</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="o">&gt;</span><span class="w"> </span><span class="n">lg</span><span class="p">(</span><span class="n">requestMutex_</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="n">requestQueue_</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">request</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>然而，操作这些数据成员，开发人员必须注意，<strong>正确的获取锁、获取正确的锁。</strong></p>
+<p>一些常见的错误包括：</p>
+<ul>
+<li>操作数据之前没有获取锁。</li>
+<li>获取了不配对的锁，这个锁不是用来锁这个数据的。</li>
+<li>获取了读锁，但是试图去修改数据。</li>
+<li>获取了写锁，但是对数据只有 const access.</li>
+</ul>
+<p><strong>一般在使用时，需要提醒开发人员：“别忘了 xxxx”，那一般都会出错，比如 new 的对象别忘了 delete : )</strong></p>
+<h2>folly/Synchronized.h 简单使用</h2>
+<p>上面的代码可以用 folly/Synchronized.h 重写为：</p>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">RequestHandler</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">folly</span><span class="o">::</span><span class="n">Synchronized</span><span class="o">&lt;</span><span class="n">RequestQueue</span><span class="o">&gt;</span><span class="w"> </span><span class="n">requestQueue_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">processRequest</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">Request</span><span class="o">&amp;</span><span class="w"> </span><span class="n">request</span><span class="p">);</span><span class="w">  </span>
+<span class="p">};</span><span class="w">  </span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">RequestHandler::processRequest</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">Request</span><span class="o">&amp;</span><span class="w"> </span><span class="n">request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">requestQueue_</span><span class="p">.</span><span class="n">wlock</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">push_back</span><span class="p">(</span><span class="n">request</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>为什么 folly/Synchronized.h 更加有效呢？</p>
+<ul>
+<li>与传统使用方式不同，这里锁和数据是结合成了一个对象 —— <code>requestQueue_</code>。传统方案中，需要寻找锁和数据的配对关系。</li>
+<li>几乎不可能在不获取锁的情况下，去操作数据，还是因为它们被封装成了一个对象。传统方案加不加锁全靠自觉。</li>
+<li>在 <code>push_back</code> 后，锁立即被释放。</li>
+</ul>
+<p>如果在临界区有多个操作，那么可以使用如下方法：</p>
+<div class="highlight"><pre><code><span></span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="k">auto</span><span class="w"> </span><span class="n">lockedQueue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">requestQueue_</span><span class="p">.</span><span class="n">wlock</span><span class="p">();</span><span class="w">  </span>
+<span class="w">      </span><span class="n">lockedQueue</span><span class="o">-&gt;</span><span class="n">push_back</span><span class="p">(</span><span class="n">request1</span><span class="p">);</span><span class="w">  </span>
+<span class="w">      </span><span class="n">lockedQueue</span><span class="o">-&gt;</span><span class="n">push_back</span><span class="p">(</span><span class="n">request2</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>wlock 返回一个 LockedPtr 对象，这个对象可以被理解为指向数据成员的指针。只有这个对象存在，那么锁就会被锁住，所以最好为这个对象显示定义一个 scope.</p>
+<p><strong>更好的方式，是使用 lambdas :</strong></p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">RequestHandler::processRequest</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">Request</span><span class="o">&amp;</span><span class="w"> </span><span class="n">request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="n">requestQueue_</span><span class="p">.</span><span class="n">withWLock</span><span class="p">([</span><span class="o">&amp;</span><span class="p">](</span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">queue</span><span class="w"> </span><span class="s">&quot;&amp;&quot;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="c1">// withWLock() automatically holds the lock for the  </span>
+<span class="w">        </span><span class="c1">// duration of this lambda function  </span>
+<span class="w">        </span><span class="n">queue</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">request</span><span class="p">);</span><span class="w">  </span>
+<span class="w">      </span><span class="p">});</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>使用 withWLock 配合 lambdas 强制定义了一个 scope，更清晰。</p>
+<h2>Synchronized的模板参数</h2>
+<p>Synchronized 有两个模板参数，数据类型和锁类型：</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">T</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">Mutex</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">SharedMutex</span><span class="o">&gt;</span>
+</code></pre></div>
+<p>如果不指定第二个模板参数，默认是 <code>folly::SharedMutex</code>。只要被 <code>folly::LockTraits</code> 支持的都可以使用，比如 <code>std::mutex</code>、<code>std::recursive_mutex</code>、<code>std::timed_mutex</code>、<code>std::recursive_timed_mutex</code>、<code>folly::SharedMutex</code>、<code>folly::RWSpinLock</code>、<code>folly::SpinLock</code>.</p>
+<p>根据锁类型的不同，Synchronized 会提供不同的 API：</p>
+<ul>
+<li>共享锁和升级锁：如果存在 <code>lock_shared()</code>成员函数，Synchronized 会提供 wlock()，rlock()，ulock()三个方法来获取不同的锁类型。其中，rlock()只提供对数据成员 const access.</li>
+<li>排他锁：lock()</li>
+</ul>
+<h3>withLock()/withRLock()/withWLock() —— 更易用的加锁方式</h3>
+<p>withLock()在上面提到过了，可以用来替代 lock()。在持有锁的期间，执行一个 lambda 或者 function.withRLock()/withWLock()同理可以替代 rlock()/wlock().</p>
+<p>我们再详细说一下这种方式的好处。下面的函数将 vector 里的所有元素都 double：</p>
+<div class="highlight"><pre><code><span></span><span class="k">auto</span><span class="w"> </span><span class="n">locked</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">vec</span><span class="p">.</span><span class="n">lock</span><span class="p">();</span><span class="w">  </span>
+<span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="o">&amp;</span><span class="w"> </span><span class="n">n</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">locked</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">n</span><span class="w"> </span><span class="o">*=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>使用 lock()/wlock()/rlock()的一个重要注意事项：一个指向数据的指针或者引用，它的生命周期一定不要比 LockedPtr 对象长（lock()/wlock()/rlock()的返回值类型）。</strong>如果我们将上面的例子这样写就会出问题：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// No. NO. NO!  </span>
+<span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="o">&amp;</span><span class="w"> </span><span class="n">n</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">vec</span><span class="p">.</span><span class="n">wlock</span><span class="p">())</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="n">n</span><span class="w"> </span><span class="o">*=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>vec.wlock()返回的 LockPtr 对象在 range iterators 建立后就销毁了（详细解释见 Range-based for loop Temporary range expression 小节），range iterators 指向了 vector data，但此时锁已经被释放。想想如果要 debug 这种问题，会用多少时间 :)</p>
+<p>这时 withLock()/withRLock()/withWLock()的好处就体现出来了，锁会在 for loop 期间一直持有：</p>
+<div class="highlight"><pre><code><span></span><span class="n">vec</span><span class="p">.</span><span class="n">withLock</span><span class="p">([](</span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="o">&amp;</span><span class="w"> </span><span class="n">n</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="n">n</span><span class="w"> </span><span class="o">*=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="p">});</span>
+</code></pre></div>
+<p>withLock 定义为(withRLock/withWLock 类似)：</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/**  </span>
+<span class="cm">  * Invoke a function while holding the lock.  </span>
+<span class="cm">  *  </span>
+<span class="cm">  * A reference to the datum will be passed into the function as its only  </span>
+<span class="cm">  * argument.  </span>
+<span class="cm">  *  </span>
+<span class="cm">  * This can be used with a lambda argument for easily defining small critical  </span>
+<span class="cm">  * sections in the code.  For example:  </span>
+<span class="cm">  *  </span>
+<span class="cm">  *   auto value = obj.withLock([](auto&amp; data &quot;&quot;) {  </span>
+<span class="cm">  *     data.doStuff();  </span>
+<span class="cm">  *     return data.getValue();  </span>
+<span class="cm">  *   });  </span>
+<span class="cm">  */</span><span class="w">  </span>
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Function</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="k">auto</span><span class="w"> </span><span class="n">withLock</span><span class="p">(</span><span class="n">Function</span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">function</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">function</span><span class="p">(</span><span class="o">*</span><span class="n">lock</span><span class="p">());</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Function</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="k">auto</span><span class="w"> </span><span class="n">withLock</span><span class="p">(</span><span class="n">Function</span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">function</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">function</span><span class="p">(</span><span class="o">*</span><span class="n">lock</span><span class="p">());</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>升级锁</h3>
+<h4>ulock()和 withULockPtr()</h4>
+<p>Synchronized 还支持升级锁。升级锁与共享锁可以共存，但是与排它锁互斥。</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/**  </span>
+<span class="cm">  * An enum to describe the &quot;level&quot; of a mutex.  The supported levels are  </span>
+<span class="cm">  *  Unique - a normal mutex that supports only exclusive locking  </span>
+<span class="cm">  *  Shared - a shared mutex which has shared locking and unlocking functions;  </span>
+<span class="cm">  *  Upgrade - a mutex that has all the methods of the two above along with  </span>
+<span class="cm">  *            support for upgradable locking  </span>
+<span class="cm">  */</span><span class="w">  </span>
+<span class="k">enum</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">MutexLevel</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">UNIQUE</span><span class="p">,</span><span class="w"> </span><span class="n">SHARED</span><span class="p">,</span><span class="w"> </span><span class="n">UPGRADE</span><span class="w"> </span><span class="p">};</span>
+</code></pre></div>
+<p><strong>升级锁解决的问题是：先对数据进行读操作，然后根据一定的条件会进行写操作。</strong></p>
+<p>升级锁可以通过 uclock()或者 withULockPtr()获得:</p>
+<div class="highlight"><pre><code><span></span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// only const access allowed to the underlying object when an upgrade lock  </span>
+<span class="w">    </span><span class="c1">// is acquired  </span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">ulock</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">vec</span><span class="p">.</span><span class="n">ulock</span><span class="p">();</span><span class="w">  </span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">newSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ulock</span><span class="o">-&gt;</span><span class="n">size</span><span class="p">();</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="k">auto</span><span class="w"> </span><span class="n">newSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">vec</span><span class="p">.</span><span class="n">withULockPtr</span><span class="p">([](</span><span class="k">auto</span><span class="w"> </span><span class="n">ulock</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// only const access allowed to the underlying object when an upgrade lock  </span>
+<span class="w">    </span><span class="c1">// is acquired  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">ulock</span><span class="o">-&gt;</span><span class="n">size</span><span class="p">();</span><span class="w">  </span>
+<span class="p">});</span>
+</code></pre></div>
+<p>通过下面的函数可以进行升级或者降级:</p>
+<ul>
+<li>moveFromUpgradeToWrite()</li>
+<li>moveFromWriteToUpgrade()</li>
+<li>moveFromWriteToRead() // withWLockPtr()获得的 wlock 可以调用此函数降级为 rlock</li>
+<li>moveFromUpgradeToRead()</li>
+</ul>
+<p>调用这些函数的 LockedPtr 会被设置为 invalid null state，并返回另一个锁住特定锁的LockedPtr。<strong>这些操作都是原子性的，中间不会出现 unlocked 状态。</strong></p>
+<p>比如现在有一个 cache，数据结构为 unordered_map，需求是先检查对应的 key 是否在 unordered_map 中，如果在则返回对应的 value，不在则初始化 value 为 0：</p>
+<div class="highlight"><pre><code><span></span><span class="n">folly</span><span class="o">::</span><span class="n">Synchronized</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">unordered_map</span><span class="o">&lt;</span><span class="kt">int64_t</span><span class="p">,</span><span class="w"> </span><span class="kt">int64_t</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">cache</span><span class="p">;</span><span class="w">  </span>
+
+<span class="kt">int64_t</span><span class="w"> </span><span class="n">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cache</span><span class="p">.</span><span class="n">withULockPtr</span><span class="p">([</span><span class="n">key</span><span class="p">,</span><span class="n">value</span><span class="p">](</span><span class="k">auto</span><span class="w"> </span><span class="n">ulock</span><span class="w"> </span><span class="s">&quot;key,value&quot;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">cache_value</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">iter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ulock</span><span class="o">-&gt;</span><span class="n">find</span><span class="p">(</span><span class="n">key</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">iter</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">ulock</span><span class="o">-&gt;</span><span class="n">end</span><span class="p">())</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="n">cache_value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">iter</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="n">cache_value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="c1">// ulock is now null  </span>
+<span class="w">        </span><span class="k">auto</span><span class="w"> </span><span class="n">wlock</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ulock</span><span class="p">.</span><span class="n">moveFromUpgradeToWrite</span><span class="p">();</span><span class="w">  </span>
+<span class="w">        </span><span class="p">(</span><span class="o">*</span><span class="n">wlock</span><span class="p">)[</span><span class="n">key</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cache_value</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">cache_value</span><span class="p">;</span><span class="w">  </span>
+<span class="p">});</span>
+</code></pre></div>
+<h3>Timed Locking</h3>
+<p>如果初始化 Synchronized 的锁类型支持时间，lock()/wlock()/rlock()可以传入一个类型为 std::chrono::duration 的参数：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">fun</span><span class="p">(</span><span class="n">Synchronized</span><span class="o">&lt;</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">string</span><span class="o">&gt;&gt;&amp;</span><span class="w"> </span><span class="n">vec</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="k">auto</span><span class="w"> </span><span class="n">locked</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">vec</span><span class="p">.</span><span class="n">lock</span><span class="p">(</span><span class="mi">10</span><span class="n">ms</span><span class="p">);</span><span class="w">  </span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">locked</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">          </span><span class="k">throw</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">runtime_error</span><span class="p">(</span><span class="s">&quot;failed to acquire lock&quot;</span><span class="p">);</span><span class="w">  </span>
+<span class="w">        </span><span class="p">}</span><span class="w">  </span>
+<span class="w">        </span><span class="n">locked</span><span class="o">-&gt;</span><span class="n">push_back</span><span class="p">(</span><span class="s">&quot;hello&quot;</span><span class="p">);</span><span class="w">  </span>
+<span class="w">        </span><span class="n">locked</span><span class="o">-&gt;</span><span class="n">push_back</span><span class="p">(</span><span class="s">&quot;world&quot;</span><span class="p">);</span><span class="w">  </span>
+<span class="w">      </span><span class="p">}</span><span class="w">  </span>
+<span class="w">      </span><span class="n">LOG</span><span class="p">(</span><span class="n">INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;successfully added greeting&quot;</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>Synchronized 与 std::condition_variable</h3>
+<p>如果 Synchronized 的锁类型是 <code>std::mutex</code>，那么可以和 <code>std::condition_variable</code> 配合使用。</p>
+<div class="highlight"><pre><code><span></span><span class="n">Synchronized</span><span class="o">&lt;</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">string</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="o">&gt;</span><span class="w"> </span><span class="n">vec</span><span class="p">;</span><span class="w">  </span>
+<span class="n">std</span><span class="o">::</span><span class="n">condition_variable</span><span class="w"> </span><span class="n">emptySignal</span><span class="p">;</span><span class="w"> </span>
+
+<span class="c1">// Assuming some other thread will put data on vec and signal  </span>
+<span class="c1">// emptySignal, we can then wait on it as follows:  </span>
+<span class="k">auto</span><span class="w"> </span><span class="n">locked</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">vec</span><span class="p">.</span><span class="n">lock</span><span class="p">();</span><span class="w">  </span>
+<span class="n">emptySignal</span><span class="p">.</span><span class="n">wait</span><span class="p">(</span><span class="n">locked</span><span class="p">.</span><span class="n">getUniqueLock</span><span class="p">(),</span><span class="w">  </span>
+<span class="w">                    </span><span class="p">[</span><span class="o">&amp;</span><span class="p">]</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="o">!</span><span class="n">locked</span><span class="o">-&gt;</span><span class="n">empty</span><span class="p">();</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p>getUniqueLock()返回一个 <code>std::unique_lock</code> <code>std::mutex</code>的引用。但是不推荐这么使用，因为这绕过了
+Synchronized 的 API，可以直接操作对应的锁：</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/**  </span>
+<span class="cm">  * Get a reference to the std::unique_lock.  </span>
+<span class="cm">  *  </span>
+<span class="cm">  * This is provided so that callers can use Synchronized&lt;T, std::mutex&gt;  </span>
+<span class="cm">  * with a std::condition_variable.  </span>
+<span class="cm">  *  </span>
+<span class="cm">  * While this API could be used to bypass the normal Synchronized APIs and  </span>
+<span class="cm">  * manually interact with the underlying unique_lock, this is strongly  </span>
+<span class="cm">  * discouraged.  </span>
+<span class="cm">  */</span><span class="w">  </span>
+<span class="n">std</span><span class="o">::</span><span class="n">unique_lock</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">getUniqueLock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">lock_</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<h3>acquireLocked() —— 同时锁多个数据</h3>
+<p>假如需要将一个 vector 的数据拷贝到另一个 vector，wlock()可能会实现需求：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">fun</span><span class="p">(</span><span class="n">Synchronized</span><span class="o">&lt;</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;&gt;&amp;</span><span class="w"> </span><span class="n">a</span><span class="p">,</span><span class="w"> </span><span class="n">Synchronized</span><span class="o">&lt;</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;&gt;&amp;</span><span class="w"> </span><span class="n">b</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">lockedA</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">a</span><span class="p">.</span><span class="n">wlock</span><span class="p">();</span><span class="w">  </span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">lockedB</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">b</span><span class="p">.</span><span class="n">wlock</span><span class="p">();</span><span class="w">  </span>
+<span class="w">    </span><span class="p">...</span><span class="w"> </span><span class="n">use</span><span class="w"> </span><span class="n">lockedA</span><span class="w"> </span><span class="n">and</span><span class="w"> </span><span class="n">lockedB</span><span class="w"> </span><span class="p">...</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>但是如果一个线程调用 fun(x,y)，另一个线程调用func(y,x)，就很有可能出现死锁。<strong>经典的解决方式是，所有的线程以同样的顺序获取锁。许多库的实现是通过比较锁地址的大小来决定加锁顺序：</strong></p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">fun</span><span class="p">(</span><span class="n">Synchronized</span><span class="o">&lt;</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;&gt;&amp;</span><span class="w"> </span><span class="n">a</span><span class="p">,</span><span class="w"> </span><span class="n">Synchronized</span><span class="o">&lt;</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;&gt;&amp;</span><span class="w"> </span><span class="n">b</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">folly</span><span class="o">::</span><span class="n">acquireLocked</span><span class="p">(</span><span class="n">a</span><span class="p">,</span><span class="w"> </span><span class="n">b</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">lockedA</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">get</span><span class="o">&lt;</span><span class="mi">0</span><span class="o">&gt;</span><span class="p">(</span><span class="n">ret</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">lockedB</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">get</span><span class="o">&lt;</span><span class="mi">1</span><span class="o">&gt;</span><span class="p">(</span><span class="n">ret</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="p">...</span><span class="w"> </span><span class="n">use</span><span class="w"> </span><span class="n">lockedA</span><span class="w"> </span><span class="n">and</span><span class="w"> </span><span class="n">lockedB</span><span class="w"> </span><span class="p">...</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+<span class="c1">// 实现：通过比较锁地址的大小  </span>
+<span class="cm">/**  </span>
+<span class="cm">  * Acquire locks for multiple Synchronized&lt;T&gt; objects, in a deadlock-safe  </span>
+<span class="cm">  * manner.  </span>
+<span class="cm">  *  </span>
+<span class="cm">  * The locks are acquired in order from lowest address to highest address.  </span>
+<span class="cm">  * (Note that this is not necessarily the same algorithm used by std::lock().)  </span>
+<span class="cm">  * For parameters that are const and support shared locks, a read lock is  </span>
+<span class="cm">  * acquired.  Otherwise an exclusive lock is acquired.  </span>
+<span class="cm">  *  </span>
+<span class="cm">  * use lock() with folly::wlock(), folly::rlock() and folly::ulock() for  </span>
+<span class="cm">  * arbitrary locking without causing a deadlock (as much as possible), with the  </span>
+<span class="cm">  * same effects as std::lock()  </span>
+<span class="cm">  */</span><span class="w">  </span>
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Sync1</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">Sync2</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="n">std</span><span class="o">::</span><span class="n">tuple</span><span class="o">&lt;</span><span class="n">detail</span><span class="o">::</span><span class="n">LockedPtrType</span><span class="o">&lt;</span><span class="n">Sync1</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">detail</span><span class="o">::</span><span class="n">LockedPtrType</span><span class="o">&lt;</span><span class="n">Sync2</span><span class="o">&gt;&gt;</span><span class="w">  </span>
+<span class="n">acquireLocked</span><span class="p">(</span><span class="n">Sync1</span><span class="o">&amp;</span><span class="w"> </span><span class="n">l1</span><span class="p">,</span><span class="w"> </span><span class="n">Sync2</span><span class="o">&amp;</span><span class="w"> </span><span class="n">l2</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="kt">void</span><span class="o">*&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l1</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="kt">void</span><span class="o">*&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="n">l2</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">p1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">l1</span><span class="p">.</span><span class="n">contextualLock</span><span class="p">();</span><span class="w">  </span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">p2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">l2</span><span class="p">.</span><span class="n">contextualLock</span><span class="p">();</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">make_tuple</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">p1</span><span class="p">),</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">p2</span><span class="p">));</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">p2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">l2</span><span class="p">.</span><span class="n">contextualLock</span><span class="p">();</span><span class="w">  </span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">p1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">l1</span><span class="p">.</span><span class="n">contextualLock</span><span class="p">();</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">make_tuple</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">p1</span><span class="p">),</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">p2</span><span class="p">));</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>C++17 引入了 structured binding syntax，可以使代码更简单：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">fun</span><span class="p">(</span><span class="n">Synchronized</span><span class="o">&lt;</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;&gt;&amp;</span><span class="w"> </span><span class="n">a</span><span class="p">,</span><span class="w"> </span><span class="n">Synchronized</span><span class="o">&lt;</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;&gt;&amp;</span><span class="w"> </span><span class="n">b</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="k">auto</span><span class="w"> </span><span class="p">[</span><span class="n">lockedA</span><span class="p">,</span><span class="w"> </span><span class="n">lockedB</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">folly</span><span class="o">::</span><span class="n">acquireLocked</span><span class="p">(</span><span class="n">a</span><span class="p">,</span><span class="w"> </span><span class="n">b</span><span class="p">);</span><span class="w">  </span>
+<span class="w">      </span><span class="p">...</span><span class="w"> </span><span class="n">use</span><span class="w"> </span><span class="n">lockedA</span><span class="w"> </span><span class="n">and</span><span class="w"> </span><span class="n">lockedB</span><span class="w"> </span><span class="p">...</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>acquireLockedPair()返回 std::pair，在不支持 C++17 的编译器情况下，使用也很方便。</p>
+<h3>使用一把锁，锁多个数据</h3>
+<p>比如一个 bidirectional map，需要同时操作。一般有两个方案：</p>
+<h4>Struct</h4>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">Server</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">BiMap</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="n">map</span><span class="o">&lt;</span><span class="kt">int</span><span class="p">,</span><span class="w"> </span><span class="n">string</span><span class="o">&gt;</span><span class="w"> </span><span class="n">direct</span><span class="p">;</span><span class="w">  </span>
+<span class="w">      </span><span class="n">map</span><span class="o">&lt;</span><span class="n">string</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">inverse</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">};</span><span class="w"> </span>
+
+<span class="w">    </span><span class="n">Synchronized</span><span class="o">&lt;</span><span class="n">BiMap</span><span class="o">&gt;</span><span class="w"> </span><span class="n">bimap_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">...</span><span class="w">  </span>
+<span class="p">};</span><span class="w"> </span>
+
+<span class="p">...</span><span class="w">  </span>
+
+<span class="n">bimap_</span><span class="p">.</span><span class="n">withLock</span><span class="p">([](</span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">locked</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">locked</span><span class="p">.</span><span class="n">direct</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">&quot;zero&quot;</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">locked</span><span class="p">.</span><span class="n">inverse</span><span class="p">[</span><span class="s">&quot;zero&quot;</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w">  </span>
+<span class="p">});</span>
+</code></pre></div>
+<h4>std::tuple</h4>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">Server</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">Synchronized</span><span class="o">&lt;</span><span class="n">tuple</span><span class="o">&lt;</span><span class="n">map</span><span class="o">&lt;</span><span class="kt">int</span><span class="p">,</span><span class="w"> </span><span class="n">string</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">map</span><span class="o">&lt;</span><span class="n">string</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="o">&gt;&gt;&gt;</span><span class="w"> </span><span class="n">bimap_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">...</span><span class="w">  </span>
+<span class="p">};</span><span class="w"> </span>
+
+<span class="p">...</span><span class="w">  </span>
+
+<span class="n">bimap_</span><span class="p">.</span><span class="n">withLock</span><span class="p">([](</span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">locked</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">get</span><span class="o">&lt;</span><span class="mi">0</span><span class="o">&gt;</span><span class="p">(</span><span class="n">locked</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">&quot;zero&quot;</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">get</span><span class="o">&lt;</span><span class="mi">1</span><span class="o">&gt;</span><span class="p">(</span><span class="n">locked</span><span class="p">)[</span><span class="s">&quot;zero&quot;</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w">  </span>
+<span class="p">});</span>
+</code></pre></div>
+<h3>Benchmark</h3>
+<p>SynchronizedBenchmark.cpp (<a href="https://github.com/facebook/folly/blob/master/folly/test/SynchronizedBenchmark.cpp">https://github.com/facebook/folly/blob/master/folly/test/SynchronizedBenchmark.cpp</a>)</p>
+<p>下篇文章写一下 Synchronized 的基本实现 ：)</p>
+<h2>参考资料</h2>
+<ul>
+<li><a href="https://github.com/facebook/folly/blob/master/folly/docs/Synchronized.md">Synchronized.md</a></li>
+</ul>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "C++ folly库解读02.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

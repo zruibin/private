@@ -1,0 +1,1504 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>基于tcmalloc的高并发内存池 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="基于tcmalloc的高并发内存池,C/C++,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="基于tcmalloc的高并发内存池" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>基于tcmalloc的高并发内存池</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2024-07-29 21:00
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://mp.weixin.qq.com/s/L1gBgdnx2jG8-C-3n7oCzg' target='blank'>基于tcmalloc的高并发内存池</a></p></h4>
+<h2>内存池</h2>
+<ul>
+<li>池化技术：</li>
+</ul>
+<p>池是在计算机技术中经常使用的一种设计模式，其内涵在于：将程序中需要经常使用的核心资源先申请出来，放到一个池内，由程序自己管理，这样可以提高资源的使用效率，也可以保证本程序占有的资源数量。经常使用的池技术包括内存池、线程池和连接池等，其中尤以内存池和线程 池使用最多。</p>
+<ul>
+<li>内存池</li>
+</ul>
+<p>内存池(Memory Pool) 是一种动态内存分配与管理技术。通常情况下，开发者习惯直接使 用new、delete、malloc、free等API申请分配和释放内存，这样导致的后果是：当程序长时间运行时，由于所申请内存块的大小不定，频繁使用时会造成大量的内存碎片从而降低程序和操作系统的性能。内存池则是在真正使用内存之前，先申请分配一大块内存(内存池)留作备用，当申请内存时，从池中取出一块动态分配，当释放内存时，将释放的内存再放入池内，再次申请池可以再取出来使用，并尽量与周边的空闲内存块合并。若内存池不够时，则自动扩大内存池，从操作系统中申请更大的内存池。</p>
+<h2>内存池主要解决的问题</h2>
+<h3>1.内存碎片问题</h3>
+<p>内存碎片问题是指系统中存在大量不连续的、无法被有效利用的内存空间。这些不连续的内存块虽然总和能够满足内存需求，但由于它们被分割成了许多小块，导致系统无法为较大的内存请求提供连续的内存空间，从而降低了内存利用率和系统性能。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-1.png" alt="图片"></p>
+<p>假设系统依次分配了16byte、8byte、16byte、4byte，还剩余8byte未分配。这时要分配一个24byte的空间，操作系统回收了一个上面的两个16byte，总的剩余空间有40byte，但是却不能分配出一个连续24byte的空间，这就是内存碎片问题。</p>
+<blockquote><p>内存碎片主要分为两种：</p>
+</blockquote>
+<ul>
+<li><p>内部碎片：内部碎片是指已经被分配给进程或应用程序的内存块中未被使用的部分。例如，如果一个进程请求了一块较大的内存空间，但实际上只使用了其中的一部分，那么剩余的部分就会成为内部碎片。</p>
+</li>
+<li><p>外部碎片：外部碎片是指未被分配的内存块之间的小块空闲内存，这些空闲内存虽然总和可用内存量很大，但由于它们分散在内存中，无法被有效利用，从而导致内存浪费。上面的例子就属于外部碎片问题。</p>
+</li>
+</ul>
+<blockquote><p>内存碎片带来的影响：</p>
+</blockquote>
+<ul>
+<li><p>降低内存利用率： 内存碎片使得一部分内存无法被有效利用，从而降低了系统的内存利用率。</p>
+</li>
+<li><p>影响性能： 当系统中存在大量的内存碎片时，系统可能无法为大型内存请求提供连续的内存空间，从而导致频繁的内存分配和释放操作，影响系统的性能。</p>
+</li>
+<li><p>增加内存管理开销： 内存碎片可能导致内存管理算法变得复杂，增加了内存管理的开销。</p>
+</li>
+</ul>
+<p>使用内存池可以减少内存碎片问题。</p>
+<h3>2.申请效率问题</h3>
+<p>它通过预先分配一定数量的内存块，并在需要时从这些预分配的内存块中获取内存，可以提高内存申请的效率，减少内存申请和释放的开销。</p>
+<p>有了内存池后，当动态申请内存时，直接从内存池中获取一个预分配的内存块，避免了动态内存分配的开销，提高了内存申请的效率，不再需要操作系统在内存频繁的申请内存了。</p>
+<h2>实现一个定长内存池</h2>
+<p>定长内存池就是针对固定大小内存块的申请和释放的内存池，由于定长内存池只需要支持固定大小内存块的申请和释放，因此我们可以将其性能做到极致，并且在实现定长内存池时不需要考虑内存碎片等问题，因为我们申请/释放的都是固定大小的内存块。</p>
+<p>定长内存池也叫做对象池，在创建对象池时，对象池可以根据传入的对象类型的大小来实现“定长”。因此我们可以通过使用模板参数来实现“定长”，比如创建定长内存池时传入的对象类型是int，那么该内存池就只支持4字节大小内存的申请和释放。</p>
+<blockquote><p>定长内存池所需要的成员变量</p>
+</blockquote>
+<p>对于定长内存池肯定需要先向系统申请一大块内存，然后对其进行管理。还需要知道剩余内存大小信息。对于已经释放的内存还需要管理再次使用。</p>
+<p>对于已经释放的内存使用自由链表进行管理。</p>
+<p>图解：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-3.png" alt="图片"></p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-4.png" alt="图片"></p>
+<p>类图：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-5.png" alt="图片"></p>
+<ul>
+<li><p><code>_memory</code>: 维护申请到的一大块内存池</p>
+</li>
+<li><p><code>_remain_bytes</code>: 内存池中剩余字节数</p>
+</li>
+<li><p><code>_free_list</code>: 释放回来后的自由链表头指针</p>
+</li>
+</ul>
+<p>将维护内存池的指针设置为<code>char*</code>，这样申请获得申请内存对象的大小后，直接对其进行加法操作即可。因为指针加整数的操作是根据指针类型来计算新的地址的。比如<code>int* + 8</code>，会让指针加上8个int大小的地址。即移动了32个字节。<code>char* + 8</code> 就只会移动8个字节。<code>char*</code> 方便对内存池进程切割</p>
+<blockquote><p>管理已释放内存</p>
+</blockquote>
+<p>对于还给内存池的内存块，使用自由链表进行管理，自由链表维护了一个列表，其中每个节点代表一个可用的内存块，并且这些内存块可能是连续的或者分散的。自由链表的基本思想是，当需要分配内存时，可以从自由链表中选择一个可用的内存块分配给请求者；当释放内存时，将被释放的内存块添加到自由链表中，以便之后的内存分配请求可以使用。</p>
+<p>同时也不需要对其设计专门的链式结构，让内存块的前4个字节(32位下)或者前8个字节(64位下)存储下一个内存块的地址即可。当有新的内存块释放时，对自由链表进行头插即可。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-6.png" alt="图片"></p>
+<p>注意：以32位平台为例：可能申请的对象不足4字节，在申请空间时，如果小于4字节，就多开一点空间最少开4字节，为了自由链表做牺牲。</p>
+<blockquote><p>定长内存池的实现</p>
+</blockquote>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">T</span><span class="o">&gt;</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">ObjectPool</span>
+<span class="p">{</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w">  </span><span class="n">T</span><span class="o">*</span><span class="w"> </span><span class="n">New</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">T</span><span class="o">*</span><span class="w"> </span><span class="n">obj</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">//先使用已经释放的内存块</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">_free_list</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="p">((</span><span class="kt">void</span><span class="o">**</span><span class="p">)</span><span class="n">_free_list</span><span class="p">);</span>
+<span class="w">      </span><span class="n">obj</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">T</span><span class="o">*</span><span class="p">)</span><span class="n">_free_list</span><span class="p">;</span>
+<span class="w">      </span><span class="n">_free_list</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">next</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">//剩余内存不够一个对象大小时，重新开空间</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">_remain_bytes</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">T</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">_remain_bytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">128</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="p">;</span>
+<span class="w">        </span><span class="n">_memory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="p">)</span><span class="n">malloc</span><span class="p">(</span><span class="n">_remain_bytes</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">_memory</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="k">nullptr</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;malloc fail&quot;</span><span class="p">);</span>
+<span class="w">          </span><span class="n">exit</span><span class="p">(</span><span class="mi">-1</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+
+<span class="w">      </span><span class="n">obj</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">T</span><span class="o">*</span><span class="p">)</span><span class="n">_memory</span><span class="p">;</span><span class="c1">//类型匹配</span>
+<span class="w">      </span><span class="kt">size_t</span><span class="w"> </span><span class="n">obj_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">T</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">T</span><span class="p">);</span><span class="c1">//保证对象能够存下指针的大小 比指针还小就多开点</span>
+<span class="w">      </span><span class="n">_memory</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">obj_size</span><span class="p">;</span><span class="c1">//char* 用了多少直接加</span>
+<span class="w">      </span><span class="n">_remain_bytes</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="n">obj_size</span><span class="p">;</span>
+
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">//定位new在已分配的内存块上使用定位 new 构造对象</span>
+<span class="w">    </span><span class="k">new</span><span class="p">(</span><span class="n">obj</span><span class="p">)</span><span class="n">T</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">obj</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="n">Delete</span><span class="p">(</span><span class="n">T</span><span class="o">*</span><span class="w"> </span><span class="n">obj</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">//显示调用该对象的析构函数清理该对象 防止该来中有动态资源没有释放造成内存泄漏。</span>
+<span class="w">    </span><span class="n">obj</span><span class="o">-&gt;~</span><span class="n">T</span><span class="p">();</span>
+<span class="w">    </span><span class="c1">//自由链表头插</span>
+<span class="w">    </span><span class="o">*</span><span class="p">(</span><span class="kt">void</span><span class="o">**</span><span class="p">)</span><span class="n">obj</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_free_list</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_free_list</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">obj</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="k">private</span><span class="o">:</span>
+<span class="w">  </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">_memory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span><span class="c1">//维护大的内存池指针</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">_remain_bytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="c1">//剩余内存字节数</span>
+<span class="w">  </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">_free_list</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span><span class="c1">//管理释放回来的自由链表头指针</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>解析：</p>
+<p>先不考虑有已经释放内存块的情况，图解整个为对象动态开辟空间的过程。</p>
+<ul>
+<li>申请过程</li>
+</ul>
+<p>首先内存池会申请128kb大小的内存池，让对象obj指向内存池的起始地址。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-7.png" alt="图片"></p>
+<p>确定对象大小，如果不足地址的大小，就多开一些，为后面自由链表做牺牲。假设对象大小是32字节。维护内存池的_memory指针就会向后移动32字节，同时剩余地址字节数也会更新。(后面在申请时，根据内存池剩字节数和对象大小来判断是否需要重新开空间)</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-8.png8" alt="图片"></p>
+<p>然后通过定位new，在已分配的内存块上构造对象。最后返回对象的指针即可。到此不考虑有以释放内存的动态开辟空间的过程就完了。</p>
+<ul>
+<li>释放过程：</li>
+</ul>
+<p>释放已申请空间,释放已申请空间就是将内存块头插到自由链表的过程。需要注意的是，将内存块的头四个字节来存储下一个内存块的地址，存放是有技巧的。首先在申请的时候，如果对象不足一个地址的大小，就会按照一个地址的大小来开辟，32位下指针4个字节，64位下，指针8个字节。开空间很好开，但是要拿到对象的头四个字节或者八个字节是需要解引用操作的。指针的类型决定了指针解引用的大小。这样，32位平台和64位平台下，不使用二级指针，就要做条件判断。使用二级指针，就能很好的解决这个问题。</p>
+<p><code>void**</code>一个二级指针，在32位下，他的大小是4字节，64位下是8字节。因为指针大小不论类型，只有在不同的平台下才有差距。</p>
+<p>但是如果对<code>void**</code>进行解引用操作，即<code>*(void**)</code>,在不同的平台下就是不同的大小，32位下，<code>void*</code> 指针的大小是4个字节，而 <code>void**</code> 是指向 <code>void*</code> 指针的指针，因此其大小也是4个字节。当对 <code>void**</code> 进行解引用操作时就会访问<code>void*</code>大小字节数，也就是4个字节。在64位平台下，对其进行解引用操作，也会访问<code>void*</code>大小字节数，就是8个字节。因为指针解引用取决于指针指向数据类型的大小，比如一个指针指向int类型的数据，对其进行解引用就会访问4字节大小的地址。</p>
+<p>当然不止是<code>void**</code>可以，只要是个二级指针就可以做到在32位平台下访问头四个字节，在64位下访问头8个字节。</p>
+<p>拿到内存块对象的头4或8个字节后，就是自由链表头插的过程了。</p>
+<p>自由链表头插：(32位下为例)</p>
+<p>如果是第一次头插，<code>_free_list == nullptr</code> 让内存块对象的头四字节指向<code>_free_list</code>,再让<code>_free_list</code>指向内存块。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-9.png" alt="图片"></p>
+<p>如果不是第一次头插，也可以让新的内存块头四字节指向<code>_free_list</code>,再让<code>_free_list</code>指向新的内存块。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-10.png" alt="图片"></p>
+<p>这样就不用做特殊情况处理了，每次头插都可以使用同样的逻辑处理。</p>
+<div class="highlight"><pre><code><span></span><span class="o">*</span><span class="p">(</span><span class="kt">void</span><span class="o">**</span><span class="p">)</span><span class="n">obj</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_free_list</span><span class="p">;</span>
+<span class="n">_free_list</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">obj</span><span class="p">;</span>
+</code></pre></div>
+<p>以上就是整个内存释放的过程。</p>
+<p>当自由链表不为空，说明下次为对象动态开辟空间时，就会先使用自由链表中的内存块。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="p">((</span><span class="kt">void</span><span class="o">**</span><span class="p">)</span><span class="n">_free_list</span><span class="p">);</span>
+<span class="n">obj</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">T</span><span class="o">*</span><span class="p">)</span><span class="n">_free_list</span><span class="p">;</span>
+<span class="n">_free_list</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">next</span><span class="p">;</span>
+</code></pre></div>
+<p>自由链表中头四个字节存放的是下一个内存块的地址，先保存起来，在让obj指向自由链表，从自由链表中定位new即可(还是从内存池中申请空间，这里只是抽象了一下。从内存池中以释放的地址中进行申请)。最后更新一下自由链表即可。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-11.png" alt="图片"></p>
+<blockquote><p>性能对比</p>
+</blockquote>
+<p>性能测试要在release下进行测试，debug下会关闭优化，且可能会启用额外的运行时检查（如边界检查、空指针检查等）。</p>
+<ul>
+<li>内置类型对比：</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">test</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="c1">// 申请释放的轮次</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">Rounds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 每轮申请释放多少次</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">N</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10000000</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">//使用new和delete</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">*&gt;</span><span class="w"> </span><span class="n">v1</span><span class="p">;</span>
+<span class="w">  </span><span class="n">v1</span><span class="p">.</span><span class="n">reserve</span><span class="p">(</span><span class="n">N</span><span class="p">);</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">begin1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock</span><span class="p">();</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">Rounds</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">N</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">j</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">v1</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="k">new</span><span class="w"> </span><span class="kt">int</span><span class="p">());</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">N</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">j</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">delete</span><span class="w"> </span><span class="n">v1</span><span class="p">[</span><span class="n">j</span><span class="p">];</span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="n">v1</span><span class="p">.</span><span class="n">clear</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">end1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock</span><span class="p">();</span>
+<span class="w">  </span><span class="c1">//使用内存池</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">*&gt;</span><span class="w"> </span><span class="n">v2</span><span class="p">;</span>
+<span class="w">  </span><span class="n">v2</span><span class="p">.</span><span class="n">reserve</span><span class="p">(</span><span class="n">N</span><span class="p">);</span>
+<span class="w">  </span><span class="n">ObjectPool</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">obj_pool</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">begin2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock</span><span class="p">();</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">Rounds</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">N</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">j</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">v2</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">obj_pool</span><span class="p">.</span><span class="n">New</span><span class="p">());</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">N</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">j</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">obj_pool</span><span class="p">.</span><span class="n">Delete</span><span class="p">(</span><span class="n">v2</span><span class="p">[</span><span class="n">j</span><span class="p">]);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">v2</span><span class="p">.</span><span class="n">clear</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">end2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock</span><span class="p">();</span>
+
+<span class="w">  </span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;USE NEW TIME = :&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">end1</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">begin1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">endl</span><span class="p">;</span>
+<span class="w">  </span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;USE OBJECTPOOL TIME = :&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">end2</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">begin2</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">endl</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>运行结果：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-12.png" alt="图片"></p>
+<p>对于一千万内置类型数据，申请释放五次，使用内存池会快27倍的。非常的恐怖。</p>
+<ul>
+<li>自定义类型</li>
+</ul>
+<p>自定义一个二叉树节点类</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">TreeNode</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">_val</span><span class="p">;</span>
+<span class="w">  </span><span class="n">TreeNode</span><span class="o">*</span><span class="w"> </span><span class="n">_left</span><span class="p">;</span>
+<span class="w">  </span><span class="n">TreeNode</span><span class="o">*</span><span class="w"> </span><span class="n">_right</span><span class="p">;</span>
+
+<span class="w">  </span><span class="n">TreeNode</span><span class="p">()</span>
+<span class="w">    </span><span class="o">:</span><span class="n">_val</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="w">    </span><span class="p">,</span><span class="w"> </span><span class="n">_left</span><span class="p">(</span><span class="k">nullptr</span><span class="p">)</span>
+<span class="w">    </span><span class="p">,</span><span class="w"> </span><span class="n">_right</span><span class="p">(</span><span class="k">nullptr</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{}</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>对其进行测试</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">test</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="c1">// 申请释放的轮次</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">Rounds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 每轮申请释放多少次</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">N</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10000000</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">//使用new和delete</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">TreeNode</span><span class="o">*&gt;</span><span class="w"> </span><span class="n">v1</span><span class="p">;</span>
+<span class="w">  </span><span class="n">v1</span><span class="p">.</span><span class="n">reserve</span><span class="p">(</span><span class="n">N</span><span class="p">);</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">begin1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock</span><span class="p">();</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">Rounds</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">N</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">j</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">v1</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="k">new</span><span class="w"> </span><span class="n">TreeNode</span><span class="p">());</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">N</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">j</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">delete</span><span class="w"> </span><span class="n">v1</span><span class="p">[</span><span class="n">j</span><span class="p">];</span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="n">v1</span><span class="p">.</span><span class="n">clear</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">end1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock</span><span class="p">();</span>
+<span class="w">  </span><span class="c1">//使用内存池</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">TreeNode</span><span class="o">*&gt;</span><span class="w"> </span><span class="n">v2</span><span class="p">;</span>
+<span class="w">  </span><span class="n">v2</span><span class="p">.</span><span class="n">reserve</span><span class="p">(</span><span class="n">N</span><span class="p">);</span>
+<span class="w">  </span><span class="n">ObjectPool</span><span class="o">&lt;</span><span class="n">TreeNode</span><span class="o">&gt;</span><span class="w"> </span><span class="n">obj_pool</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">begin2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock</span><span class="p">();</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">Rounds</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">N</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">j</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">v2</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">obj_pool</span><span class="p">.</span><span class="n">New</span><span class="p">());</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">N</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">j</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">obj_pool</span><span class="p">.</span><span class="n">Delete</span><span class="p">(</span><span class="n">v2</span><span class="p">[</span><span class="n">j</span><span class="p">]);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">v2</span><span class="p">.</span><span class="n">clear</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">end2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock</span><span class="p">();</span>
+
+<span class="w">  </span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;USE NEW TIME = :&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">end1</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">begin1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">endl</span><span class="p">;</span>
+<span class="w">  </span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;USE OBJECTPOOL TIME = :&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">end2</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">begin2</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">endl</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>运行结果：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-13.png" alt="图片"></p>
+<p>同样对于一千万自定义类型数据，进行五轮申请释放，使用内存池会快将近18倍。</p>
+<blockquote><p>这里内存池和new底层都是使用malloc进行的</p>
+</blockquote>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-14.png" alt="图片"></p>
+<p>malloc函数在内部可能会实现一些简单的内存池管理策略。可以不通过malloc直接使用系统调用接口向堆区申请空间。在windows下使用VirtualAlloc系统调用接口，用于在进程的虚拟地址空间中分配内存。它可以用于分配一块指定大小的内存，并返回指向这块内存的指针。在Linux下，可以调用brk或mmap函数。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#ifdef _WIN32</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;Windows.h&gt;</span>
+<span class="cp">#else</span>
+<span class="c1">//...Linux</span>
+<span class="cp">#endif</span>
+
+<span class="c1">//直接去堆上申请按页申请空间</span>
+<span class="kr">inline</span><span class="w"> </span><span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="nf">SystemAlloc</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">kpage</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="cp">#ifdef _WIN32</span>
+<span class="w">  </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">VirtualAlloc</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">kpage</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">13</span><span class="p">,</span><span class="w"> </span><span class="n">MEM_COMMIT</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">MEM_RESERVE</span><span class="p">,</span><span class="w"> </span><span class="n">PAGE_READWRITE</span><span class="p">);</span>
+<span class="cp">#else</span>
+<span class="w">  </span><span class="c1">// linux下brk mmap等</span>
+<span class="w">        </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">mmap</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">kpage</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">13</span><span class="p">,</span><span class="w"> </span><span class="n">PROT_READ</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">PROT_WRITE</span><span class="p">,</span><span class="w"> </span><span class="n">MAP_PRIVATE</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">MAP_ANONYMOUS</span><span class="p">,</span><span class="w"> </span><span class="mi">-1</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="cp">#endif</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">ptr</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="k">nullptr</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;malloc fail&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="n">exit</span><span class="p">(</span><span class="mi">-1</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">ptr</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在内存池new的时候调用SystemAlloc进行申请</p>
+<div class="highlight"><pre><code><span></span><span class="n">_memory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="p">)</span><span class="n">SystemAlloc</span><span class="p">(</span><span class="n">_remain_bytes</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">13</span><span class="p">);</span>
+</code></pre></div>
+<p>这样，动态申请内存的时候就完全脱离malloc了。VirtualAlloc 函数在 Windows 系统中以页面（page）为单位进行内存申请。页面大小是操作系统的内存管理单位，通常是 8KB。<code>128*1024</code>字节，右移13位就是除以8kb。申请的时候申请16页即可。</p>
+<h2>高并发内存池(concurrent memory pools)</h2>
+<p>在高并发多线程的环境下，在申请内存的时，必然存在激烈的锁竞争问题。malloc本身其实已经很优秀了，但是在并发场景下可能会因为频繁的加锁和解锁导致效率有所降低，而该项目的原型tcmalloc实现的就是一种在多线程高并发场景下更胜一筹的内存池。</p>
+<p>对比上面的定长内存池，高并发内存池不仅要解决内存碎片问题和效率问题，还要解决多线程环境下，锁竞争的问题。</p>
+<p>对比malloc,malloc本身已经很优秀了，它在性能方面可能不够高效，特别是在多线程环境下，可能存在锁竞争等问题。tcmalloc（Thread-Caching Malloc）是由 Google 开发的一种针对多线程应用的高性能内存分配器。它采用了线程本地缓存技术，减少了线程间的竞争，提高了性能。</p>
+<p>tcmalloc 在空间利用率方面可能比 malloc 更好。它有更好的内存回收策略和碎片整理机制，可以减少内存碎片化，提高内存利用率。</p>
+<p>Concurrent Memory Pools主要由3个部分组成</p>
+<h3>1.线程缓存 (thread cache)：</h3>
+<p>thread cache 其主要思想是为每个线程维护一个本地的内存缓存，以减少多线程并发操作时的锁竞争，提高内存分配的性能。thread cache 是每个线程独有的，用于小于256kb的内存分配，线程从这里申请内存不需要加锁，每个线程独享一个thread cache。这也是并发内存池高效的一个地方。</p>
+<h3>2.中心缓存(central cache)：</h3>
+<p>中心缓存是所有线程共享的，thread cache 按需从central cache中获取对象。central cache周期性的回收thread cache的对象。避免一个线程占用太多的内存，导致其他线程内存吃紧。做到内存分配在多线程中更加均衡的按需调度的目的。central cache是存在竞争的，从这里取内存对象是需要加锁保护的。</p>
+<h3>3.页缓存(page cache)：</h3>
+<p>页缓存是在central cache上面的一层缓存，存储的内存是以页为单位存储以及分配的。central cache没有内存时，从page cache分配出一定数量的page，并切割成定长大小的小块内存块，分配给central cache。page cache没有足够的内存时，就会向堆区申请。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-15.png" alt="图片"></p>
+<p>下面就一一实现各层，看看是如何将性能发挥到极致的。</p>
+<h2>Thread Cache</h2>
+<p>定长内存池只支持固定大小对象内存的申请和释放，在定长内存池中只需要一个自由链表即可管理。在高并发内存池中，要支持不同大小对象内存的申请和释放，这就需要多个自由链表进行管理。thread cache 本质是一个哈希桶，每个桶都是大小不同的自由链表。逻辑图如下：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-16.png" alt="图片"></p>
+<p>Thread Cache支持小于256Kb内存申请。最小支持8字节的内存申请(因为64位下，回收回来的内存要使用自由链表管理，自由链表使用头部地址存放一下个内存块的地址，64位下，一个地址至少8字节)。</p>
+<p>如果从8字节开始到256Kb，每个大小都挂一个自由链表，至少需要256*1024 - 8个自由链表，也就是26万多个桶。仅只是保存这些自由链表，至少都需要256kb空间。释放的时候，自由链表下在存放一些内存块，一个Thread Cache对象都占用很大的空间了。而Thread Cache在多线程环境下是每个线程独享的，创建线程的时候就会分配Thread Cache对象。一个进程，多创建几个线程，仅仅维护Thread Cache对象都需要很大的内存空间了。</p>
+<p>解决这个问题，参考tcmalloc采用了特定对齐规则。让这些字节数进行向上对齐，比如申请1个字节时，会直接申请8个字节，剩余的可以七字节不用。申请9字节时，会直接给16字节。</p>
+<p>对齐规则并不是256KB内的都按照8Byte进行对齐，如果都按照8Byte对齐，256Kb则需要<code>256*1024 / 8 = 32768</code>个桶，还是比较多。让不同范围的按照不同的对齐规则进行对齐，对齐规则如下：</p>
+<table><tbody><tr><th style=";"><p>字节数</p></th><th style=";"><p>对齐数</p></th><th style=";"><p>自由链表下标</p></th></tr><tr><td><p>[1-128]</p></td><td><p>8 Byte</p></td><td><p>[0,16)</p></td></tr><tr><td><p>[128+1,1024]</p></td><td><p>16 Byte</p></td><td><p>[16,72)</p></td></tr><tr><td><p>[ 1024 + 1 ， 8 * 1024]</p></td><td><p>128 Byte</p></td><td><p>[72,128)</p></td></tr><tr><td><p>[8* 1024 + 1, 64 * 1024]</p></td><td><p>1024 Byte</p></td><td><p>[128,184)</p></td></tr><tr><td><p>[64*1024+1,256 * 1024 ]</p></td><td><p>8*1024 Byte</p></td><td><p>[184,208)</p></td></tr></tbody></table><p>使用上面对齐规则，桶的个数控制在了208个，也就是自由链表的下标是[0-207]。逻辑图如下：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-17.png" alt="图片"></p>
+<p>采用对齐规则后，一定会带来内碎片的问题。使用好的对齐规则，可以减少空间浪费率。空间浪费率：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-18.png" alt="图片"></p>
+<p>使用上面的对齐规则后，根据公式浪费率最大就是分子最大且分母最小的时候。</p>
+<ul>
+<li><p>比如在<code>[128+1,1024]</code>这个区间。开129字节时，浪费率最大。实际开了<code>16*9=144</code>字节。浪费了15字节。此时浪费率为10.41%。</p>
+</li>
+<li><p>在<code>[1024+1,8*1024]</code>这个区间中，开1025字节时，浪费率最大。实际开了1152字节。浪费了127字节。浪费率等于11.02%</p>
+</li>
+<li><p>在最后一个区间<code>[641024+1,256 * 1024]</code>中，开641024+1字节浪费率最大。实际开了73728字节。浪费了8211字节。浪费率为11.13%。</p>
+</li>
+</ul>
+<p>不考虑第一个区间，因为第一个区间的浪费率太大了。这里浪费率从第二区间开始。按照上面的对齐规则，空间浪费率最低。</p>
+<p>采用上面的内存对齐规则，可以控制空间浪费率到10%左右。tcmalloc实际的对齐规则比这还要复杂很多，但是基本原理是这样的，就是让浪费率最低即可。</p>
+<p>实现一个类，专门计算向上对齐规则。这里参考了tcmalloc的计算规则。</p>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">SizeClass</span>
+<span class="p">{</span>
+<span class="k">public</span><span class="o">:</span><span class="w">  </span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">MAX_BYTES</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">256</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// tcmalloc库的写法 返回实际开辟字节数</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="kr">inline</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="nf">_RoundUp</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">bytes</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">align</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">((</span><span class="n">bytes</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">align</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="o">~</span><span class="p">(</span><span class="n">align</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">//根据对象大小计算对齐规则   </span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="kr">inline</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="nf">RoundUp</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">bytes</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">assert</span><span class="p">(</span><span class="n">bytes</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">MAX_BYTES</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">bytes</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="mi">128</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">_RoundUp</span><span class="p">(</span><span class="n">bytes</span><span class="p">,</span><span class="w"> </span><span class="mi">8</span><span class="p">);</span><span class="c1">//按照8字节对齐</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">bytes</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="mi">1024</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">_RoundUp</span><span class="p">(</span><span class="n">bytes</span><span class="p">,</span><span class="w"> </span><span class="mi">16</span><span class="p">);</span><span class="c1">//按照16字节对齐</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">bytes</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">_RoundUp</span><span class="p">(</span><span class="n">bytes</span><span class="p">,</span><span class="w"> </span><span class="mi">128</span><span class="p">);</span><span class="c1">//按照128字节对齐</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">bytes</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="mi">64</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">_RoundUp</span><span class="p">(</span><span class="n">bytes</span><span class="p">,</span><span class="w"> </span><span class="mi">1024</span><span class="p">);</span><span class="c1">//按照1024字节对齐</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">bytes</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="mi">256</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">_RoundUp</span><span class="p">(</span><span class="n">bytes</span><span class="p">,</span><span class="w"> </span><span class="mi">8</span><span class="o">*</span><span class="mi">1024</span><span class="p">);</span><span class="c1">//按照8*1024字节对齐</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">else</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">assert</span><span class="p">(</span><span class="nb">false</span><span class="p">);</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="mi">-1</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">};</span>
+</code></pre></div>
+<h3>Thread Cache的实现</h3>
+<p>ThreadCache 核心就是自由链表 这里封装一个自由链表，做为Thread Cache类的成员。</p>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">FreeList</span>
+<span class="p">{</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w">  </span><span class="c1">//头插</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="n">Push</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">obj</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="o">*</span><span class="p">(</span><span class="kt">void</span><span class="o">**</span><span class="p">)</span><span class="n">obj</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_free_list</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_free_list</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">obj</span><span class="p">;</span>
+
+<span class="w">    </span><span class="o">++</span><span class="n">_size</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">//头插一段链表</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="n">PushRound</span><span class="p">(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">start</span><span class="p">,</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">end</span><span class="p">,</span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="o">*</span><span class="p">(</span><span class="kt">void</span><span class="o">**</span><span class="p">)</span><span class="n">end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_free_list</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_free_list</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">start</span><span class="p">;</span>
+
+<span class="w">    </span><span class="n">_size</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">size</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">//头删</span>
+<span class="w">  </span><span class="kt">void</span><span class="o">*</span><span class="n">Pop</span><span class="p">()</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="p">((</span><span class="kt">void</span><span class="o">**</span><span class="p">)</span><span class="n">_free_list</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">obj</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_free_list</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_free_list</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">next</span><span class="p">;</span>
+
+<span class="w">    </span><span class="o">--</span><span class="n">_size</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">obj</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w">   </span>
+
+<span class="w">  </span><span class="c1">//头删一段链表</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="n">PopRound</span><span class="p">(</span><span class="kt">void</span><span class="o">*&amp;</span><span class="w"> </span><span class="n">start</span><span class="p">,</span><span class="kt">void</span><span class="o">*&amp;</span><span class="w"> </span><span class="n">end</span><span class="p">,</span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_free_list</span><span class="p">;</span>
+<span class="w">    </span><span class="n">end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">start</span><span class="p">;</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">size</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NextObj</span><span class="p">(</span><span class="n">end</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">_free_list</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NextObj</span><span class="p">(</span><span class="n">end</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">_size</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="n">size</span><span class="p">;</span>
+<span class="w">    </span><span class="n">NextObj</span><span class="p">(</span><span class="n">end</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">IsEmpty</span><span class="p">()</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">_free_list</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">//获取当前链表最大个数</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="o">&amp;</span><span class="w"> </span><span class="n">MaxSize</span><span class="p">()</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">_max_size</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">//获取当前链表元素个数</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">Size</span><span class="p">()</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">_size</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="k">private</span><span class="o">:</span>
+<span class="w">  </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">_free_list</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">_max_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>Thread Cache类的声明。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#pragma once</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;Common.h&quot;</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">ThreadCache</span>
+<span class="p">{</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w">  </span><span class="c1">//申请内存对象</span>
+<span class="w">  </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">Allocate</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">//释放内存对象</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">Deallocate</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">ptr</span><span class="p">,</span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 从中心缓存获取对象</span>
+<span class="w">  </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="nf">FetchFromCentralCache</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">index</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 释放对象时，链表过长时，回收内存回到中心缓存</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">ListTooLong</span><span class="p">(</span><span class="n">FreeList</span><span class="o">&amp;</span><span class="w"> </span><span class="n">list</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">);</span>
+<span class="k">private</span><span class="o">:</span>
+<span class="w">  </span><span class="n">FreeList</span><span class="w"> </span><span class="n">_free_list</span><span class="p">[</span><span class="n">NFREELISTS</span><span class="p">];</span><span class="c1">//管理切分好的自由链表(哈希桶)</span>
+<span class="p">};</span>
+
+<span class="c1">//使用 __declspec(thread) 声明的变量将为每个线程创建一个独立的副本</span>
+<span class="c1">//每个线程都可以在其独立的存储空间中访问该变量，而不会影响其他线程的副本。</span>
+<span class="c1">//让这个指针维护thread cache进行内存时申请和释放</span>
+<span class="k">static</span><span class="w"> </span><span class="kr">__declspec</span><span class="p">(</span><span class="kr">thread</span><span class="p">)</span><span class="w"> </span><span class="n">ThreadCache</span><span class="o">*</span><span class="w"> </span><span class="n">tls_threadcache</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+</code></pre></div>
+<p>其中ThreadCache的属性有：</p>
+<ul>
+<li><code>FreeList _free_list[NFREELISTS]</code>:哈希桶(一共208个桶)</li>
+</ul>
+<p>ThreadCache提供的方法有：</p>
+<ul>
+<li><p><code>void* Allocate(size_t size);</code>:申请内存</p>
+</li>
+<li><p><code>Svoid Deallocate(void* ptr,size_t size);</code>:释放内存</p>
+</li>
+<li><p><code>void* FetchFromCentralCache(size_t index, size_t size);</code>:Thread Cache没有内存时，从Central Cache中获取。</p>
+</li>
+<li><p><code>void ListTooLong(FreeList&amp; list, size_t size);</code>：释放时，链表太长释放一部分到Central Cache。</p>
+</li>
+</ul>
+<h3>ThreadCache支持无锁并发访问</h3>
+<p>小于256kb的内存申请直接从ThreadCache中进行申请(如果有)。一般进程申请空间的时候，小块内存的申请更加频繁，几乎很少申请一大块空间。</p>
+<p>多线程环境下，多个线程向内存池申请内存时，不加锁和加锁的效率是两个等级的。Thread Cache在设计的时候，就是让每一个线程独享一个Thread Cache对象，这样，在申请小对象的时候，可以有效的提高效率。</p>
+<p>让ThreadCache支持无锁并发访问，就是让每个线程独立一个ThreadCache对象。需要用到线程局部存储TLS(Thread Local Storage)机制。</p>
+<h4>TLS机制：</h4>
+<ul>
+<li><p>用于在多线程程序中为每个线程分配独立的存储空间。它允许每个线程拥有自己的数据副本，这样每个线程可以在其私有存储空间中保存数据，而不会受到其他线程的影响。</p>
+</li>
+<li><p>TLS 的主要目的是解决多线程环境下的数据共享与隔离问题。在多线程程序中，如果多个线程共享同一块内存区域，那么这些线程的并发访问可能会导致数据竞争和不确定的行为。而使用 TLS 可以确保每个线程都有自己独立的数据副本，从而避免了数据共享带来的问题。</p>
+</li>
+</ul>
+<blockquote><p>TLS对象声明</p>
+</blockquote>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="kr">__declspec</span><span class="p">(</span><span class="kr">thread</span><span class="p">)</span><span class="w"> </span><span class="n">ThreadCache</span><span class="o">*</span><span class="w"> </span><span class="n">tls_threadcache</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nullptr</span><span class="p">;</span>
+</code></pre></div>
+<blockquote><p>TLS使用方法</p>
+</blockquote>
+<p>使用<code>new tls_threadcache = new ThreadCache();</code></p>
+<p>脱离new，直接使用上面实现的定长内存池进行申请</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="n">ObjectPool</span><span class="o">&lt;</span><span class="n">ThreadCache</span><span class="o">&gt;</span><span class="w"> </span><span class="n">thread_cache_pool</span><span class="p">;</span>
+<span class="n">tls_threadcache</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">thread_cache_pool</span><span class="p">.</span><span class="n">New</span><span class="p">();</span>
+</code></pre></div>
+<h3>Thread Cache申请内存</h3>
+<p>Thread Cache申请内存通过Allocate函数进行申请。实现Allocate函数。</p>
+<ul>
+<li><p>在申请内时，先根据对象大小，确定桶的位置。</p>
+</li>
+<li><p>如果桶中有内存对象时，直接从自由链表中pop一个对象返回即可。</p>
+</li>
+<li><p>时间复杂度是O(1)。并且没有锁的竞争。</p>
+</li>
+<li><p>如果桶中没有内存对象时，就从Central Cache中获取，获取的对象大小一定是经过对齐规则计算后的大小。</p>
+</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="nf">ThreadCache::Allocate</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">assert</span><span class="p">(</span><span class="n">size</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">MAX_BYTES</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">//确定桶的位置</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">SizeClass</span><span class="o">::</span><span class="n">Index</span><span class="p">(</span><span class="n">size</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">//确定对齐规则</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">align_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">SizeClass</span><span class="o">::</span><span class="n">RoundUp</span><span class="p">(</span><span class="n">size</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">//eg 申请127字节  按照8字节对齐，实际align_size = 128, index = 15。</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">_free_list</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">IsEmpty</span><span class="p">())</span><span class="c1">//空就去中心缓存获取 暂时不考虑大于256kb的情况</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">//中心缓存一次可能会多申请空间，只返回当前对齐数的大小，剩余的存到thread cache的自由链表中</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">FetchFromCentralCache</span><span class="p">(</span><span class="n">index</span><span class="p">,</span><span class="w"> </span><span class="n">align_size</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">else</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">_free_list</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">Pop</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>从Central Cache获取对象时，也是有对应的策略的。Central Cache 是多线程共享的，频繁的申请要加锁，会有锁的竞争，会降低效率的。所以，参考tcmalloc，使用一定的反馈算法来一次批量的申请内存。</p>
+<p>比如频繁的从Central Cache 中申请8Kb大小的内存时，会根据慢反馈调节算法，一次批量的申请多个大小的内存块。</p>
+<p>比如第一次申请8Kb，申请一个，第二次申请时，申请两个，返回一个，多申请的交给自由链表管理，下次再申请8kb的时候，Thread Cache的自由链表就有内存了，不用再去向Central Cache申请了。以此类推，当然，这个算法还要定一个上限，不能一下申请好几万个交给自由链表管理。上限规定，一次最多申请512个内存块，申请太多会成负担的。【这个机制和网络中的tcp协议的慢启动 机制类似】</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="nf">NumMoveSize</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">assert</span><span class="p">(</span><span class="n">size</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// [2, 512]，一次批量移动多少个对象的(慢启动)上限值</span>
+<span class="w">    </span><span class="c1">// 小对象一次批量上限高</span>
+<span class="w">    </span><span class="c1">// 小对象一次批量上限低</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">MAX_BYTES</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">size</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">num</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span>
+<span class="w">            </span><span class="n">num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">num</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">512</span><span class="p">)</span>
+<span class="w">            </span><span class="n">num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">512</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">num</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>根据慢反馈调节算法，决定了一次从Central Cache申请多少内存。如果申请到1个的话，就直接返回给Allocate即可，申请到多个，将剩余的一部分插入到自由链表中(自由链表提供PushRound()函数，可以一次插入一段链表)，将第一个内存块返回给Allocate即可。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="nf">ThreadCache::FetchFromCentralCache</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">index</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="c1">// 慢开始反馈调节算法</span>
+<span class="w">  </span><span class="c1">//NumMoveSize决定上限  </span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">batch_num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">min</span><span class="p">(</span><span class="n">_free_list</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">MaxSize</span><span class="p">(),</span><span class="n">SizeClass</span><span class="o">::</span><span class="n">NumMoveSize</span><span class="p">(</span><span class="n">size</span><span class="p">));</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">batch_num</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">_free_list</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">MaxSize</span><span class="p">())</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">_free_list</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">MaxSize</span><span class="p">()</span><span class="o">+=</span><span class="mi">1</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 从中心缓存中获取一段内存 可能会多申请 多申请的放到thread cache即可</span>
+<span class="w">  </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">actual_num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">CentralCache</span><span class="o">::</span><span class="n">GetInstace</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">FetchRangeObj</span><span class="p">(</span><span class="n">start</span><span class="p">,</span><span class="w"> </span><span class="n">end</span><span class="p">,</span><span class="w"> </span><span class="n">batch_num</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="p">);</span>
+<span class="w">  </span><span class="n">assert</span><span class="p">(</span><span class="n">actual_num</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span><span class="c1">//至少申请一个</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">actual_num</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">start</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">else</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">_free_list</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">PushRound</span><span class="p">(</span><span class="n">NextObj</span><span class="p">(</span><span class="n">start</span><span class="p">),</span><span class="w"> </span><span class="n">end</span><span class="p">,</span><span class="w"> </span><span class="n">actual_num</span><span class="w"> </span><span class="mi">-1</span><span class="w"> </span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">start</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>Thread Cache释放内存</h3>
+<p>Thread Cache申请内存通过Deallocate函数进行申请。实现Deallocate函数。</p>
+<ul>
+<li>当释放的内存小于256Kb时，直接计算对象大小对应桶的位置，插入到对应的桶中即可。</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">ThreadCache::Deallocate</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">ptr</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="c1">//根据大小确定桶的位置</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">SizeClass</span><span class="o">::</span><span class="n">Index</span><span class="p">(</span><span class="n">size</span><span class="p">);</span>
+<span class="w">  </span><span class="n">_free_list</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">Push</span><span class="p">(</span><span class="n">ptr</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">//自由链表超过批量申请的大小  还给Cetral Cache</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">_free_list</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">Size</span><span class="p">()</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">_free_list</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">MaxSize</span><span class="p">())</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">ListTooLong</span><span class="p">(</span><span class="n">_free_list</span><span class="p">[</span><span class="n">index</span><span class="p">],</span><span class="w"> </span><span class="n">size</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>Thread Cache一直回收内存，一直回收，会导致链表长度太长了，也会带来维护成本。当回收完内存时，计算一下链表长度，如果超过批量申请的大小，就还给Central Cache。</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">ThreadCache::ListTooLong</span><span class="p">(</span><span class="n">FreeList</span><span class="o">&amp;</span><span class="w"> </span><span class="n">list</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="c1">//取一段内存 给Central Cache</span>
+<span class="w">  </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="n">list</span><span class="p">.</span><span class="n">PopRound</span><span class="p">(</span><span class="n">start</span><span class="p">,</span><span class="w"> </span><span class="n">end</span><span class="p">,</span><span class="w"> </span><span class="n">list</span><span class="p">.</span><span class="n">MaxSize</span><span class="p">());</span>
+<span class="w">  </span><span class="n">CentralCache</span><span class="o">::</span><span class="n">GetInstace</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">ReleaseListToSpans</span><span class="p">(</span><span class="n">start</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<h2>Central Cache</h2>
+<h3>Central Cache设计框架</h3>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-19.png" alt="图片"></p>
+<p>Central Cache主要为Thread Cache提供服务，哈希映射规则采用的是按字节进行映射。经过一定的规则对齐后的映射。</p>
+<p>central cache的结构与thread cache是一样的，它们都是哈希桶的结构，并且它们遵循的对齐映射规则都是一样的。这样做的好处就是，当thread cache的某个桶中没有内存了，就可以直接到central cache中对应的哈希桶里去取内存就行了。</p>
+<p>Cecntral Cache的结构和Thread Cache是一样的，但是，Thread Cache是每一个线程独享的，Central Cache是多线程共享的，在整个内存池中只有一个Central Cache，再实现的时候，将其设计成为单例模式更为合理。</p>
+<p>每个线程的Thread Cache对象没有内存时都会向Central Cache进行申请，多线程环境下，要注意加锁问题。Central Cache在加锁的时候，并不是将整个Central Cache都加上锁，可以设计成为桶锁。只有当多线程同时从一个桶去申请内存时，才会有互斥的行为。比如线程1申请8Byte内存，线程2申请256kb内存，俩个线程不是从同一个桶中申请内存的，这种情况这两个线程就不用存在互斥关系，可以并发同时进行申请。这也是内存池高效的原因之一。</p>
+<p>Thead Cache的每一个桶都是对应大小的自由链表，而Central Cache的桶则是一个一个的span对象。sapn管理的是以页为单位的大块内存块。用双向带头循环链表的方式将这些span管理起来。而每个span还有自由链表对象。</p>
+<p>每个进程都有自己的进程地址空间，32位下，进程地址空间最大是2^32，也就是4Gb。而64位下，进程地址空间最大是2^64。这些地址空间，按页为单位进行划分，一页普遍是8kb。64位下，一共有<code>2^64 / 2^13 = 2^51</code>页。管理页号这里，32位下和64位下，使用不同的类型记录。32位下，<code>size_t</code>类型完全足够，但是64位下，<code>size_t</code> 类型远远不够。64位下用unsigned long long类型保存(表示无符号的 64 位整数)。</p>
+<p>存储页号，使用条件编译解决。当然，实际上不可能有这么多的页号，进程地址空间的地址是虚拟的，实际上没有这么多，64位下，2^64字节，16TB的地址空间大小，一般计算机很难有这个水平的，大公司的服务器一般才有这个配置。虚拟地址就是每个进程都“以为”自己能有16tb,但是一般普通的计算机实际根本到不了。还是根据实际的物理内存来的。尽管是虚拟的，也要按照最大的来进行维护页号。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#ifndef _WIN64</span>
+<span class="w">  </span><span class="k">typedef</span><span class="w"> </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">PAGE_ID</span><span class="p">;</span>
+<span class="cp">#elif _WIN32</span>
+<span class="w">  </span><span class="k">typedef</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">PAGE_ID</span><span class="p">;</span>
+<span class="cp">#endif </span><span class="c1">// !_WIN64</span>
+</code></pre></div>
+<h3>sapn</h3>
+<p>sapn描述是以页为单位的大块内存的</p>
+<div class="highlight"><pre><code><span></span><span class="c1">//管理以页为单位的大块内存</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">Span</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">PAGE_ID</span><span class="w"> </span><span class="n">_page_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="c1">//页号</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">_page_num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="c1">//页的数量</span>
+
+<span class="w">  </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">_prev</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">_next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">_obj_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="c1">//对象大小 </span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">_use_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">_free_list</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">_is_use</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span><span class="c1">//span对象是否被使用</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>span描述的以页为单位的大块内存，我们需要知道这块内存具体在哪一个位置，便于之后page cache进行前后页的合并，因此span结构当中会记录所管理大块内存起始页的页号。</p>
+<p>至于每一个span管理的到底是多少个页，这并不是固定的，需要根据多方面的因素来控制，因此span结构当中有一个_page_num成员，该成员就代表着该span管理的页的数量。</p>
+<p>span中对象大小属性，在释放的时候，根据地址获取页号，再根据页号获取对应的span，从sapn中获取到对象的大小，再释放的时候直接根据地址就可以确定大小了，不用再释放的时候也传对象大小。</p>
+<p>每个span管理的大块内存，都会被切成相应大小的内存块挂到当前span的自由链表中，比如8Byte哈希桶中的span，会被切成一个个8Byte大小的内存块挂到当前span的自由链表中，因此span结构中需要存储切好的小块内存的自由链表_free_list。</p>
+<p>在Page Cache中会进行合并操作，需要记录一下当前span是否正在被使用，如果正在使用就无法进行合并操作。</p>
+<p>将这些sapn对象以循环双链表组织起来，做为Central Cache的成员变量。</p>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">SpanList</span>
+<span class="p">{</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w">  </span><span class="n">SpanList</span><span class="p">()</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">_head</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">Span</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_head</span><span class="o">-&gt;</span><span class="n">_next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_head</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_head</span><span class="o">-&gt;</span><span class="n">_prev</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_head</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">Begin</span><span class="p">()</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">_head</span><span class="o">-&gt;</span><span class="n">_next</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">End</span><span class="p">()</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">_head</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="n">Insert</span><span class="p">(</span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">cur</span><span class="p">,</span><span class="w"> </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">newspan</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">assert</span><span class="p">(</span><span class="n">cur</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">_head</span><span class="p">);</span>
+<span class="w">    </span><span class="n">assert</span><span class="p">(</span><span class="n">newspan</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">prev</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cur</span><span class="o">-&gt;</span><span class="n">_prev</span><span class="p">;</span>
+<span class="w">    </span><span class="n">prev</span><span class="o">-&gt;</span><span class="n">_next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">newspan</span><span class="p">;</span>
+<span class="w">    </span><span class="n">newspan</span><span class="o">-&gt;</span><span class="n">_prev</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">prev</span><span class="p">;</span>
+<span class="w">    </span><span class="n">newspan</span><span class="o">-&gt;</span><span class="n">_next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cur</span><span class="p">;</span>
+<span class="w">    </span><span class="n">cur</span><span class="o">-&gt;</span><span class="n">_prev</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">newspan</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="n">Erase</span><span class="p">(</span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">cur</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">assert</span><span class="p">(</span><span class="n">cur</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">);</span>
+<span class="w">    </span><span class="n">assert</span><span class="p">(</span><span class="n">cur</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">_head</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">prev</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cur</span><span class="o">-&gt;</span><span class="n">_prev</span><span class="p">;</span>
+<span class="w">    </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cur</span><span class="o">-&gt;</span><span class="n">_next</span><span class="p">;</span>
+<span class="w">    </span><span class="n">prev</span><span class="o">-&gt;</span><span class="n">_next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">next</span><span class="p">;</span>
+<span class="w">    </span><span class="n">next</span><span class="o">-&gt;</span><span class="n">_prev</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">prev</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">Empty</span><span class="p">()</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">_head</span><span class="o">-&gt;</span><span class="n">_next</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">_head</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="n">PushFront</span><span class="p">(</span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">newspan</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">assert</span><span class="p">(</span><span class="n">newspan</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">);</span>
+<span class="w">    </span><span class="n">Insert</span><span class="p">(</span><span class="n">Begin</span><span class="p">(),</span><span class="w"> </span><span class="n">newspan</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">PopFront</span><span class="p">()</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">front</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_head</span><span class="o">-&gt;</span><span class="n">_next</span><span class="p">;</span>
+<span class="w">    </span><span class="n">Erase</span><span class="p">(</span><span class="n">front</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">front</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="k">private</span><span class="o">:</span>
+<span class="w">  </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">_head</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="w"> </span><span class="n">_bucket_lock</span><span class="p">;</span><span class="c1">//桶锁</span>
+<span class="p">};</span>
+</code></pre></div>
+<h3>Central Cache 实现</h3>
+<p>Central Cache在整个进程中只能存在一份，将其设计成为单例。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#pragma once</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;Common.h&quot;</span>
+<span class="c1">//单例</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">CentralCache</span>
+<span class="p">{</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="n">CentralCache</span><span class="o">*</span><span class="w"> </span><span class="n">GetInstace</span><span class="p">()</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="o">&amp;</span><span class="n">_inst</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">CentralCache</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">CentralCache</span><span class="o">&amp;</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">delete</span><span class="p">;</span>
+<span class="w">  </span><span class="n">CentralCache</span><span class="o">&amp;</span><span class="w"> </span><span class="k">operator</span><span class="o">=</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">CentralCache</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">delete</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 从中心缓存获取一定数量的对象给thread cache</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="nf">FetchRangeObj</span><span class="p">(</span><span class="kt">void</span><span class="o">*&amp;</span><span class="w"> </span><span class="n">start</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="o">*&amp;</span><span class="w"> </span><span class="n">end</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">num</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 获取一个非空的span</span>
+<span class="w">  </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="nf">GetOneSpan</span><span class="p">(</span><span class="n">SpanList</span><span class="o">&amp;</span><span class="w"> </span><span class="n">list</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">byte_size</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 将一定数量的对象释放到span对象</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">ReleaseListToSpans</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">start</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">byte_size</span><span class="p">);</span>
+
+<span class="k">private</span><span class="o">:</span>
+<span class="w">  </span><span class="n">CentralCache</span><span class="p">()</span><span class="w"> </span><span class="p">{}</span>
+<span class="w">  </span><span class="n">SpanList</span><span class="w"> </span><span class="n">_span_lists</span><span class="p">[</span><span class="n">NFREELISTS</span><span class="p">];</span><span class="w"> </span><span class="c1">// 按对齐方式映射</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="n">CentralCache</span><span class="w"> </span><span class="n">_inst</span><span class="p">;</span><span class="c1">//静态成员变量 一定要在源文件中定义 这里只是声明</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>Central Cache类主要的成员就是<code>_span_lists</code>双向循环链表。</p>
+<h3>FetchRangeObj实现</h3>
+<p>Central Cache申请内存</p>
+<ul>
+<li>当Thread Cache没有内存时，就会向Central Cache批量申请一些内存。Thread Cache 通过FetchRangeObj接口批量申请内存</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">size_t</span><span class="w"> </span><span class="nf">CentralCache::FetchRangeObj</span><span class="p">(</span><span class="kt">void</span><span class="o">*&amp;</span><span class="w"> </span><span class="n">start</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="o">*&amp;</span><span class="w"> </span><span class="n">end</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">batch_num</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="c1">//中心缓存和thread cache的哈希结构是一样的使用同样的方式确定下标</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">SizeClass</span><span class="o">::</span><span class="n">Index</span><span class="p">(</span><span class="n">size</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">//加桶锁</span>
+<span class="w">  </span><span class="n">_span_lists</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">_bucket_lock</span><span class="p">.</span><span class="n">lock</span><span class="p">();</span>
+<span class="w">  </span><span class="c1">//从哈希桶中获取span对象(还是加锁的)</span>
+<span class="w">  </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">span</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">GetOneSpan</span><span class="p">(</span><span class="n">_span_lists</span><span class="p">[</span><span class="n">index</span><span class="p">],</span><span class="w"> </span><span class="n">size</span><span class="p">);</span>
+<span class="w">  </span><span class="n">assert</span><span class="p">(</span><span class="n">span</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">);</span>
+<span class="w">  </span><span class="n">assert</span><span class="p">(</span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_free_list</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">//从Span中获取num个内存块</span>
+<span class="w">  </span><span class="c1">//span中可能不够num个 有多少申请多少 </span>
+<span class="w">  </span><span class="c1">//span可能很多 最多要batch_num个(thread cache一次批量申请的个数)</span>
+<span class="w">  </span><span class="n">start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_free_list</span><span class="p">;</span>
+<span class="w">  </span><span class="n">end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">start</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">actual_num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">NextObj</span><span class="p">(</span><span class="n">end</span><span class="p">)</span><span class="o">!=</span><span class="w"> </span><span class="k">nullptr</span><span class="w">  </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">batch_num</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">))</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NextObj</span><span class="p">(</span><span class="n">end</span><span class="p">);</span>
+<span class="w">    </span><span class="n">actual_num</span><span class="o">++</span><span class="p">;</span>
+<span class="w">    </span><span class="o">++</span><span class="n">i</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">//更新span中的free_list 和use_count</span>
+<span class="w">  </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_free_list</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NextObj</span><span class="p">(</span><span class="n">end</span><span class="p">);</span>
+<span class="w">  </span><span class="n">NextObj</span><span class="p">(</span><span class="n">end</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_use_count</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">actual_num</span><span class="p">;</span>
+<span class="w">  </span><span class="n">_span_lists</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">_bucket_lock</span><span class="p">.</span><span class="n">unlock</span><span class="p">();</span><span class="w">  </span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">actual_num</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li><p>Thread Cache向Central Cache批量申请内存时，就需要加桶锁了。</p>
+</li>
+<li><p>然后通过GetOneSpan接口从SpanList中申请span对象。</p>
+</li>
+<li><p>申请到的span对象下的内存块有两种情况分别是不足Thread Cache申请的个数。还有一种情况就是span对象下有很多个内存块，但是Thread Cache不需要这么多，最多要一次批量申请的即可。</p>
+</li>
+<li><p>当不够Thread Cache一次批量申请的个数时，有多少申请多少即可。</p>
+</li>
+<li><p>当超过Thread Cache一次批量申请的个数时，按照一次批量申请的最大个数申请即可。</p>
+</li>
+<li><p>申请完后，需要及时更新span管理的自由链表和使用计数。</p>
+</li>
+</ul>
+<p>注意： 从哈希桶中申请sapn对象时就要加桶锁了。</p>
+<h3>GetOneSpan实现</h3>
+<p>GetOnespan主要的功能是从Central Cache中的哈希桶中获取对应的span对象，如果Central Cache的哈希桶中有，直接返回即可，如果没有就需要从Page Cache中获取span对象了, 通过Page Cache的NewSpan接口获取(这个接口在Page Cache会详细介绍)。</p>
+<div class="highlight"><pre><code><span></span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="nf">CentralCache::GetOneSpan</span><span class="p">(</span><span class="n">SpanList</span><span class="o">&amp;</span><span class="w"> </span><span class="n">list</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="c1">//遍历SpanList 查找未使用的Span</span>
+<span class="w">  </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">iter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">list</span><span class="p">.</span><span class="n">Begin</span><span class="p">();</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">iter</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">list</span><span class="p">.</span><span class="n">End</span><span class="p">())</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">iter</span><span class="o">-&gt;</span><span class="n">_free_list</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">iter</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">else</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">iter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">iter</span><span class="o">-&gt;</span><span class="n">_next</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">//从pagecache中获取内存时先解锁，其他线程释放内存的时候不受影响</span>
+<span class="w">  </span><span class="n">list</span><span class="p">.</span><span class="n">_bucket_lock</span><span class="p">.</span><span class="n">unlock</span><span class="p">();</span><span class="w"> </span>
+
+<span class="w">  </span><span class="c1">//没有Span对象 去Page Cache中申请  从page cache中申请时要加锁。</span>
+<span class="w">  </span><span class="n">PageCache</span><span class="o">::</span><span class="n">GetInstance</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">_page_mtx</span><span class="p">.</span><span class="n">lock</span><span class="p">();</span>
+<span class="w">  </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">span</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">PageCache</span><span class="o">::</span><span class="n">GetInstance</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">NewSpan</span><span class="p">(</span><span class="n">SizeClass</span><span class="o">::</span><span class="n">NumMovePage</span><span class="p">(</span><span class="n">size</span><span class="p">));</span>
+<span class="w">  </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_is_use</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">  </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_obj_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">size</span><span class="p">;</span>
+<span class="w">  </span><span class="n">PageCache</span><span class="o">::</span><span class="n">GetInstance</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">_page_mtx</span><span class="p">.</span><span class="n">unlock</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">//切分的时候不用加锁  </span>
+<span class="w">  </span><span class="c1">//对span进行切分 需要知道大块内存的起始地址和大块内存的字节数</span>
+<span class="w">  </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="p">)(</span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_id</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">PAGE_SHIFT</span><span class="p">);</span><span class="c1">//页号*8kb就是起始地址</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">byte_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">PAGE_SHIFT</span><span class="p">;</span><span class="c1">//页的数量*8kb就是字节数</span>
+<span class="w">  </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">start</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">byte_size</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">//将大块内存切分成小块内存挂到自由链表下面</span>
+<span class="w">  </span><span class="c1">//尾插 头插的话地址不连续 是反的</span>
+<span class="w">  </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_free_list</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">start</span><span class="p">;</span>
+<span class="w">  </span><span class="n">start</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">size</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">tail</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_free_list</span><span class="p">;</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">start</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">end</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">NextObj</span><span class="p">(</span><span class="n">tail</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">start</span><span class="p">;</span>
+<span class="w">    </span><span class="n">tail</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">start</span><span class="p">;</span>
+<span class="w">    </span><span class="n">start</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">size</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">NextObj</span><span class="p">(</span><span class="n">tail</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">//将切好的span插入到spanlist中 (要加桶锁) 恢复锁 FetchRangeObj 会解锁</span>
+<span class="w">  </span><span class="n">list</span><span class="p">.</span><span class="n">_bucket_lock</span><span class="p">.</span><span class="n">lock</span><span class="p">();</span>
+<span class="w">  </span><span class="n">list</span><span class="p">.</span><span class="n">PushFront</span><span class="p">(</span><span class="n">span</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">span</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>如果Central Cache中有span对象，那么直接返回给FetchRangeObj即可。如果没有，从Page Cache中获取到span对象，就需要注意以下事情：</p>
+<ol>
+<li><p>从Page Cache获取span对象的时候，应该把桶锁先解除了。因为Central Cache是多线程共享的临界资源。比如线程1申请8kb，内存时，Thread Cache没有，就需要加桶锁向Central Cache中申请。如果此时线程2正好释放8kb内存时，由于线程2的8kb自由链表太长，需要还给Central Cache。遇到这种情况时，如果线程1不解锁，线程2释放内存时就会阻塞挂起，理论上线程2不应该被挂起。所以再向Page Cahce申请内存时，应该先解锁。等从Page Cache申请完内存后，把申请到的span需要插入到SpanList时再把锁恢复了。</p>
+</li>
+<li><p>从Page Cache申请到span对象后，需要把sapn管理的大块内存进行切分，切分成为申请对象大小对应的大小内存块插入到该span的自由链表下(说的比较别扭一点了，简单说就是比如申请8kb时，把span管理的大块内存块切分成8kb大小的内存块挂到自由链表下）。</p>
+</li>
+</ol>
+<p>具体得切分逻辑如下：</p>
+<p>进行切分得时候不用加锁，因为其他线程不会执行到这得。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-20.png" alt="图片"></p>
+<div class="highlight"><pre><code><span></span><span class="c1">//切分的时候不用加锁  </span>
+<span class="c1">//对span进行切分 需要知道大块内存的起始地址和大块内存的字节数</span>
+<span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="p">)(</span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_id</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">PAGE_SHIFT</span><span class="p">);</span><span class="c1">//页号*8kb就是起始地址</span>
+<span class="kt">size_t</span><span class="w"> </span><span class="n">byte_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">PAGE_SHIFT</span><span class="p">;</span><span class="c1">//页的数量*8kb就是字节数</span>
+<span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">start</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">byte_size</span><span class="p">;</span>
+<span class="c1">//将大块内存切分成小块内存挂到自由链表下面</span>
+<span class="c1">//尾插 头插的话地址不连续 是反的</span>
+<span class="n">span</span><span class="o">-&gt;</span><span class="n">_free_list</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">start</span><span class="p">;</span>
+<span class="n">start</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">size</span><span class="p">;</span>
+<span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">tail</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_free_list</span><span class="p">;</span>
+<span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">start</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">end</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">        </span><span class="n">NextObj</span><span class="p">(</span><span class="n">tail</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">start</span><span class="p">;</span>
+<span class="w">        </span><span class="n">tail</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">start</span><span class="p">;</span>
+<span class="w">        </span><span class="n">start</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">size</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="n">NextObj</span><span class="p">(</span><span class="n">tail</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+</code></pre></div>
+<h3>ReleaseListToSpans实现</h3>
+<p>ReleaseListToSpans主要功能是把Thread Cache回收回来得内存存放到对应span对象下得自由链表中。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">CentralCache::ReleaseListToSpans</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">start</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">SizeClass</span><span class="o">::</span><span class="n">Index</span><span class="p">(</span><span class="n">size</span><span class="p">);</span>
+<span class="w">  </span><span class="n">_span_lists</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">_bucket_lock</span><span class="p">.</span><span class="n">lock</span><span class="p">();</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">start</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">//把内存块挂到对应的span对象中 需要知道内存块和span的映射关系</span>
+<span class="w">    </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">span</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">PageCache</span><span class="o">::</span><span class="n">GetInstance</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">MapObjectToSpan</span><span class="p">(</span><span class="n">start</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NextObj</span><span class="p">(</span><span class="n">start</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">//头插到sapn下的freelist中</span>
+<span class="w">    </span><span class="o">*</span><span class="p">(</span><span class="kt">void</span><span class="o">**</span><span class="p">)</span><span class="n">start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_free_list</span><span class="p">;</span>
+<span class="w">    </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_free_list</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">start</span><span class="p">;</span>
+<span class="w">    </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_use_count</span><span class="o">--</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">//sapn下的所有小块内存都回来了 还给pagecache 进行合并 解决内存碎片问题</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_use_count</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">_span_lists</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">Erase</span><span class="p">(</span><span class="n">span</span><span class="p">);</span>
+<span class="w">      </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_free_list</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">      </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_prev</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+
+<span class="w">      </span><span class="n">_span_lists</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">_bucket_lock</span><span class="p">.</span><span class="n">unlock</span><span class="p">();</span>
+<span class="w">      </span><span class="n">PageCache</span><span class="o">::</span><span class="n">GetInstance</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">_page_mtx</span><span class="p">.</span><span class="n">lock</span><span class="p">();</span>
+<span class="w">      </span><span class="n">PageCache</span><span class="o">::</span><span class="n">GetInstance</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">ReleaseSpanToPageCache</span><span class="p">(</span><span class="n">span</span><span class="p">);</span>
+<span class="w">      </span><span class="n">PageCache</span><span class="o">::</span><span class="n">GetInstance</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">_page_mtx</span><span class="p">.</span><span class="n">unlock</span><span class="p">();</span>
+<span class="w">      </span><span class="n">_span_lists</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">_bucket_lock</span><span class="p">.</span><span class="n">lock</span><span class="p">();</span><span class="c1">//恢复锁</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">next</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">_span_lists</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">_bucket_lock</span><span class="p">.</span><span class="n">unlock</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li><p>回收得时候根据自由链表得起始地址，将其插入到对应span下得自由链表即可。同时插入的时候也要加对应得桶锁。</p>
+</li>
+<li><p>将内存插入到span对象时，需要知道内存块和span的映射关系。就是哪个span管理的这块内存(这个哈希映射是通过Page Cache的MapObjectToSpan接口获取的。他们的映射关系在Page Cache申请span对象时就确定的，在Page Cache中会详细介绍)。</p>
+</li>
+<li><p>当span下的自由链表的小块内存都回收回来的时候，就把这个span对象交给Page Cache进行合并，来解决内存碎片问题(外碎片问题)。</p>
+</li>
+<li><p>交给Page Cache合并的时候，也可以把锁先解除了，这样其他线程从Central Cache申请内存时就不会阻塞了(其他span还有内存，一定先把这个span拿出来再释放锁)。</p>
+</li>
+<li><p>同时Page Cache合并内存时，则需要加锁(这个锁并不是桶锁)。</p>
+</li>
+</ul>
+<h2>Page Cache</h2>
+<h3>Page Cache 设计框架：</h3>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-21.png" alt="图片"></p>
+<p>Page Cache是一个哈希桶的结构。每个桶下面都是一个个span对象。Page Cache主要向Central Cache提供服务，直接管理SpanList向Central Cache提供span对象即可。</p>
+<p>整个Page Cache又是以页为单位来进行映射的。比如1页的映射到0号桶。128页映射到127号桶。这样映射的时候需要注意下标位置。可以多开一个空间，0-129号下标，第一个桶不用，让1页的映射到1号桶，2页的射到2号桶，依次类推。更加简单。</p>
+<p>当前内存池支持单个对象最大是256Kb,128页刚好可以被切分成为4个256Kb对象,所以128页完全足够.</p>
+<h3>Page Cache实现</h3>
+<p>整个进程中只能存在一个Page Cache，将Page Cache设计成为单例。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#pragma once</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;Common.h&quot;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;ObjectPool.h&quot;</span>
+<span class="c1">//单例</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">PageCache</span>
+<span class="p">{</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w">  </span><span class="n">PageCache</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">PageCache</span><span class="o">&amp;</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">delete</span><span class="p">;</span>
+<span class="w">  </span><span class="n">PageCache</span><span class="o">&amp;</span><span class="w"> </span><span class="k">operator</span><span class="o">=</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">PageCache</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">delete</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">//获取单例对象</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="n">PageCache</span><span class="o">*</span><span class="w"> </span><span class="nf">GetInstance</span><span class="p">()</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="o">&amp;</span><span class="n">_inst</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">//获取size页的Span给中心缓存</span>
+<span class="w">  </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="nf">NewSpan</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 获取从对象到span的映射</span>
+<span class="w">  </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="nf">MapObjectToSpan</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">obj</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 释放空闲span回到Pagecache，并合并相邻的span</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">ReleaseSpanToPageCache</span><span class="p">(</span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">span</span><span class="p">);</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="w"> </span><span class="n">_page_mtx</span><span class="p">;</span>
+<span class="k">private</span><span class="o">:</span>
+<span class="w">  </span><span class="n">PageCache</span><span class="p">()</span><span class="w"> </span><span class="p">{}</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="n">PageCache</span><span class="w"> </span><span class="n">_inst</span><span class="p">;</span><span class="c1">//只是声明</span>
+<span class="w">  </span><span class="n">SpanList</span><span class="w"> </span><span class="n">_span_lsit</span><span class="p">[</span><span class="n">PAGE_NUMS</span><span class="p">];</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">unordered_map</span><span class="o">&lt;</span><span class="n">PAGE_ID</span><span class="p">,</span><span class="w"> </span><span class="n">Span</span><span class="o">*&gt;</span><span class="w"> </span><span class="n">_id_span_map</span><span class="p">;</span>
+<span class="w">  </span><span class="n">ObjectPool</span><span class="o">&lt;</span><span class="n">Span</span><span class="o">&gt;</span><span class="w"> </span><span class="n">_span_pool</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>其中Page Cache的属性有：</p>
+<ul>
+<li><p><code>static PageCache _inst;</code>:单例对象。</p>
+</li>
+<li><p><code>_span_lsit[PAGE_NUMS];</code>:管理span对象的双向循环的链表。</p>
+</li>
+<li><p><code>std::unordered_map&lt;PAGE_ID, Span*&gt; _id_span_map;</code>：建立span对象和页号的映射关系，为了后续合并进行查找。</p>
+</li>
+<li><p><code>ObjectPool&lt;Span&gt; _span_pool;</code>:为了脱离malloc和new，直接从上面实现的定长内存池中申请。</p>
+</li>
+</ul>
+<p>Page Cache提供的方法有：</p>
+<ul>
+<li><p><code>static PageCache* GetInstance()</code>:获取单例对象。</p>
+<p><em>` Span</em> NewSpan实现(size_t size)`:获取size页给Central Cache。</p>
+</li>
+<li><p><code>Span* MapObjectToSpan(void* obj)</code>;:获取页号和span对象的映射关系。</p>
+</li>
+<li><p><code>void ReleaseSpanToPageCache(Span* span)</code>;释放空间，并且进行合并相邻的span对象。</p>
+</li>
+</ul>
+<h3>NewSpan实现</h3>
+<p>NewSpan的主要功能是向Central Cache的GetOneSpan函数获取span对象的。</p>
+<p>当进程申请大于128页的内存时，就不会经过Thread Cache 和 Central Cache，直接向PageCache申请即可。而PageCache在申请时，直接从堆区申请即可。</p>
+<p>从堆区申请按页为单位进行申请，申请到大块内存后，交给span对象进行管理。</p>
+<p>当小于128页时，就会从对应的桶下进行查找，如果有就返回，没有就去下一个桶进行查找,，直到遍历完整个哈希表后都没有，就去堆区申请。</p>
+<p>当去下一个桶查找时发现有的时候，就进行切分。比如申请5页的，遍历到10页后发现有未使用的span对象。就把这个10页的span进行切分，切分成两个5页的，一个返回给Central Cache，一个挂到5页的桶下面管理起来即可。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">//获取一个size页的span</span>
+<span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="nf">PageCache::NewSpan</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">size</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">PAGE_NUMS</span><span class="w"> </span><span class="mi">-1</span><span class="p">)</span><span class="c1">//大于128页 </span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">SystemAlloc</span><span class="p">(</span><span class="n">size</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">//申请的内存交给span管理</span>
+<span class="w">    </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">span</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_span_pool</span><span class="p">.</span><span class="n">New</span><span class="p">();</span>
+<span class="w">    </span><span class="c1">//根据地址确定页号</span>
+<span class="w">    </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">PAGE_ID</span><span class="p">)</span><span class="n">ptr</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">PAGE_SHIFT</span><span class="p">;</span>
+<span class="w">    </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">size</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_id_span_map</span><span class="p">[</span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_id</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">span</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_id_span_map</span><span class="p">[</span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_id</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">span</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">span</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">//SpanList中有就返回 没有就从堆中申请</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">_span_lsit</span><span class="p">[</span><span class="n">size</span><span class="p">].</span><span class="n">Empty</span><span class="p">())</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">//建立id和span的映射关系</span>
+<span class="w">    </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">kspan</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_span_lsit</span><span class="p">[</span><span class="n">size</span><span class="p">].</span><span class="n">PopFront</span><span class="p">();</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">PAGE_ID</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">kspan</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">_id_span_map</span><span class="p">[</span><span class="n">kspan</span><span class="o">-&gt;</span><span class="n">_page_id</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kspan</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">kspan</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">//检查下一个桶有没有</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">size</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">PAGE_NUMS</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">_span_lsit</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">Empty</span><span class="p">())</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">//切分</span>
+<span class="w">      </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">nspan</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_span_lsit</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">PopFront</span><span class="p">();</span>
+<span class="w">      </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">kspan</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_span_pool</span><span class="p">.</span><span class="n">New</span><span class="p">();</span>
+
+<span class="w">      </span><span class="n">kspan</span><span class="o">-&gt;</span><span class="n">_page_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nspan</span><span class="o">-&gt;</span><span class="n">_page_id</span><span class="p">;</span>
+<span class="w">      </span><span class="n">kspan</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">size</span><span class="p">;</span>
+
+<span class="w">      </span><span class="n">nspan</span><span class="o">-&gt;</span><span class="n">_page_id</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">size</span><span class="p">;</span>
+<span class="w">      </span><span class="n">nspan</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="n">size</span><span class="p">;</span>
+<span class="w">      </span><span class="c1">//将切分剩余的页头插到对应的桶下面</span>
+<span class="w">      </span><span class="n">_span_lsit</span><span class="p">[</span><span class="n">nspan</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="p">].</span><span class="n">PushFront</span><span class="p">(</span><span class="n">nspan</span><span class="p">);</span>
+<span class="w">      </span><span class="c1">//建立nspan首尾页号的映射关系 方便page cache回收内存时进行合并查找</span>
+<span class="w">      </span><span class="n">_id_span_map</span><span class="p">[</span><span class="n">nspan</span><span class="o">-&gt;</span><span class="n">_page_id</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nspan</span><span class="p">;</span>
+<span class="w">      </span><span class="n">_id_span_map</span><span class="p">[</span><span class="n">nspan</span><span class="o">-&gt;</span><span class="n">_page_id</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">nspan</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nspan</span><span class="p">;</span>
+<span class="w">      </span><span class="c1">//建立id和span的映射关系</span>
+<span class="w">      </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">PAGE_ID</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">kspan</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span>
+<span class="w">      </span><span class="p">{</span>
+<span class="w">        </span><span class="n">_id_span_map</span><span class="p">[</span><span class="n">kspan</span><span class="o">-&gt;</span><span class="n">_page_id</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kspan</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">kspan</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">//从堆区申请</span>
+<span class="w">  </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">span</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_span_pool</span><span class="p">.</span><span class="n">New</span><span class="p">();</span>
+<span class="w">  </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">SystemAlloc</span><span class="p">(</span><span class="n">PAGE_NUMS</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">//根据地址确定页号  地址除8*1024即可(一页8kb)</span>
+<span class="w">  </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">PAGE_ID</span><span class="p">)</span><span class="n">ptr</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">PAGE_SHIFT</span><span class="p">;</span>
+<span class="w">  </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">PAGE_NUMS</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">//插入到128号桶下</span>
+<span class="w">  </span><span class="n">_span_lsit</span><span class="p">[</span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="p">].</span><span class="n">PushFront</span><span class="p">(</span><span class="n">span</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">//切分 递归调用自己进行切分即可，不用再写切分逻辑了</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">NewSpan</span><span class="p">(</span><span class="n">size</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>注意:</p>
+<p>Page Cache 申请内存</p>
+<ul>
+<li><p>当central cache向page cache申请内存时，page cache先检查对应位置有没有span，如果没有则向更大页寻找一个span，如果找到则分裂成两个。比如：申请的是4page，4page后 面没有挂span，则向后面寻找更大的span，假设在10page位置找到一个span，则将 10page span分裂为一个4page span和一个6page span。</p>
+</li>
+<li><p>如果找到128 page都没有合适的span，则向系统使用mmap、brk或者是VirtualAlloc等方式 申请128page span挂在自由链表中，再重复1中的过程。</p>
+</li>
+</ul>
+<p>获取页号时只能根据地址来确定页号。PageCache申请内存时都以页为单位从堆区获取。堆区申请时返回的是页的起始地址，这就涉及到如何从地址转换到页。</p>
+<p>假设申请到的地址是0x00120000，他对应的页号就是0x00120000 除以8Kb(除8Kb直接右移13位即可)对应的是144页。</p>
+<p>144页存放的地址就是0x00120000到0x00122000。这8kb的地址。(2000是16进制，转10进制就是8192)。</p>
+<p>申请到的内存要与span建立映射关系，便于删除时进行合并操作。</p>
+<p>当整个PageCache 没有对应的内存大小时，从堆区进行申请后，要进行切分操作。比如第一次申请8页大小时，整个PageCache是没有内存的，直接从堆区申请128页的内存，这时就需要切分。将128页的内存切分为一个8页的返回给Central Cache，剩余的120页挂到120号桶下即可。切分的时候直接递归调用自己即可，不用再写切分逻辑。</p>
+<h3>MapObjectToSpan实现：</h3>
+<p>MapObjectToSpan函数就是获取页号与管理该页span对象的映射关系。方便后续进行合并查找。</p>
+<p>获取页号时，同样也需要通过地址确定页号。确定完页号后，在<code>unordered_map</code>中查找该span对象即可。</p>
+<div class="highlight"><pre><code><span></span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="nf">PageCache::MapObjectToSpan</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">obj</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">unique_lock</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="o">&gt;</span><span class="w"> </span><span class="n">lock</span><span class="p">(</span><span class="n">_page_mtx</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">//根据地址获取页号</span>
+<span class="w">  </span><span class="n">PAGE_ID</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">((</span><span class="n">PAGE_ID</span><span class="p">)</span><span class="n">obj</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">PAGE_SHIFT</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_id_span_map</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">id</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">ret</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">_id_span_map</span><span class="p">.</span><span class="n">end</span><span class="p">())</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">ret</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">else</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>ReleaseSpanToPageCache</h3>
+<p>释放空间，并且进行合并相邻的span对象。</p>
+<p>释放空间的时候，根据释放对象大小确定释放规则。</p>
+<ul>
+<li><p>如果大于128页。整个内存池无法管理，直接还给堆区。</p>
+</li>
+<li><p>小于128页的，交给内存池进行管理，方便下次申请小于128页的内存，直接从内存池拿即可，不用再从堆区申请，提高整个申请效率。</p>
+</li>
+</ul>
+<p>Central Cache把内存块还给PageCache的时候，要把小块内存合并成大块内存，解决内存碎片问题。</p>
+<ul>
+<li><p>合并的时候，以向前合并为例。向后合并和向前合并的逻辑是一样的。先找到前一页的页号，在哈希表中查找到管理对应页的span对象。</p>
+</li>
+<li><p>合并的时候，前一页span对象必须没有在被使用才可以合并，并且，当前页和前一页的页数不能超过128页，整个内存池只在设计的时候只管理小于128页的内存对象。</p>
+</li>
+<li><p>比如当前对象管理的是一个5页的大小。页号为144页，先找到前一页143页。前一页是一个4页大小的sapn对象管理，并且未被使用，就可以将这俩个合并成为一个7页的。然后继续向前合并，直到不能合并为止。</p>
+</li>
+<li><p>合并的时候只需要修改对应的页数和页号(向后合并的时候不需要更新页号，因为向后合并起始页号不会改变)。每次合并完后，将合并的span从管理span的SpanList中删除即可。</p>
+</li>
+<li><p>合并成一个大块内存后，将合并好的span插入到对应的SpanList中管理起来，然后更新页号和span的映射关系即可。这样下次申请大块内存时，就能减少内存碎片的问题了。</p>
+</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-22.png" alt="图片"></p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">PageCache::ReleaseSpanToPageCache</span><span class="p">(</span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">span</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">size</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">PAGE_NUMS</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">//根据页号计算地址</span>
+<span class="w">    </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">)(</span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_id</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">PAGE_SHIFT</span><span class="p">);</span>
+<span class="w">    </span><span class="n">SystemFree</span><span class="p">(</span><span class="n">ptr</span><span class="p">);</span>
+<span class="w">    </span><span class="n">_span_pool</span><span class="p">.</span><span class="n">Delete</span><span class="p">(</span><span class="n">span</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">//向前合并</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">PAGE_ID</span><span class="w"> </span><span class="n">prev_span_page_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_id</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_id_span_map</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">prev_span_page_id</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">ret</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">_id_span_map</span><span class="p">.</span><span class="n">end</span><span class="p">())</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">prev_span</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ret</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">prev_span</span><span class="o">-&gt;</span><span class="n">_is_use</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">prev_span</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">PAGE_NUMS</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">//合并</span>
+<span class="w">    </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">prev_span</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="p">;</span>
+<span class="w">    </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">prev_span</span><span class="o">-&gt;</span><span class="n">_page_id</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_span_lsit</span><span class="p">[</span><span class="n">prev_span</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="p">].</span><span class="n">Erase</span><span class="p">(</span><span class="n">prev_span</span><span class="p">);</span>
+<span class="w">    </span><span class="n">_span_pool</span><span class="p">.</span><span class="n">Delete</span><span class="p">(</span><span class="n">prev_span</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">//向后合并</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">PAGE_ID</span><span class="w"> </span><span class="n">next_span_page_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_id</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="p">;</span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_id_span_map</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">next_span_page_id</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">ret</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">_id_span_map</span><span class="p">.</span><span class="n">end</span><span class="p">())</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">next_span</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ret</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">next_span</span><span class="o">-&gt;</span><span class="n">_is_use</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">next_span</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">PAGE_NUMS</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">//合并</span>
+<span class="w">    </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">next_span</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_span_lsit</span><span class="p">[</span><span class="n">next_span</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="p">].</span><span class="n">Erase</span><span class="p">(</span><span class="n">next_span</span><span class="p">);</span>
+<span class="w">    </span><span class="n">_span_pool</span><span class="p">.</span><span class="n">Delete</span><span class="p">(</span><span class="n">span</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">//将合并好的插入到对应的页号下</span>
+<span class="w">  </span><span class="n">_span_lsit</span><span class="p">[</span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="p">].</span><span class="n">PushFront</span><span class="p">(</span><span class="n">span</span><span class="p">);</span>
+<span class="w">  </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_is_use</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">//更新页的首尾映射关系</span>
+<span class="w">  </span><span class="n">_id_span_map</span><span class="p">[</span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_id</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">span</span><span class="p">;</span>
+<span class="w">  </span><span class="n">_id_span_map</span><span class="p">[</span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_id</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_num</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">span</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Page Cache释放内存</p>
+<ul>
+<li>如果central cache 释放一个span对象，依次寻找span前后的页号的span，看是否可以合并。可以合并就继续向前或者向后进行合并，这样就可以将切小的内存块合并成大的span。可以有效的减少内存碎片。</li>
+</ul>
+<p>释放内存到堆区时，是以页为单位进行释放的，需要根据页号确定地址，比如144页，144页左移13位(*8Kb)就能确定144页的起始地址了。</p>
+<h2>性能测试</h2>
+<p>内存池对比malloc函数进行对比。同时启动相同数量的线程，执行一样的轮次进行申请释放。比如同时启动四个线程，并发执行10000轮次，每次执行申请释放内存50次。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="cpf">&quot;ConcurrentAlloc.h&quot;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;atomic&gt;</span>
+
+<span class="c1">// ntimes 一轮申请和释放内存的次数</span>
+<span class="c1">// rounds 轮次</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">BenchmarkMalloc</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">ntimes</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">nworks</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">rounds</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="o">&gt;</span><span class="w"> </span><span class="n">vthread</span><span class="p">(</span><span class="n">nworks</span><span class="p">);</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">atomic</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">malloc_costtime</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">atomic</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">free_costtime</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">k</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">k</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">nworks</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">k</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">vthread</span><span class="p">[</span><span class="n">k</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="p">([</span><span class="o">&amp;</span><span class="p">,</span><span class="w"> </span><span class="n">k</span><span class="p">]()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">void</span><span class="o">*&gt;</span><span class="w"> </span><span class="n">v</span><span class="p">;</span>
+<span class="w">      </span><span class="n">v</span><span class="p">.</span><span class="n">reserve</span><span class="p">(</span><span class="n">ntimes</span><span class="p">);</span>
+
+<span class="w">      </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">rounds</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">j</span><span class="p">)</span>
+<span class="w">      </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">size_t</span><span class="w"> </span><span class="n">begin1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock</span><span class="p">();</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">ntimes</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="n">v</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">malloc</span><span class="p">(</span><span class="mi">16</span><span class="p">));</span>
+<span class="w">          </span><span class="c1">//v.push_back(malloc((16 + i) % 8192 + 1));</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="kt">size_t</span><span class="w"> </span><span class="n">end1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock</span><span class="p">();</span>
+
+<span class="w">        </span><span class="kt">size_t</span><span class="w"> </span><span class="n">begin2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock</span><span class="p">();</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">ntimes</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="n">free</span><span class="p">(</span><span class="n">v</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="kt">size_t</span><span class="w"> </span><span class="n">end2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock</span><span class="p">();</span>
+<span class="w">        </span><span class="n">v</span><span class="p">.</span><span class="n">clear</span><span class="p">();</span>
+
+<span class="w">        </span><span class="n">malloc_costtime</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="p">(</span><span class="n">end1</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">begin1</span><span class="p">);</span>
+<span class="w">        </span><span class="n">free_costtime</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="p">(</span><span class="n">end2</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">begin2</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">vthread</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">t</span><span class="p">.</span><span class="n">join</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;%u个线程并发执行%u轮次，每轮次malloc %u次: 花费：%zu ms</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">nworks</span><span class="p">,</span><span class="w"> </span><span class="n">rounds</span><span class="p">,</span><span class="w"> </span><span class="n">ntimes</span><span class="p">,</span><span class="w"> </span><span class="n">malloc_costtime</span><span class="p">.</span><span class="n">load</span><span class="p">());</span>
+
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;%u个线程并发执行%u轮次，每轮次free %u次: 花费：%u ms</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">nworks</span><span class="p">,</span><span class="w"> </span><span class="n">rounds</span><span class="p">,</span><span class="w"> </span><span class="n">ntimes</span><span class="p">,</span><span class="w"> </span><span class="n">free_costtime</span><span class="p">.</span><span class="n">load</span><span class="p">());</span>
+
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;%u个线程并发malloc&amp;free %u次，总计花费：%u ms</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">nworks</span><span class="p">,</span><span class="w"> </span><span class="n">nworks</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">rounds</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">ntimes</span><span class="p">,</span><span class="w"> </span><span class="n">malloc_costtime</span><span class="p">.</span><span class="n">load</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">free_costtime</span><span class="p">.</span><span class="n">load</span><span class="p">());</span>
+<span class="p">}</span>
+
+<span class="c1">// ntimes 一轮申请和释放内存的次数</span>
+<span class="c1">// rounds 轮次</span>
+<span class="c1">// 单轮次申请释放次数 线程数 轮次</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">BenchmarkConcurrentMalloc</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">ntimes</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">nworks</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">rounds</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="o">&gt;</span><span class="w"> </span><span class="n">vthread</span><span class="p">(</span><span class="n">nworks</span><span class="p">);</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">atomic</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">malloc_costtime</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">atomic</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">free_costtime</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">k</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">k</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">nworks</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">k</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">vthread</span><span class="p">[</span><span class="n">k</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="p">([</span><span class="o">&amp;</span><span class="p">]()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">void</span><span class="o">*&gt;</span><span class="w"> </span><span class="n">v</span><span class="p">;</span>
+<span class="w">      </span><span class="n">v</span><span class="p">.</span><span class="n">reserve</span><span class="p">(</span><span class="n">ntimes</span><span class="p">);</span>
+
+<span class="w">      </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">rounds</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">j</span><span class="p">)</span>
+<span class="w">      </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">size_t</span><span class="w"> </span><span class="n">begin1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock</span><span class="p">();</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">ntimes</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="n">v</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">ConcurrentAlloc</span><span class="p">(</span><span class="mi">16</span><span class="p">));</span>
+<span class="w">          </span><span class="c1">//v.push_back(ConcurrentAlloc((16 + i) % 8192 + 1));</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="kt">size_t</span><span class="w"> </span><span class="n">end1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock</span><span class="p">();</span>
+
+<span class="w">        </span><span class="kt">size_t</span><span class="w"> </span><span class="n">begin2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock</span><span class="p">();</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">ntimes</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="n">ConcurrentFree</span><span class="p">(</span><span class="n">v</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="kt">size_t</span><span class="w"> </span><span class="n">end2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock</span><span class="p">();</span>
+<span class="w">        </span><span class="n">v</span><span class="p">.</span><span class="n">clear</span><span class="p">();</span>
+
+<span class="w">        </span><span class="n">malloc_costtime</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="p">(</span><span class="n">end1</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">begin1</span><span class="p">);</span>
+<span class="w">        </span><span class="n">free_costtime</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="p">(</span><span class="n">end2</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">begin2</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">vthread</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">t</span><span class="p">.</span><span class="n">join</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;%u个线程并发执行%u轮次，每轮次concurrent alloc %u次: 花费：%u ms</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">nworks</span><span class="p">,</span><span class="w"> </span><span class="n">rounds</span><span class="p">,</span><span class="w"> </span><span class="n">ntimes</span><span class="p">,</span><span class="w"> </span><span class="n">malloc_costtime</span><span class="p">.</span><span class="n">load</span><span class="p">());</span>
+
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;%u个线程并发执行%u轮次，每轮次concurrent dealloc %u次: 花费：%u ms</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">nworks</span><span class="p">,</span><span class="w"> </span><span class="n">rounds</span><span class="p">,</span><span class="w"> </span><span class="n">ntimes</span><span class="p">,</span><span class="w"> </span><span class="n">free_costtime</span><span class="p">.</span><span class="n">load</span><span class="p">());</span>
+
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;%u个线程并发concurrent alloc&amp;dealloc %u次，总计花费：%u ms</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">nworks</span><span class="p">,</span><span class="w"> </span><span class="n">nworks</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">rounds</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">ntimes</span><span class="p">,</span><span class="w"> </span><span class="n">malloc_costtime</span><span class="p">.</span><span class="n">load</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">free_costtime</span><span class="p">.</span><span class="n">load</span><span class="p">());</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">n</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">50</span><span class="p">;</span>
+<span class="w">  </span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;==========================================================&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">endl</span><span class="p">;</span>
+<span class="w">  </span><span class="n">BenchmarkConcurrentMalloc</span><span class="p">(</span><span class="n">n</span><span class="p">,</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span><span class="w"> </span><span class="mi">10000</span><span class="p">);</span>
+<span class="w">  </span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">endl</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">endl</span><span class="p">;</span>
+
+<span class="w">  </span><span class="n">BenchmarkMalloc</span><span class="p">(</span><span class="n">n</span><span class="p">,</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span><span class="w"> </span><span class="mi">10000</span><span class="p">);</span>
+<span class="w">  </span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;==========================================================&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">endl</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>运行结果：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-23.png" alt="图片"></p>
+<p>嗯？内存池的效率还不如malloc。用性能检测工具检测一下，看哪里的性能太差。这里使用vs自带的性能检测工具。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-24.png" alt="图片"></p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-25.png" alt="图片"></p>
+<p>选择这个选项，可以查看每个函数调用的时间，就可以进一步定位问题了。</p>
+<p>通过这个检测工具发现，释放的时候获取页号和span对象的这个函数占用时间最长。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-26.png" alt="图片"></p>
+<p>进入MapObjectToSpan函数后，发现，消耗最多的是加锁问题。因为这里使用了STL中的<code>unordered_map</code>进行映射的。而STL本身是线程不安全的，必须要加锁访问。(<code>unordered_map</code>底层是哈希表，会发生动态扩容，扩容的时候必须要加锁，而map底层是红黑树，红黑树涉及到旋转问题，也必须要加锁)</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-27.png" alt="图片"></p>
+<p>解决这个问题，参考tcmalloc使用基数树进行优化。基数树本质解决的是扩容问题，让哈希表底层是固定的，不会发生动态扩容。这样，再访问时就不用担心其他线程插入数据发发生扩容，而获取到"脏数据"的问题。</p>
+<h2>使用基数树优化</h2>
+<p>基数树可以做到获取映射时，无锁访问。基数树实际采用的就是直接定址法，每一个页号对应span对象的地址就存储数组中在以该页号为下标的位置。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-28.png" alt="图片"></p>
+<p>每一个页都需要映射一个sapn对象，这样在32位下，一页8kb计算，一共有2^19个页。一个地址4个字节，也就是存储他们的映射关系就需要2^19*4字节。即2Mb的空间。消耗的资源还可以。</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="kt">int</span><span class="w"> </span><span class="n">BITS</span><span class="o">&gt;</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">TCMalloc_PageMap1</span>
+<span class="p">{</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w">  </span><span class="k">typedef</span><span class="w"> </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">Number</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">explicit</span><span class="w"> </span><span class="n">TCMalloc_PageMap1</span><span class="p">()</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">BITS</span><span class="p">;</span><span class="c1">//需要开辟数组的大小</span>
+<span class="w">    </span><span class="n">_array</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="o">**</span><span class="p">)</span><span class="n">SystemAlloc</span><span class="p">(</span><span class="n">size</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">PAGE_SHIFT</span><span class="p">);</span>
+<span class="w">    </span><span class="n">memset</span><span class="p">(</span><span class="n">_array</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">get</span><span class="p">(</span><span class="n">Number</span><span class="w"> </span><span class="n">k</span><span class="p">)</span><span class="w"> </span><span class="k">const</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">k</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">BITS</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">_array</span><span class="p">[</span><span class="n">k</span><span class="p">];</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="n">set</span><span class="p">(</span><span class="n">Number</span><span class="w"> </span><span class="n">k</span><span class="p">,</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">v</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">assert</span><span class="p">(</span><span class="n">k</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">BITS</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="w">    </span><span class="n">_array</span><span class="p">[</span><span class="n">k</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">v</span><span class="p">;</span><span class="c1">//建立映射</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="k">private</span><span class="o">:</span>
+<span class="w">  </span><span class="kt">void</span><span class="o">**</span><span class="w"> </span><span class="n">_array</span><span class="p">;</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">LENGTH</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">BITS</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>基数树采用非类型模板参数，对于32位系统，PageCache创建哈希表对象时，直接传32-13即可。就是19。就是页个数的次方。(也可以直接固定死)<code>TCMalloc_PageMap1&lt;32 - PAGE_SHIFT&gt; _id_span_map;</code></p>
+<p>使用基数树替换<code>unordered_map</code>。建立映射时，调用set即可，获取映射关系时调用get即可。</p>
+<p>比如建立span下的页号和span的映射关系:</p>
+<div class="highlight"><pre><code><span></span><span class="n">_id_span_map</span><span class="p">.</span><span class="n">set</span><span class="p">(</span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_id</span><span class="p">,</span><span class="n">span</span><span class="p">);</span>
+</code></pre></div>
+<p>获取页号和span的关系：</p>
+<div class="highlight"><pre><code><span></span><span class="n">Span</span><span class="o">*</span><span class="w"> </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">Span</span><span class="o">*</span><span class="p">)</span><span class="n">_id_span_map</span><span class="p">.</span><span class="n">get</span><span class="p">(</span><span class="n">span</span><span class="o">-&gt;</span><span class="n">_page_id</span><span class="p">);</span>
+</code></pre></div>
+<p>替换完基数树后的测试结果：比使用<code>unordered_map</code>快了9倍，比malloc快了3倍。(DEBUG版本下)。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-29.png" alt="图片"></p>
+<p>测性能DEBUG并不能很好的测试，使用RELEASE版本进行测试：</p>
+<ul>
+<li><p>DEBUG下数据量尽量给小点，大了由于进程还有DEBUG信息。由于额外的调试信息和辅助数据，程序占用的内存可能会更多。申请空间时申请会失败。</p>
+</li>
+<li><p>RELEASE版本下，内存池的效率比malloc的效率高了近二倍。</p>
+</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-30.png" alt="图片"></p>
+<ul>
+<li>当然这只是固定大小的内存对象申请。内存池对于不同大小的对象申请时，由于桶锁的buff加成，效率更是快了几倍。</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-31.png" alt="图片"></p>
+<p>对于32位机器来说，使用基数树是完全没问题的，但是64位机器下，共有2^51页，开空间就要<code>2^51 * 8</code>字节。也就是16,384TB,很显然，不可能开这么多。这个问题tcmalloc解决方式是，采用多层基数树。上面的基数树称之为单层基数树。还有二层基数树。二层基数树就是进行两次哈希映射。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240729-2100-32.png" alt="图片"></p>
+<p>比如在32位下，存储页号需要2^19字节。而二层基数树实际上就是把这些字节分为两次进行映射。</p>
+<p>将单层基数一次开得2mb空间，划分成多个区域，比如以4096页为单位划分，每4096页需要一个二层哈希表进行映射，第一层需要<code>2^19 / 2^12 = 128</code>字节即可。第二层，当开到对应得页号时在申请空间进行映射(一般不可能申请<code>2^19</code>页这么多)。这样就能减少空间开辟了。</p>
+<p>如果在64位机器下，二层基数树，依然无法解决问题。采用三层基数树，进一步划分即可。三层基数树就是进一步划分区域，分位三层哈希。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "基于tcmalloc的高并发内存池.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

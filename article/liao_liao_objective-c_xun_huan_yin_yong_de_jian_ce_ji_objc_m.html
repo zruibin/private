@@ -1,0 +1,1403 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>聊聊Objective-C循环引用的检测及objc_msgSend源码解读 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="聊聊Objective-C循环引用的检测及objc_msgSend源码解读,C/C++,iOS,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="聊聊Objective-C循环引用的检测<br/>arm64 objc_msgSend 源码解读" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>聊聊Objective-C循环引用的检测及objc_msgSend源码解读</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2020-12-22 13:11
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+<a href='../article/tag_ios.html' class='article_tag'>iOS</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://mp.weixin.qq.com/s/q2UdQkgRyvksW6qnC1KF1w' target='blank'>聊聊Objective-C循环引用的检测</a></p></h4>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20201222-131130-1.png" alt=""></p>
+<p>Objective-C 使用引用计数作为 iPhone 应用的内存管理方案，引用计数相比 GC 更适用于内存不太充裕的场景，只需要收集与对象关联的局部信息来决定是否回收对象，而 GC 为了明确可达性，需要全局的对象信息。引用计数固然有其优越性，但也正是因为缺乏对全局对象信息的把控，导致 Objective-C无法自动销毁陷入循环引用的对象。虽然 Objective-C 通过引入弱引用技术，让开发者可以尽可能地规避这个问题，但在引用层级过深，引用路径不那么直观的情况下，即使是经验丰富的工程师，也无法百分百保证产出的代码不存在循环引用。</p>
+<p>这时候就需要有一种检测方案，可以实时检测对象之间是否发生了循环引用，来辅助开发者及时地修正代码中存在的内存泄漏问题。要想检测出循环引用，最直观的方式是递归地获取对象强引用的其他对象，并判断检测对象是否被其路径上的对象强引用了，也就是在有向图中去找环。明确检测方式之后，接下来需要解决的是如何获取强引用链，也就是获取对象的强引用，尤其是最容易造成循环引用的 block。</p>
+<h3>Block 捕获实体引用</h3>
+<p>往期关于 Block 的文章 对 Block 的一点补充、用 Block 实现委托方法、Block技巧与底层解析</p>
+<h4>捕获区域布局初探</h4>
+<p>首先根据 block 的定义结构，可以简单地将其视为：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">sr_block_layout</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">isa</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">flags</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">reserved</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">invoke</span><span class="p">)(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="p">,</span><span class="w"> </span><span class="p">...);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">sr_block_descriptor</span><span class="w"> </span><span class="o">*</span><span class="n">descriptor</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="cm">/* Imported variables. */</span><span class="w">  </span>
+<span class="p">};</span><span class="w">  </span>
+
+<span class="c1">// 标志位不一样，这个结构的实际布局也会有差别，这里简单地放在一起好阅读  </span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">sr_block_descriptor</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">reserved</span><span class="p">;</span><span class="w"> </span><span class="c1">// Block_descriptor_1  </span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">size</span><span class="p">;</span><span class="w"> </span><span class="c1">// Block_descriptor_1  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="p">)(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">dst</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">src</span><span class="p">);</span><span class="w">  </span><span class="c1">// Block_descriptor_2 BLOCK_HAS_COPY_DISPOSE  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">dispose</span><span class="p">)(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="p">);</span><span class="w"> </span><span class="c1">// Block_descriptor_2  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">signature</span><span class="p">;</span><span class="w"> </span><span class="c1">// Block_descriptor_3 BLOCK_HAS_SIGNATURE  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">layout</span><span class="p">;</span><span class="w"> </span><span class="c1">// Block_descriptor_3 contents depend on BLOCK_HAS_EXTENDED_LAYOUT  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>可以看到 block 捕获的变量都会存储在 sr_block_layout 结构体 descriptor 字段之后的内存空间中，下面我们通过 clang-rewrite-objc 重写如下代码语句 :</p>
+<div class="highlight"><pre><code><span></span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span><span class="w">  </span>
+<span class="o">^</span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">i</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>可以得到 :</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">__block_impl</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">isa</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">Flags</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">Reserved</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">FuncPtr</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span><span class="w">  </span>
+
+<span class="k">struct</span><span class="w"> </span><span class="nc">__main_block_impl_0</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">__block_impl</span><span class="w"> </span><span class="n">impl</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">__main_block_desc_0</span><span class="o">*</span><span class="w"> </span><span class="n">Desc</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">...</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>__main_block_impl_0 结构中新增了捕获的 i 字段，即 sr_block_layout 结构体的 imported variables部分，这种操作可以看作在 sr_block_layout 尾部定义了一个 0 长数组，可以根据实际捕获变量的大小，给捕获区域申请对应的内存空间，只不过这一操作由编译器完成 :</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">sr_block_layout</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">isa</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">flags</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">reserved</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">invoke</span><span class="p">)(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="p">,</span><span class="w"> </span><span class="p">...);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">sr_block_descriptor</span><span class="w"> </span><span class="o">*</span><span class="n">descriptor</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="n">captured</span><span class="p">[</span><span class="mi">0</span><span class="p">];</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>既然已经知道了捕获变量 i 的存放地址，那么我们就可以通过 <em>(int </em>)layout-&gt;captured 在运行时获取 i的值。得到了捕获区域的起始地址之后，我们再来看捕获区域的布局问题，考虑以下代码块 :</p>
+<div class="highlight"><pre><code><span></span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span><span class="w">  </span>
+<span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">NSObject</span><span class="w"> </span><span class="k">new</span><span class="p">];</span><span class="w">  </span>
+<span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">^</span><span class="n">blk</span><span class="p">)(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">^</span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">i</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">o</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>捕获区域的布局分两部分看：顺序和大小，我们先使用老方法重写代码块 :</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">__main_block_impl_0</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">__block_impl</span><span class="w"> </span><span class="n">impl</span><span class="p">;</span><span class="w">           </span><span class="c1">// 24  </span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">__main_block_desc_0</span><span class="o">*</span><span class="w"> </span><span class="n">Desc</span><span class="p">;</span><span class="w">   </span><span class="c1">// 8 指针占用内存大小和寻址长度相关，在 64 位机环境下，编译器分配空间大小为 8 字节  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="p">;</span><span class="w">                              </span><span class="c1">// 8  </span>
+<span class="w">    </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o</span><span class="p">;</span><span class="w">                        </span><span class="c1">// 8  </span>
+<span class="w">    </span><span class="p">...</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>按照目前 clang 针对 64 位机的默认对齐方式（下文的字节对齐计算都基于此前提条件），可以计算出这个结构体占用的内存空间大小为 24 + 8 + 8 + 8 = 48字节，并且按照上方代码块先 i 后 o 的捕获排序方式，如果我要访问捕获的 o 对象指针变量，只需要在捕获区域起始地址上偏移 8 字节即可，我们可以借助 lldb 的 memory read (x) 命令查看这部分内存空间 :</p>
+<div class="highlight"><pre><code><span></span><span class="p">(</span><span class="n">lldb</span><span class="p">)</span><span class="w"> </span><span class="n">po</span><span class="w"> </span><span class="o">*</span><span class="p">(</span><span class="n">NSObject</span><span class="w"> </span><span class="o">**</span><span class="p">)(</span><span class="n">layout</span><span class="o">-&gt;</span><span class="n">captured</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">8</span><span class="p">)</span><span class="w">  </span>
+<span class="mh">0x0000000000000002</span><span class="w">  </span>
+<span class="p">(</span><span class="n">lldb</span><span class="p">)</span><span class="w"> </span><span class="n">po</span><span class="w"> </span><span class="o">*</span><span class="p">(</span><span class="n">NSObject</span><span class="w"> </span><span class="o">**</span><span class="p">)</span><span class="n">layout</span><span class="o">-&gt;</span><span class="n">captured</span><span class="w">  </span>
+<span class="o">&lt;</span><span class="n">NSObject</span><span class="o">:</span><span class="w"> </span><span class="mh">0x10073f290</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="p">(</span><span class="n">lldb</span><span class="p">)</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">*</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="o">*</span><span class="p">)(</span><span class="n">layout</span><span class="o">-&gt;</span><span class="n">captured</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">8</span><span class="p">)</span><span class="w">  </span>
+<span class="p">(</span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="n">$6</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="w">  </span>
+<span class="p">(</span><span class="n">lldb</span><span class="p">)</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="o">*</span><span class="p">)(</span><span class="n">layout</span><span class="o">-&gt;</span><span class="n">captured</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">8</span><span class="p">)</span><span class="w">  </span>
+<span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="n">$9</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mh">0x0000000100740d18</span><span class="w">  </span>
+<span class="p">(</span><span class="n">lldb</span><span class="p">)</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="n">layout</span><span class="o">-&gt;</span><span class="n">descriptor</span><span class="o">-&gt;</span><span class="n">size</span><span class="w">  </span>
+<span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="p">)</span><span class="w"> </span><span class="n">$11</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">44</span><span class="w">  </span>
+<span class="p">(</span><span class="n">lldb</span><span class="p">)</span><span class="w"> </span><span class="n">x</span><span class="o">/</span><span class="mi">44</span><span class="n">bx</span><span class="w"> </span><span class="n">layout</span><span class="w">  </span>
+<span class="mh">0x100740cf0</span><span class="o">:</span><span class="w"> </span><span class="mh">0x70</span><span class="w"> </span><span class="mh">0x21</span><span class="w"> </span><span class="mh">0x7b</span><span class="w"> </span><span class="mh">0xa6</span><span class="w"> </span><span class="mh">0xff</span><span class="w"> </span><span class="mh">0x7f</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x100740cf8</span><span class="o">:</span><span class="w"> </span><span class="mh">0x02</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0xc3</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x100740d00</span><span class="o">:</span><span class="w"> </span><span class="mh">0x40</span><span class="w"> </span><span class="mh">0x1d</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x01</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x100740d08</span><span class="o">:</span><span class="w"> </span><span class="mh">0xb0</span><span class="w"> </span><span class="mh">0x20</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x01</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x100740d10</span><span class="o">:</span><span class="w"> </span><span class="mh">0x90</span><span class="w"> </span><span class="mh">0xf2</span><span class="w"> </span><span class="mh">0x73</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x01</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x100740d18</span><span class="o">:</span><span class="w"> </span><span class="mh">0x02</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span>
+</code></pre></div>
+<p>和使用 clang -rewrite-objc 重写时的猜想不一样，我们可以从以上终端日志中看出以下两点 :</p>
+<ul>
+<li>捕获变量 i、o 在捕获区域的排序方式为 o、i，o 变量地址与捕获起始地址一致，i 变量地址为捕获起始地址加上 8 字节</li>
+<li>捕获整形变量 i 在内存中实际占用空间大小为 4 字节</li>
+</ul>
+<p>那么 block 到底是怎么对捕获变量进行排序，并且为其分配内存空间的呢？这就需要看 clang 是如何处理 block 捕获的外部变量了。</p>
+<h4>捕获区域布局分析</h4>
+<p>首先解决捕获变量排序的问题，根据 clang 针对这部分的排序代码，我们可以知道，在对齐字节数 (alignment) 不相等时，捕获的实体按照alignment 降序排序 (C 结构体比较特殊，即使整体占用空间比指针变量大，也排在对象指针后面)，否则按照以下类型进行排序 :</p>
+<ul>
+<li>__strong 修饰对象指针变量</li>
+<li>__block 修饰对象指针变量</li>
+<li>__weak 修饰对象指针变量</li>
+<li>其他变量</li>
+</ul>
+<p>再结合 clang 对捕获变量对齐子节数计算方式 ，我们可以知道，block 捕获区域变量的对齐结果趋向于被 <code>__attribute__((__packed__))</code> 修饰了的结构体，举个例子 :</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">foo</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">p</span><span class="p">;</span><span class="w">    </span><span class="c1">// 8  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="p">;</span><span class="w">      </span><span class="c1">// 4  </span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="n">c</span><span class="p">;</span><span class="w">     </span><span class="c1">// 4 实际用到的内存大小为 1  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>创建 foo 结构体需要分配的空间大小为 8 + 4 + 4 = 16，关于结构体的内存对齐方式，这里额外说几句，编译器会按照成员列表的顺序一个接一个地给每个成员分配内存，只有当存储成员需要满足正确的边界对齐要求时，成员之间才可能出现用于填充的额外内存空间，以提升计算机的访问速度（对齐标准一般和寻址长度一致），在声明结构体时，让那些对齐边界要求最严格的成员最先出现，对边界要求最弱的成员最后出现，可以最大限度地减少因边界对齐而带来的空间损失。再看以下代码块 :</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">foo</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">p</span><span class="p">;</span><span class="w">    </span><span class="c1">// 8  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="p">;</span><span class="w">      </span><span class="c1">// 4  </span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="n">c</span><span class="p">;</span><span class="w">     </span><span class="c1">// 1  </span>
+<span class="p">}</span><span class="w"> </span><span class="n">__attribute__</span><span class="w"> </span><span class="p">((</span><span class="n">__packed__</span><span class="p">));</span>
+</code></pre></div>
+<p><code>__attribute__ ((__packed__))</code> 编译属性告诉编译器，按照字段的实际占用子节数进行对齐，所以创建 foo 结构体需要分配的空间大小为 8 + 4 + 1 = 13。</p>
+<p>结合以上两点，我们可以尝试分析以下 block 捕获区域的变量布局情况 :</p>
+<div class="highlight"><pre><code><span></span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">NSObject</span><span class="w"> </span><span class="k">new</span><span class="p">];</span><span class="w">  </span>
+<span class="n">__weak</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">o1</span><span class="p">;</span><span class="w">  </span>
+<span class="n">__block</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">o1</span><span class="p">;</span><span class="w">  </span>
+<span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span><span class="w">  </span>
+<span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="p">;</span><span class="w">  </span>
+<span class="kt">char</span><span class="w"> </span><span class="n">c</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sc">&#39;a&#39;</span><span class="p">;</span><span class="w">  </span>
+<span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">^</span><span class="n">blk</span><span class="p">)(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">^</span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">i</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">c</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">o1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">o2</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">o3</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">j</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>首先按照 aligment 排序，可以得到排序顺序为 [o1 o2 o3] j i c，再根据 <strong>strong、</strong>block、__weak 修饰符对o1 o2 o3 进行排序，可得到最终结果 o1[8] o3[8] o2[8] j[8] i[4] c[1]。同样的，我们使用 lldb 的 x 命令验证分析结果是否正确 :</p>
+<div class="highlight"><pre><code><span></span><span class="p">(</span><span class="n">lldb</span><span class="p">)</span><span class="w"> </span><span class="n">x</span><span class="o">/</span><span class="mi">69</span><span class="n">bx</span><span class="w"> </span><span class="n">layout</span><span class="w">  </span>
+<span class="mh">0x10200d940</span><span class="o">:</span><span class="w"> </span><span class="mh">0x70</span><span class="w"> </span><span class="mh">0x21</span><span class="w"> </span><span class="mh">0x7b</span><span class="w"> </span><span class="mh">0xa6</span><span class="w"> </span><span class="mh">0xff</span><span class="w"> </span><span class="mh">0x7f</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x10200d948</span><span class="o">:</span><span class="w"> </span><span class="mh">0x02</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0xc3</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x10200d950</span><span class="o">:</span><span class="w"> </span><span class="mh">0xf0</span><span class="w"> </span><span class="mh">0x1b</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x01</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x10200d958</span><span class="o">:</span><span class="w"> </span><span class="mh">0xf8</span><span class="w"> </span><span class="mh">0x20</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x01</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x10200d960</span><span class="o">:</span><span class="w"> </span><span class="mh">0xa0</span><span class="w"> </span><span class="mh">0xf6</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x02</span><span class="w"> </span><span class="mh">0x01</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span><span class="c1">// o1  </span>
+<span class="mh">0x10200d968</span><span class="o">:</span><span class="w"> </span><span class="mh">0x90</span><span class="w"> </span><span class="mh">0xd9</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x02</span><span class="w"> </span><span class="mh">0x01</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span><span class="c1">// o3  </span>
+<span class="mh">0x10200d970</span><span class="o">:</span><span class="w"> </span><span class="mh">0xa0</span><span class="w"> </span><span class="mh">0xf6</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x02</span><span class="w"> </span><span class="mh">0x01</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span><span class="c1">// o2  </span>
+<span class="mh">0x10200d978</span><span class="o">:</span><span class="w"> </span><span class="mh">0x04</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span><span class="c1">// j  </span>
+<span class="mh">0x10200d980</span><span class="o">:</span><span class="w"> </span><span class="mh">0x03</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x61</span><span class="w">                 </span><span class="c1">// i c  </span>
+<span class="p">(</span><span class="n">lldb</span><span class="p">)</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="n">o1</span><span class="w">  </span>
+<span class="p">(</span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="n">$1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mh">0x000000010200f6a0</span>
+</code></pre></div>
+<p>可以看到，小端模式下，捕获的 o1 和 o2 指针变量值为 0x10200f6a0 ,对应内存地址为 0x10200d960 和 0x10200d970，而 o3 因为被 __block 修饰，编译器为 o3 捕获变量包装了一层 byref 结构，所以其值为 byref 结构的地址 0x102000d990，而不是 0x10200f6a0 ，捕获的 j 变量地址为 0x10200d978，i 变量地址为 0x10200d980，c 字符变量紧随其后。</p>
+<h4>Descriptor 的 Layout 信息</h4>
+<p>经过上述的一系列分析，捕获区域变量的布局方式已经大致摸清了，接下来回过头看下 sr_block_descriptor 结构的 layout字段是用来干嘛的。从字面上理解，这个字段很可能保存了 block 某一部分的内存布局信息，比如捕获区域的布局信息，我们依旧使用上文的最后一个例子，看看layout 的值 :</p>
+<div class="highlight"><pre><code><span></span><span class="p">(</span><span class="n">lldb</span><span class="p">)</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="n">layout</span><span class="o">-&gt;</span><span class="n">descriptor</span><span class="o">-&gt;</span><span class="n">layout</span><span class="w">  </span>
+<span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="n">$2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mh">0x0000000000000111</span><span class="w"> </span><span class="s">&quot;&quot;</span>
+</code></pre></div>
+<p>可以看到 layout 值为空字符串，并没有展示出任何直观的布局信息，看来要想知道 layout 是怎么运作的，还需要阅读这一部分的 block 代码 和 clang 代码，我们一步步地分析这两段代码里面隐藏的信息，这里贴出其中的部分代码和注释 :</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// block  </span>
+<span class="c1">// Extended layout encoding.  </span>
+
+<span class="c1">// Values for Block_descriptor_3-&gt;layout with BLOCK_HAS_EXTENDED_LAYOUT  </span>
+<span class="c1">// and for Block_byref_3-&gt;layout with BLOCK_BYREF_LAYOUT_EXTENDED  </span>
+
+<span class="c1">// If the layout field is less than 0x1000, then it is a compact encoding   </span>
+<span class="c1">// of the form 0xXYZ: X strong pointers, then Y byref pointers,   </span>
+<span class="c1">// then Z weak pointers.  </span>
+
+<span class="c1">// If the layout field is 0x1000 or greater, it points to a   </span>
+<span class="c1">// string of layout bytes. Each byte is of the form 0xPN.  </span>
+<span class="c1">// Operator P is from the list below. Value N is a parameter for the operator.  </span>
+
+<span class="k">enum</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="p">...</span><span class="w">  </span>
+<span class="w">    </span><span class="n">BLOCK_LAYOUT_NON_OBJECT_BYTES</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w">    </span><span class="c1">// N bytes non-objects  </span>
+<span class="w">    </span><span class="n">BLOCK_LAYOUT_NON_OBJECT_WORDS</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w">    </span><span class="c1">// N words non-objects  </span>
+<span class="w">    </span><span class="n">BLOCK_LAYOUT_STRONG</span><span class="w">           </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span><span class="w">    </span><span class="c1">// N words strong pointers  </span>
+<span class="w">    </span><span class="n">BLOCK_LAYOUT_BYREF</span><span class="w">            </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span><span class="w">    </span><span class="c1">// N words byref pointers  </span>
+<span class="w">    </span><span class="n">BLOCK_LAYOUT_WEAK</span><span class="w">             </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span><span class="w">    </span><span class="c1">// N words weak pointers  </span>
+<span class="w">    </span><span class="p">...</span><span class="w">  </span>
+<span class="p">};</span><span class="w">  </span>
+
+<span class="c1">// clang   </span>
+<span class="c1">/// InlineLayoutInstruction - This routine produce an inline instruction for the  </span>
+<span class="c1">/// block variable layout if it can. If not, it returns 0. Rules are as follow:  </span>
+<span class="c1">/// If ((uintptr_t) layout) &lt; (1 &lt;&lt; 12), the layout is inline. In the 64bit world,  </span>
+<span class="c1">/// an inline layout of value 0x0000000000000xyz is interpreted as follows:  </span>
+<span class="c1">/// x captured object pointers of BLOCK_LAYOUT_STRONG. Followed by  </span>
+<span class="c1">/// y captured object of BLOCK_LAYOUT_BYREF. Followed by  </span>
+<span class="c1">/// z captured object of BLOCK_LAYOUT_WEAK. If any of the above is missing, zero  </span>
+<span class="c1">/// replaces it. For example, 0x00000x00 means x BLOCK_LAYOUT_STRONG and no  </span>
+<span class="c1">/// BLOCK_LAYOUT_BYREF and no BLOCK_LAYOUT_WEAK objects are captured.</span>
+</code></pre></div>
+<p>首先要解释的是 inline 这个词，Objective-C 中有一种叫做 Tagged Pointer的技术，它让指针保存实际值，而不是保存实际值的地址，这里的 inline 也是相同的效果，即让 layout 指针保存实际的编码信息。在 inline状态下，使用十六进制中的一位表示捕获变量的数量，所以每种类型的变量最多只能有 15 个，此时的 layout 的值以 0xXYZ 形式呈现，其中 X、Y、Z分别表示捕获 <strong>strong、</strong>block、<strong>weak 修饰指针变量的个数，如果其中某个类型的数量超过 15 或者捕获变量的修饰类型不为这三种任何一个时，比如捕获的变量由 </strong>unsafe_unretained 修饰，则采用另一种编码方式，这种方式下，layout 会指向一个字符串，这个字符串的每个字节以 0xPN 的形式呈现，并以 0x00 结束，P 表示变量类型，N 表示变量个数，需要注意的是，N 为 0 表示 P 类型有一个，而不是 0 个，也就是说实际的变量个数比 N 大 1。需要注意的是，捕获 int 等基础类型，不影响 layout 的呈现方式，layout 编码中也不会有关于基础类型的信息，除非需要基础类型的编码来辅助定位对象指针类型的位置，比如捕获含有对象指针字段的结构体。举几个例子 :</p>
+<div class="highlight"><pre><code><span></span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span><span class="w">  </span>
+<span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="p">;</span><span class="w">  </span>
+<span class="kt">char</span><span class="w"> </span><span class="n">c</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sc">&#39;a&#39;</span><span class="p">;</span><span class="w">  </span>
+<span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">^</span><span class="n">blk</span><span class="p">)(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">^</span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">i</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">c</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">j</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>以上代码块没有捕获任何对象指针，所以实际的 descriptor 不包含 copy 和 dispose字段，去除这两个字段后，再输出实际的布局信息，结果为空（0x00 表示结束），说明捕获一般基础类型变量不会计入实际的 layout 编码 :</p>
+<div class="highlight"><pre><code><span></span><span class="p">(</span><span class="n">lldb</span><span class="p">)</span><span class="w"> </span><span class="n">p</span><span class="o">/</span><span class="n">x</span><span class="w"> </span><span class="p">(</span><span class="kt">long</span><span class="p">)</span><span class="n">layout</span><span class="o">-&gt;</span><span class="n">descriptor</span><span class="o">-&gt;</span><span class="n">layout</span><span class="w">  </span>
+<span class="p">(</span><span class="kt">long</span><span class="p">)</span><span class="w"> </span><span class="n">$0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mh">0x0000000100001f67</span><span class="w">  </span>
+<span class="p">(</span><span class="n">lldb</span><span class="p">)</span><span class="w"> </span><span class="n">x</span><span class="o">/</span><span class="mi">8</span><span class="n">bx</span><span class="w"> </span><span class="n">layout</span><span class="o">-&gt;</span><span class="n">descriptor</span><span class="o">-&gt;</span><span class="n">layout</span><span class="w">  </span>
+<span class="mh">0x100001f67</span><span class="o">:</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x76</span><span class="w"> </span><span class="mh">0x31</span><span class="w"> </span><span class="mh">0x36</span><span class="w"> </span><span class="mh">0x40</span><span class="w"> </span><span class="mh">0x30</span><span class="w"> </span><span class="mh">0x3a</span><span class="w"> </span><span class="mh">0x38</span>
+</code></pre></div>
+<p>接着尝试第一种 layout 方式 :</p>
+<div class="highlight"><pre><code><span></span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">NSObject</span><span class="w"> </span><span class="k">new</span><span class="p">];</span><span class="w">  </span>
+<span class="n">__block</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">o1</span><span class="p">;</span><span class="w">  </span>
+<span class="n">__weak</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">o1</span><span class="p">;</span><span class="w">  </span>
+<span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">^</span><span class="n">blk</span><span class="p">)(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">^</span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">o1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">o2</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">o3</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>以上代码块对应的 layout 值为 0x111 ，表示三种类型变量每种一个 :</p>
+<div class="highlight"><pre><code><span></span><span class="p">(</span><span class="n">lldb</span><span class="p">)</span><span class="w"> </span><span class="n">p</span><span class="o">/</span><span class="n">x</span><span class="w"> </span><span class="p">(</span><span class="kt">long</span><span class="p">)</span><span class="n">layout</span><span class="o">-&gt;</span><span class="n">descriptor</span><span class="o">-&gt;</span><span class="n">layout</span><span class="w">  </span>
+<span class="p">(</span><span class="kt">long</span><span class="p">)</span><span class="w"> </span><span class="n">$0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mh">0x0000000000000111</span>
+</code></pre></div>
+<p>再尝试第二种 layout 编码方式 :</p>
+<div class="highlight"><pre><code><span></span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">NSObject</span><span class="w"> </span><span class="k">new</span><span class="p">];</span><span class="w">  </span>
+<span class="n">__block</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">o1</span><span class="p">;</span><span class="w">  </span>
+<span class="n">__weak</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">o1</span><span class="p">;</span><span class="w">  </span>
+<span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">o1</span><span class="p">;</span><span class="w">  </span>
+<span class="p">...</span><span class="w"> </span><span class="c1">// 5 - 18  </span>
+<span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o19</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">o1</span><span class="p">;</span><span class="w">  </span>
+<span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">^</span><span class="n">blk</span><span class="p">)(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">^</span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">o1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">o2</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">o3</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">o4</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">...</span><span class="w"> </span><span class="c1">// 5 - 18  </span>
+<span class="w">    </span><span class="n">o19</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>以上代码块对应的 layout 值是一个地址 0x0000000100002f44 ，这个地址为编码字符串的起始地址，转换成十六进制后为 0x3f 0x30 0x40 0x50 0x00，其中 P 为 3 表示 <strong>strong 修饰的变量，数量为 15(f) + 1 + 0 + 1 = 17 个，P 为 4 表示 </strong>block 修饰的变量，数量为 0 + 1 = 1 个， P 为 5 表示 __weak 修饰的变量，数量为 0 + 1 = 1 个 :</p>
+<div class="highlight"><pre><code><span></span><span class="p">(</span><span class="n">lldb</span><span class="p">)</span><span class="w"> </span><span class="n">p</span><span class="o">/</span><span class="n">x</span><span class="w"> </span><span class="p">(</span><span class="kt">long</span><span class="p">)</span><span class="n">layout</span><span class="o">-&gt;</span><span class="n">descriptor</span><span class="o">-&gt;</span><span class="n">layout</span><span class="w">  </span>
+<span class="p">(</span><span class="kt">long</span><span class="p">)</span><span class="w"> </span><span class="n">$0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mh">0x0000000100002f44</span><span class="w">  </span>
+<span class="p">(</span><span class="n">lldb</span><span class="p">)</span><span class="w"> </span><span class="n">x</span><span class="o">/</span><span class="mi">8</span><span class="n">bx</span><span class="w"> </span><span class="n">layout</span><span class="o">-&gt;</span><span class="n">descriptor</span><span class="o">-&gt;</span><span class="n">layout</span><span class="w">  </span>
+<span class="mh">0x100002f44</span><span class="o">:</span><span class="w"> </span><span class="mh">0x3f</span><span class="w"> </span><span class="mh">0x30</span><span class="w"> </span><span class="mh">0x40</span><span class="w"> </span><span class="mh">0x50</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x76</span><span class="w"> </span><span class="mh">0x31</span><span class="w"> </span><span class="mh">0x36</span>
+</code></pre></div>
+<h4>结构体对捕获布局的影响</h4>
+<p>由于结构体字段的布局顺序在声明时就已经确定了，无法像 block 构造捕获区域一样，按照变量类型、修饰符进行调整，所以如果结构体中有类型为对象指针的字段，就需要一些额外信息来计算这些对象指针字段的偏移量，需要注意的是，被捕获结构体的内存对齐信息和未捕获时一致，以寻址长度作为对齐基准，捕获操作并不会变更对齐信息。同样地，我们先尝试捕获只有基本类型字段的结构体 :</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">S</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="n">c</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">long</span><span class="w"> </span><span class="n">j</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span><span class="w"> </span><span class="n">foo</span><span class="p">;</span><span class="w">  </span>
+<span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">^</span><span class="n">blk</span><span class="p">)(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">^</span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">foo</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>然后调整 descriptor 结构，输出 layout :</p>
+<div class="highlight"><pre><code><span></span><span class="p">(</span><span class="n">lldb</span><span class="p">)</span><span class="w"> </span><span class="n">x</span><span class="o">/</span><span class="mi">8</span><span class="n">bx</span><span class="w"> </span><span class="n">layout</span><span class="o">-&gt;</span><span class="n">descriptor</span><span class="o">-&gt;</span><span class="n">layout</span><span class="w">  </span>
+<span class="mh">0x100001f67</span><span class="o">:</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x76</span><span class="w"> </span><span class="mh">0x31</span><span class="w"> </span><span class="mh">0x36</span><span class="w"> </span><span class="mh">0x40</span><span class="w"> </span><span class="mh">0x30</span><span class="w"> </span><span class="mh">0x3a</span><span class="w"> </span><span class="mh">0x38</span>
+</code></pre></div>
+<p>可以看到，只有含有基本类型的结构体，同样不会影响 block 的 layout 编码信息。接下来我们给结构体新增<code>__strong</code>和<code>__weak</code>修饰的对象指针字段 :</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">S</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="n">c</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">__strong</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">long</span><span class="w"> </span><span class="n">j</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">__weak</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o2</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span><span class="w"> </span><span class="n">foo</span><span class="p">;</span><span class="w">  </span>
+<span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">^</span><span class="n">blk</span><span class="p">)(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">^</span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">foo</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>同样分析输出 layout :</p>
+<div class="highlight"><pre><code><span></span><span class="p">(</span><span class="n">lldb</span><span class="p">)</span><span class="w"> </span><span class="n">x</span><span class="o">/</span><span class="mi">8</span><span class="n">bx</span><span class="w"> </span><span class="n">layout</span><span class="o">-&gt;</span><span class="n">descriptor</span><span class="o">-&gt;</span><span class="n">layout</span><span class="w">  </span>
+<span class="mh">0x100002f47</span><span class="o">:</span><span class="w"> </span><span class="mh">0x20</span><span class="w"> </span><span class="mh">0x30</span><span class="w"> </span><span class="mh">0x20</span><span class="w"> </span><span class="mh">0x50</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x76</span><span class="w"> </span><span class="mh">0x31</span><span class="w"> </span><span class="mh">0x36</span>
+</code></pre></div>
+<p>layout 编码为0x20 0x30 0x20 0x50 0x00，其中 P 为 2 表示 word 字类型（非对象），由于字大小一般和指针一致，所以这里表示占用了 8 * (N + 1) 个字节，第一个 0x20 表示非对象指针类型占用了 8 个字节，也就是 char 类型和 int 类型字段对齐之后所占用的空间，接着 0x30 表示有一个 <strong>strong 修饰的对象指针字段，第二个 0x20表示非对象指针 long 类型占用了 8 个字节，最后的 0x50 表示有一个 </strong>weak修饰的对象指针字段。由于编码中包含了每个字段的排序和大小，我们就可以通过解析 layout 编码后的偏移量，拿到想要的对象指针值。P 还有个 byte 类型，值为 1 ，和 word 类型有相似的功能，只是表示的空间大小不同。</p>
+<h4>Byref 结构的布局</h4>
+<p>由 __block 修饰的捕获变量，会先转换成 byref 结构，再由这个结构去持有实际的捕获变量，block 只负责管理 byref 结构。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 标志位不一样，这个结构的实际布局也会有差别，这里简单地放在一起好阅读  </span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">sr_block_byref</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">isa</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">sr_block_byref</span><span class="w"> </span><span class="o">*</span><span class="n">forwarding</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">volatile</span><span class="w"> </span><span class="kt">int32_t</span><span class="w"> </span><span class="n">flags</span><span class="p">;</span><span class="w"> </span><span class="c1">// contains ref count  </span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">size</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// requires BLOCK_BYREF_HAS_COPY_DISPOSE  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">byref_keep</span><span class="p">)(</span><span class="k">struct</span><span class="w"> </span><span class="nc">sr_block_byref</span><span class="w"> </span><span class="o">*</span><span class="n">dst</span><span class="p">,</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">sr_block_byref</span><span class="w"> </span><span class="o">*</span><span class="n">src</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">byref_destroy</span><span class="p">)(</span><span class="k">struct</span><span class="w"> </span><span class="nc">sr_block_byref</span><span class="w"> </span><span class="o">*</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// requires BLOCK_BYREF_LAYOUT_EXTENDED  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">layout</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>以上代码块就是 byref 对应的结构体。第一眼看上去，我比较困惑为什么还要有 layout 字段，虽然上文的 block 源码注释说明了 byref 和 block 结构一样，都具备两种不同的布局编码方式，但是 byref 不是只针对一个变量么，难道和 block 捕获区域一样也可以携带多个捕获变量？带着这个困惑，我们先看下以下表达式 :</p>
+<div class="highlight"><pre><code><span></span><span class="n">__block</span><span class="w">  </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">NSObject</span><span class="w"> </span><span class="k">new</span><span class="p">];</span>
+</code></pre></div>
+<p>使用 clang 重写之后 :</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">__Block_byref_o1_0</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">__isa</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">__Block_byref_o1_0</span><span class="w"> </span><span class="o">*</span><span class="n">__forwarding</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">__flags</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">__size</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">__Block_byref_id_object_copy</span><span class="p">)(</span><span class="kt">void</span><span class="o">*</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">__Block_byre</span><span class="cm">/* @autoreleasepool */</span><span class="n">o</span><span class="p">{</span><span class="w"> </span><span class="n">__AtAutoreleasePool</span><span class="w"> </span><span class="n">__autoreleasepool</span><span class="p">;</span><span class="w"> </span><span class="n">e</span><span class="p">)(</span><span class="kt">void</span><span class="o">*</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o1</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>和 block 捕获变量一样，byref 携带的变量也是保存在结构体尾部的内存空间里，当前上下文中，可以直接通过 sr_block_byref 的 layout 字段获取 o1 对象指针值。可以看到，在包装如对象指针这类常规变量时，layout 字段并没有起到实质性的作用，那什么条件下的 layout 才表示布局编码信息呢？如果使用 layout 字段表示编码信息，那么携带的变量又是何处安放的呢？我们一个个解答。</p>
+<p>针对第一个问题，先看以下代码块 :</p>
+<div class="highlight"><pre><code><span></span><span class="n">__block</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">S</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o1</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span><span class="w"> </span><span class="n">foo</span><span class="p">;</span><span class="w">  </span>
+<span class="n">foo</span><span class="p">.</span><span class="n">o1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">NSObject</span><span class="w"> </span><span class="k">new</span><span class="p">];</span><span class="w">  </span>
+<span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">^</span><span class="n">blk</span><span class="p">)(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">^</span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">foo</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>使用 clang 重写之后 :</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">__Block_byref_foo_0</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">__isa</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">__Block_byref_foo_0</span><span class="w"> </span><span class="o">*</span><span class="n">__forwarding</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">__flags</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">__size</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">__Block_byref_id_object_copy</span><span class="p">)(</span><span class="kt">void</span><span class="o">*</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">__Block_byref_id_object_dispose</span><span class="p">)(</span><span class="kt">void</span><span class="o">*</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">S</span><span class="w"> </span><span class="n">foo</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>和常规类型一样，foo 结构体保存在结构体尾部，也就是原本 layout 所在的字段，重写的代码中依然看不到 layout 的踪影，接着我们试着输出 foo:</p>
+<div class="highlight"><pre><code><span></span><span class="p">(</span><span class="n">lldb</span><span class="p">)</span><span class="w"> </span><span class="n">po</span><span class="w"> </span><span class="n">foo</span><span class="p">.</span><span class="n">o1</span><span class="w">  </span>
+<span class="o">&lt;</span><span class="n">NSObject</span><span class="o">:</span><span class="w"> </span><span class="mh">0x10061f130</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="p">(</span><span class="n">lldb</span><span class="p">)</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">S</span><span class="p">)</span><span class="n">a_byref</span><span class="o">-&gt;</span><span class="n">layout</span><span class="w">  </span>
+<span class="nl">error</span><span class="p">:</span><span class="w"> </span><span class="n">Multiple</span><span class="w"> </span><span class="n">internal</span><span class="w"> </span><span class="n">symbols</span><span class="w"> </span><span class="n">found</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="sc">&#39;S&#39;</span><span class="w">  </span>
+<span class="p">(</span><span class="n">lldb</span><span class="p">)</span><span class="w"> </span><span class="n">p</span><span class="o">/</span><span class="n">x</span><span class="w"> </span><span class="p">(</span><span class="kt">long</span><span class="p">)</span><span class="n">a_byref</span><span class="o">-&gt;</span><span class="n">layout</span><span class="w">  </span>
+<span class="p">(</span><span class="kt">long</span><span class="p">)</span><span class="w"> </span><span class="n">$3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mh">0x0000000000000100</span><span class="w">  </span>
+<span class="p">(</span><span class="n">lldb</span><span class="p">)</span><span class="w"> </span><span class="n">x</span><span class="o">/</span><span class="mi">56</span><span class="n">bx</span><span class="w"> </span><span class="n">a_byref</span><span class="w">  </span>
+<span class="mh">0x100627c20</span><span class="o">:</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x100627c28</span><span class="o">:</span><span class="w"> </span><span class="mh">0x20</span><span class="w"> </span><span class="mh">0x7c</span><span class="w"> </span><span class="mh">0x62</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x01</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x100627c30</span><span class="o">:</span><span class="w"> </span><span class="mh">0x04</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x13</span><span class="w"> </span><span class="mh">0x38</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x100627c38</span><span class="o">:</span><span class="w"> </span><span class="mh">0x90</span><span class="w"> </span><span class="mh">0x1b</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x01</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x100627c40</span><span class="o">:</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x1c</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x01</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x100627c48</span><span class="o">:</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x01</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x100627c50</span><span class="o">:</span><span class="w"> </span><span class="mh">0x30</span><span class="w"> </span><span class="mh">0xf1</span><span class="w"> </span><span class="mh">0x61</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x01</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span>
+</code></pre></div>
+<p>看来事情并没有看上去的那么简单，首先重写代码中 foo 字段所在内存保存的并不是结构体，而是 0x0000000000000100，这个 100 是不是看着有点眼熟，没错，这就是 byref 的 layout 信息，根据 0xXYZ 编码规则，这个值表示有 1 个 __strong 修饰的对象指针。接着针对第二个问题，携带的对象指针变量存在哪，我们把视线往下移动 8 个字节，这不就是 foo.o1 对象指针的值么。总结下，在存在 layout 的情况下，byref 使用 8 个字节保存 layout 编码信息，并紧跟着在 layout 字段后存储捕获的变量。</p>
+<p>以上是 byref 的第一种 layout 编码方式，我们再尝试第二种 :</p>
+<div class="highlight"><pre><code><span></span><span class="n">__block</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">S</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="n">c</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">__weak</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o3</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span><span class="w"> </span><span class="n">foo</span><span class="p">;</span><span class="w">  </span>
+<span class="n">foo</span><span class="p">.</span><span class="n">o1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">NSObject</span><span class="w"> </span><span class="k">new</span><span class="p">];</span><span class="w">  </span>
+<span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">^</span><span class="n">blk</span><span class="p">)(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">^</span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">foo</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>使用 clang 重写代码之后 :</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">__Block_byref_foo_0</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">__isa</span><span class="p">;</span><span class="w">  </span>
+<span class="n">__Block_byref_foo_0</span><span class="w"> </span><span class="o">*</span><span class="n">__forwarding</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">__flags</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">__size</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">__Block_byref_id_object_copy</span><span class="p">)(</span><span class="kt">void</span><span class="o">*</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="cm">/* @autoreleasepool */</span><span class="n">c</span><span class="p">{</span><span class="w"> </span><span class="n">__AtAutoreleasePool</span><span class="w"> </span><span class="n">__autoreleasepool</span><span class="p">;</span><span class="w"> </span><span class="n">_byref</span><span class="w">  </span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">__main_block_impl_0</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">__block_impl</span><span class="w"> </span><span class="n">impl</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">__main_block_desc_0</span><span class="o">*</span><span class="w"> </span><span class="n">Desc</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">__main_block_impl_0</span><span class="p">(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">fp</span><span class="p">,</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">__main_block_desc_0</span><span class="w"> </span><span class="o">*</span><span class="n">desc</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">flags</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">impl</span><span class="p">.</span><span class="n">isa</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">_NSConcreteStackBlock</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">impl</span><span class="p">.</span><span class="n">Flags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">flags</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">impl</span><span class="p">.</span><span class="n">FuncPtr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fp</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">Desc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">desc</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>emmmm …，上面代码并不是粘贴错误，貌似 Rewriter 并不能很好地处理这种情况，看来又需要我们直接去看对应内存地址中的值了 :</p>
+<div class="highlight"><pre><code><span></span><span class="p">(</span><span class="n">lldb</span><span class="p">)</span><span class="w"> </span><span class="n">x</span><span class="o">/</span><span class="mi">72</span><span class="n">bx</span><span class="w"> </span><span class="n">a_byref</span><span class="w">  </span>
+<span class="mh">0x100755140</span><span class="o">:</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x100755148</span><span class="o">:</span><span class="w"> </span><span class="mh">0x40</span><span class="w"> </span><span class="mh">0x51</span><span class="w"> </span><span class="mh">0x75</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x01</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x100755150</span><span class="o">:</span><span class="w"> </span><span class="mh">0x04</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x13</span><span class="w"> </span><span class="mh">0x48</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x100755158</span><span class="o">:</span><span class="w"> </span><span class="mh">0x10</span><span class="w"> </span><span class="mh">0x1b</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x01</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x100755160</span><span class="o">:</span><span class="w"> </span><span class="mh">0xa0</span><span class="w"> </span><span class="mh">0x1b</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x01</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x100755168</span><span class="o">:</span><span class="w"> </span><span class="mh">0x8d</span><span class="w"> </span><span class="mh">0x3e</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x01</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x100755170</span><span class="o">:</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x5f</span><span class="w"> </span><span class="mh">0x6b</span><span class="w"> </span><span class="mh">0x65</span><span class="w"> </span><span class="mh">0x79</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x100755178</span><span class="o">:</span><span class="w"> </span><span class="mh">0xd0</span><span class="w"> </span><span class="mh">0x6e</span><span class="w"> </span><span class="mh">0x75</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x01</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="mh">0x100755180</span><span class="o">:</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x00</span><span class="w">  </span>
+<span class="p">(</span><span class="n">lldb</span><span class="p">)</span><span class="w"> </span><span class="n">x</span><span class="o">/</span><span class="mi">8</span><span class="n">bx</span><span class="w"> </span><span class="n">a_byref</span><span class="o">-&gt;</span><span class="n">layout</span><span class="w">  </span>
+<span class="mh">0x100003e8d</span><span class="o">:</span><span class="w"> </span><span class="mh">0x20</span><span class="w"> </span><span class="mh">0x30</span><span class="w"> </span><span class="mh">0x50</span><span class="w"> </span><span class="mh">0x00</span><span class="w"> </span><span class="mh">0x53</span><span class="w"> </span><span class="mh">0x52</span><span class="w"> </span><span class="mh">0x4c</span><span class="w"> </span><span class="mh">0x61</span>
+</code></pre></div>
+<p>地址 0x100755168 中保存了 layout 编码字符串的地址 0x0000000100003e8d ，将此字符串转换成十六进制后为 0x20 0x30 0x50 0x00 ，这些值的含义在结构体对捕获布局的影响一节中已经描述过，这里就不重复说明了。</p>
+<h4>强引用对象的获取</h4>
+<p>目前我们已经知道了 block / byref 如何布局捕获区域内存，以及如何获取关键的布局信息，接下来我们就可以尝试获取 block 强引用的对象了，这里我把强引用的对象分成两部分 :</p>
+<ul>
+<li>被 block 强引用</li>
+<li>被 byref 结构强引用</li>
+</ul>
+<p>只要获取这两部分强引用的对象，任务就算完成了，由于上文已经将整个原理脉络理清了，所以编写出可用的代码并不困难。这两部分都涉及到布局编码，我们先根据 layout 的编码方式，解析出捕获变量的类型和数量 :</p>
+<div class="highlight"><pre><code><span></span><span class="n">SRCapturedLayoutInfo</span><span class="w"> </span><span class="o">*</span><span class="n">info</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">SRCapturedLayoutInfo</span><span class="w"> </span><span class="k">new</span><span class="p">];</span><span class="w">  </span>
+
+<span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="kt">uintptr_t</span><span class="p">)</span><span class="n">layout</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">12</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">inlineLayout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">uintptr_t</span><span class="p">)</span><span class="n">layout</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">[</span><span class="n">info</span><span class="w"> </span><span class="n">addItemWithType</span><span class="o">:</span><span class="n">SR_BLOCK_LAYOUT_STRONG</span><span class="w"> </span><span class="n">count</span><span class="o">:</span><span class="p">(</span><span class="n">inlineLayout</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mh">0xf00</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">8</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="p">[</span><span class="n">info</span><span class="w"> </span><span class="n">addItemWithType</span><span class="o">:</span><span class="n">SR_BLOCK_LAYOUT_BYREF</span><span class="w"> </span><span class="n">count</span><span class="o">:</span><span class="p">(</span><span class="n">inlineLayout</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mh">0xf0</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">4</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="p">[</span><span class="n">info</span><span class="w"> </span><span class="n">addItemWithType</span><span class="o">:</span><span class="n">SR_BLOCK_LAYOUT_WEAK</span><span class="w"> </span><span class="n">count</span><span class="o">:</span><span class="n">inlineLayout</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mh">0xf</span><span class="p">];</span><span class="w">  </span>
+<span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">layout</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">*</span><span class="n">layout</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="sc">&#39;\x00&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">layout</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mh">0xf0</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">layout</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mh">0xf</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">        </span><span class="p">[</span><span class="n">info</span><span class="w"> </span><span class="n">addItemWithType</span><span class="o">:</span><span class="n">type</span><span class="w"> </span><span class="n">count</span><span class="o">:</span><span class="n">count</span><span class="p">];</span><span class="w">  </span>
+<span class="w">        </span><span class="n">layout</span><span class="o">++</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>然后遍历 block 的布局编码信息，根据变量类型和数量，计算出对象指针地址偏移，然后获取对应的对象指针值 :</p>
+<div class="highlight"><pre><code><span></span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="n">NSHashTable</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">strongReferencesForBlockLayout</span><span class="o">:</span><span class="p">(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">iLayout</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">iLayout</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">nil</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">sr_block_layout</span><span class="w"> </span><span class="o">*</span><span class="n">aLayout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">sr_block_layout</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">iLayout</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">extenedLayout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sr_block_extended_layout</span><span class="p">(</span><span class="n">aLayout</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="n">_blockLayoutInfo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">SRCapturedLayoutInfo</span><span class="w"> </span><span class="n">infoForLayoutEncode</span><span class="o">:</span><span class="n">extenedLayout</span><span class="p">];</span><span class="w">  </span>
+
+<span class="w">    </span><span class="n">NSHashTable</span><span class="w"> </span><span class="o">*</span><span class="n">references</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">NSHashTable</span><span class="w"> </span><span class="n">weakObjectsHashTable</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="o">*</span><span class="n">begin</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">uintptr_t</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">aLayout</span><span class="o">-&gt;</span><span class="n">captured</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">SRLayoutItem</span><span class="w"> </span><span class="o">*</span><span class="n">item</span><span class="w"> </span><span class="n">in</span><span class="w"> </span><span class="n">_blockLayoutInfo</span><span class="p">.</span><span class="n">layoutItems</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">item</span><span class="p">.</span><span class="n">type</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">            </span><span class="k">case</span><span class="w"> </span><span class="no">SR_BLOCK_LAYOUT_STRONG</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">                </span><span class="n">NSHashTable</span><span class="w"> </span><span class="o">*</span><span class="n">objects</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">item</span><span class="w"> </span><span class="n">objectsForBeginAddress</span><span class="o">:</span><span class="n">begin</span><span class="p">];</span><span class="w">  </span>
+<span class="w">                </span><span class="n">SRAddObjectsFromHashTable</span><span class="p">(</span><span class="n">references</span><span class="p">,</span><span class="w"> </span><span class="n">objects</span><span class="p">);</span><span class="w">  </span>
+<span class="w">                </span><span class="n">begin</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">item</span><span class="p">.</span><span class="n">count</span><span class="p">;</span><span class="w">  </span>
+<span class="w">            </span><span class="p">}</span><span class="w"> </span><span class="k">break</span><span class="p">;</span><span class="w">  </span>
+<span class="w">            </span><span class="k">case</span><span class="w"> </span><span class="no">SR_BLOCK_LAYOUT_BYREF</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">                </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">item</span><span class="p">.</span><span class="n">count</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">,</span><span class="w"> </span><span class="n">begin</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">                    </span><span class="k">struct</span><span class="w"> </span><span class="nc">sr_block_byref</span><span class="w"> </span><span class="o">*</span><span class="n">aByref</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">sr_block_byref</span><span class="w"> </span><span class="o">**</span><span class="p">)</span><span class="n">begin</span><span class="p">;</span><span class="w">  </span>
+<span class="w">                    </span><span class="n">NSHashTable</span><span class="w"> </span><span class="o">*</span><span class="n">objects</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">self</span><span class="w"> </span><span class="n">strongReferenceForBlockByref</span><span class="o">:</span><span class="n">aByref</span><span class="p">];</span><span class="w">  </span>
+<span class="w">                    </span><span class="n">SRAddObjectsFromHashTable</span><span class="p">(</span><span class="n">references</span><span class="p">,</span><span class="w"> </span><span class="n">objects</span><span class="p">);</span><span class="w">  </span>
+<span class="w">                </span><span class="p">}</span><span class="w">  </span>
+<span class="w">            </span><span class="p">}</span><span class="w"> </span><span class="k">break</span><span class="p">;</span><span class="w">  </span>
+<span class="w">            </span><span class="k">case</span><span class="w"> </span><span class="no">SR_BLOCK_LAYOUT_NON_OBJECT_BYTES</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">                </span><span class="n">begin</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">uintptr_t</span><span class="w"> </span><span class="o">*</span><span class="p">)((</span><span class="kt">uintptr_t</span><span class="p">)</span><span class="n">begin</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">item</span><span class="p">.</span><span class="n">count</span><span class="p">);</span><span class="w">  </span>
+<span class="w">            </span><span class="p">}</span><span class="w"> </span><span class="k">break</span><span class="p">;</span><span class="w">  </span>
+<span class="w">            </span><span class="k">default</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">                </span><span class="n">begin</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">item</span><span class="p">.</span><span class="n">count</span><span class="p">;</span><span class="w">  </span>
+<span class="w">            </span><span class="p">}</span><span class="w"> </span><span class="k">break</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">references</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>block 布局区域中的 byref 结构需要进行额外的处理，如果 byref 直接携带 __strong 修饰的变量，则不需要关心 layout 编码，直接从结构尾部获取指针变量值即可，否则需要和处理 block 布局区域一样，先得到布局信息，然后遍历这些布局信息，计算偏移量，获取强引用对象地址 :</p>
+<div class="highlight"><pre><code><span></span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="n">NSHashTable</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">strongReferenceForBlockByref</span><span class="o">:</span><span class="p">(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">iByref</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">iByref</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">nil</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">sr_block_byref</span><span class="w"> </span><span class="o">*</span><span class="n">aByref</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">sr_block_byref</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">iByref</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">NSHashTable</span><span class="w"> </span><span class="o">*</span><span class="n">references</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">NSHashTable</span><span class="w"> </span><span class="n">weakObjectsHashTable</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int32_t</span><span class="w"> </span><span class="n">flag</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">aByref</span><span class="o">-&gt;</span><span class="n">flags</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">SR_BLOCK_BYREF_LAYOUT_MASK</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">    </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">flag</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="k">case</span><span class="w"> </span><span class="no">SR_BLOCK_BYREF_LAYOUT_STRONG</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">            </span><span class="kt">void</span><span class="w"> </span><span class="o">**</span><span class="n">begin</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sr_block_byref_captured</span><span class="p">(</span><span class="n">aByref</span><span class="p">);</span><span class="w">  </span>
+<span class="w">            </span><span class="n">id</span><span class="w"> </span><span class="n">object</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">__bridge</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">_Nonnull</span><span class="p">)(</span><span class="o">*</span><span class="p">(</span><span class="kt">void</span><span class="w"> </span><span class="o">**</span><span class="p">)</span><span class="n">begin</span><span class="p">);</span><span class="w">  </span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">object</span><span class="p">)</span><span class="w"> </span><span class="p">[</span><span class="n">references</span><span class="w"> </span><span class="n">addObject</span><span class="o">:</span><span class="n">object</span><span class="p">];</span><span class="w">  </span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">break</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="k">case</span><span class="w"> </span><span class="no">SR_BLOCK_BYREF_LAYOUT_EXTENDED</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">            </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">layout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sr_block_byref_extended_layout</span><span class="p">(</span><span class="n">aByref</span><span class="p">);</span><span class="w">  </span>
+<span class="w">            </span><span class="n">SRCapturedLayoutInfo</span><span class="w"> </span><span class="o">*</span><span class="n">info</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">SRCapturedLayoutInfo</span><span class="w"> </span><span class="n">infoForLayoutEncode</span><span class="o">:</span><span class="n">layout</span><span class="p">];</span><span class="w">  </span>
+<span class="w">            </span><span class="p">[</span><span class="n">_blockByrefLayoutInfos</span><span class="w"> </span><span class="n">addObject</span><span class="o">:</span><span class="n">info</span><span class="p">];</span><span class="w">  </span>
+
+<span class="w">            </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="o">*</span><span class="n">begin</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">uintptr_t</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">sr_block_byref_captured</span><span class="p">(</span><span class="n">aByref</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">            </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">SRLayoutItem</span><span class="w"> </span><span class="o">*</span><span class="n">item</span><span class="w"> </span><span class="n">in</span><span class="w"> </span><span class="n">info</span><span class="p">.</span><span class="n">layoutItems</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">                </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">item</span><span class="p">.</span><span class="n">type</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">                    </span><span class="k">case</span><span class="w"> </span><span class="no">SR_BLOCK_LAYOUT_NON_OBJECT_BYTES</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">                        </span><span class="n">begin</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">uintptr_t</span><span class="w"> </span><span class="o">*</span><span class="p">)((</span><span class="kt">uintptr_t</span><span class="p">)</span><span class="n">begin</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">item</span><span class="p">.</span><span class="n">count</span><span class="p">);</span><span class="w">  </span>
+<span class="w">                    </span><span class="p">}</span><span class="w"> </span><span class="k">break</span><span class="p">;</span><span class="w">  </span>
+<span class="w">                    </span><span class="k">case</span><span class="w"> </span><span class="no">SR_BLOCK_LAYOUT_STRONG</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">                        </span><span class="n">NSHashTable</span><span class="w"> </span><span class="o">*</span><span class="n">objects</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">item</span><span class="w"> </span><span class="n">objectsForBeginAddress</span><span class="o">:</span><span class="n">begin</span><span class="p">];</span><span class="w">  </span>
+<span class="w">                        </span><span class="n">SRAddObjectsFromHashTable</span><span class="p">(</span><span class="n">references</span><span class="p">,</span><span class="w"> </span><span class="n">objects</span><span class="p">);</span><span class="w">  </span>
+<span class="w">                        </span><span class="n">begin</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">item</span><span class="p">.</span><span class="n">count</span><span class="p">;</span><span class="w">  </span>
+<span class="w">                    </span><span class="p">}</span><span class="w"> </span><span class="k">break</span><span class="p">;</span><span class="w">  </span>
+<span class="w">                    </span><span class="k">default</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">                        </span><span class="n">begin</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">item</span><span class="p">.</span><span class="n">count</span><span class="p">;</span><span class="w">  </span>
+<span class="w">                    </span><span class="p">}</span><span class="w"> </span><span class="k">break</span><span class="p">;</span><span class="w">  </span>
+<span class="w">                </span><span class="p">}</span><span class="w">  </span>
+<span class="w">            </span><span class="p">}</span><span class="w">  </span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">break</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="k">default</span><span class="o">:</span><span class="w"> </span><span class="k">break</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">references</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>完整代码我放到了 BlockStrongReferenceObject，代码并没有进行过很严格的测试，可能存在一些未处理的边界条件，需要尝试 / 讨论的同学可自取。</p>
+<h4>另一种强引用对象获取方式</h4>
+<p>上文通过将 block 的布局编码信息转化为对应字段的偏移量来获取强引用对象，这一节介绍另外一种比较取巧的方式，也是目前检测循环引用工具获取 block强引用对象的常用方式，比如 facebook 的 FBRetainCycleDetector 。根据这块功能对应的源码，此方式大致原理如下 :</p>
+<ul>
+<li><p>获取 block 的 dispose 函数 （如果捕获了强引用对象，需要利用这个函数解引用）</p>
+</li>
+<li><p>构造一个 fake 对象，此对象由若干个扩展的 byref 结构 (对象) 组成，其个数由 block size 决定，即把 block 划分为若干个 8 字节内存区域，就像以下代码块一样 :</p>
+</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">S</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o2</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span><span class="w">  </span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">S</span><span class="w"> </span><span class="n">s</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="p">.</span><span class="n">o2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">NSObject</span><span class="w"> </span><span class="k">new</span><span class="p">]</span><span class="w">  </span>
+<span class="p">};</span><span class="w">  </span>
+<span class="kt">void</span><span class="w"> </span><span class="o">**</span><span class="n">fake</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="w"> </span><span class="o">**</span><span class="p">)</span><span class="o">&amp;</span><span class="n">s</span><span class="p">;</span><span class="w">  </span>
+<span class="c1">// fake[1] 和 s.o2 是一样的</span>
+</code></pre></div>
+<ul>
+<li><p>扩展的 byref 结构会重写 release 方法，只在此方法中设置强引用标识位，不执行原释放逻辑</p>
+</li>
+<li><p>将 fake 对象作为参数，调用 dispose 函数，dispose 函数会去 release 每个 block 强引用的对象，在这里这些强引用对象被替换成了我们的 byref 结构，所以我们可以通过它的强引用标识位判断 block 的哪块区域保存了强引用对象地址</p>
+</li>
+<li><p>遍历 fake 对象，保存所有强引用标志位被设置的 byref 结构对应索引，后面通过这个索引可以去 block 中找强引用指针地址</p>
+</li>
+<li><p>释放所有的 byref 结构</p>
+</li>
+<li><p>根据上面得到的索引，获取捕获变量偏移量，偏移量为索引值 * 8 字节 (指针大小) ，再根据偏移量去 block 内存块中拿强引用对象地址</p>
+</li>
+</ul>
+<p>关于这种方案，我们需要明确下面几个点。</p>
+<p>首先这种方案也需要在明确 block 内存布局的情况下才能够实施，因为 block ，或者说 block结构体，实际执行内存对齐时，并没有按照寻址大小也就是 8 字节对齐，假设 block 捕获区域的对齐方式变成了这样 :</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">__main_block_impl_0</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">__block_impl</span><span class="w"> </span><span class="n">impl</span><span class="p">;</span><span class="w">           </span><span class="c1">// 24  </span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">__main_block_desc_0</span><span class="o">*</span><span class="w"> </span><span class="n">Desc</span><span class="p">;</span><span class="w">   </span><span class="c1">// 8 指针占用内存大小和寻址长度相关，在 64 位机环境下，编译器分配空间大小为 8 字节  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="p">;</span><span class="w">                              </span><span class="c1">// 4    FakedByref 8  </span>
+<span class="w">    </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o1</span><span class="p">;</span><span class="w">                       </span><span class="c1">// 8    FakedByref 8 [这里上个 FakedByref 后 4 个子节和当前 FakedByref 前 4 字节覆盖 o1 对象指针的 8 字节，导致 miss ]  </span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="n">c</span><span class="p">;</span><span class="w">                             </span><span class="c1">// 1  </span>
+<span class="w">    </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o2</span><span class="p">;</span><span class="w">                       </span><span class="c1">// 8  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>那么使用 fake 的方案就会失效，因为这种方案的前提是 block 内存对齐基准基于寻址长度，即指针大小。不过 block对捕获的变量按照类型和尺寸进行了排序，__strong 修饰的对象指针都在前面，本来我们只需要这种类型的变量，并不关心其他类型，所以即使后面的对齐方式不满足 fake 条件也没关系，另外捕获结构体的对齐基准是基于寻址长度的，即使结构体有其他类型，也满足 fake 条件 :</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">__main_block_impl_0</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">__block_impl</span><span class="w"> </span><span class="n">impl</span><span class="p">;</span><span class="w">           </span><span class="c1">// 24  </span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">__main_block_desc_0</span><span class="o">*</span><span class="w"> </span><span class="n">Desc</span><span class="p">;</span><span class="w">   </span><span class="c1">// 8 指针占用内存大小和寻址长度相关，在 64 位机环境下，编译器分配空间大小为 8 字节  </span>
+<span class="w">    </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o1</span><span class="p">;</span><span class="w">                       </span><span class="c1">// 8    FakedByref 8  </span>
+<span class="w">    </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">o2</span><span class="p">;</span><span class="w">                       </span><span class="c1">// 8    FakedByref 8  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="p">;</span><span class="w">                              </span><span class="c1">// 4    FakedByref 8  </span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="n">c</span><span class="p">;</span><span class="w">                             </span><span class="c1">// 1          </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>可以看到，通过以上代码块的排序，让 o1 和 o2 都被 FakedByref 结构覆盖到了，而 i, c 变量本身就不会在 dispose函数中访问，所以怎么设置都不会影响到策略的生效。</p>
+<p>第二点是为什么要用扩展的 byref 结构，而不是随便整个重写了 release 的类过来，这是因为当 block 捕获了 __block修饰的指针变量时，会将这个指针变量包装成 byref 结构，而 dispose 函数会对这个 byref 结构执行 Blockobject_dispose 操作，这个函数有两个形参，一个是对象指针，一个是 flag ，当 flag 指明对象指针为 byref 类型，而实际传入的实参不是，就会出现问题，所以这里必须用扩展的 byref 结构。</p>
+<p>第三点是这种方式无法处理 __block 修饰对象指针的情况。</p>
+<p>不过这种方式贵在简洁，无需考虑内部每种变量类型具体的布局方式，就可以满足大部分需要获取 block 强引用对象的场景。</p>
+<h3>对象成员变量强引用</h3>
+<p>对象强引用成员变量的获取相对来说直接些，因为每个对象对应的类中都有其成员变量的布局信息，并且 runtime 有现成的接口，只需要分析出编码格式，然后按顺序和成员变量匹配即可。获取编码信息的接口有两个， class_getIvarLayout 函数返回描述strong ivar 数量和索引信的编码信息，相对的 class_getWeakIvarLayout 函数返回描述 weak ivar的编码信息，这里基于前者进行分析。</p>
+<p>class_getIvarLayout 返回值是一个 uint8 指针，指向一个字符串，uint8 在 16 进制下占用 2 位，所以编码以 2 位为一组，组内首位描述非 strong ivar 个数，次位为 strong ivar 个数，最后一组如果 strong ivar 个数为 0，则忽略，且layout 以 0x00 结尾。下面举几个例子 :</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 0x0100  </span>
+<span class="err">@</span><span class="n">interface</span><span class="w"> </span><span class="n">A</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">__strong</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">s1</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+<span class="err">@</span><span class="n">end</span>
+</code></pre></div>
+<p>起始非 strong ivar 个数为 0，并且接着一个 strong ivar ，得出编码为 0x01 。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 0x0100  </span>
+<span class="err">@</span><span class="n">interface</span><span class="w"> </span><span class="n">A</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">__strong</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">s1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">__weak</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">w1</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+<span class="err">@</span><span class="n">end</span>
+</code></pre></div>
+<p>起始非 strong ivar 个数为 0，并且接着一个 strong ivar ，得出编码为 0x01，接着有个 weak ivar，但是后面没有 strong ivar 了，所以忽略。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 0x011100  </span>
+<span class="err">@</span><span class="n">interface</span><span class="w"> </span><span class="n">A</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">__strong</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">s1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">__weak</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">w1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">__strong</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">s2</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+<span class="err">@</span><span class="n">end</span>
+</code></pre></div>
+<p>起始非 strong ivar 个数为 0，并且接着一个 strong ivar ，得出编码为 0x01，接着有个 weak ivar，并且后面紧接着一个strong ivar ，得出编码 0x11 ，合并得到 0x0111 。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 0x211100  </span>
+<span class="err">@</span><span class="n">interface</span><span class="w"> </span><span class="n">A</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">i1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">p1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">__strong</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">s1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">__weak</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">w1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">__strong</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">s2</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+<span class="err">@</span><span class="n">end</span>
+</code></pre></div>
+<p>起始非 strong ivar 个数为 2，并且紧接着一个 strong ivar，得出编码 0x21，接着有个 weak ivar，后面紧接着一个 strong ivar ，得出编码 0x11 ，合并得到 0x2111 。</p>
+<p>了解了成员变量的编码格式，剩下的就是如何解码并依次和成员变量进行匹配了，FBRetainCycleDetector 已经实现了这部分功能 ，主要原理如下 :</p>
+<ul>
+<li>获取所有的成员变量以及 ivar 编码</li>
+<li>解析 ivar 编码，跳过非 strong ivar ，获得 strong ivar 所在索引值 (把对象分成若干个 8 字节内存片段)</li>
+<li>利用 ivar_getOffset 函数获取 ivar 的偏移量，除以指针大小就是自身的索引值 (对象布局对齐基准为寻址长度，这里为 8 字节)</li>
+<li>匹配 2、3 步获得的索引值，得到 strong ivar</li>
+<li>当然 FBRetainCycleDetector 还实现了对结构体的处理，这块就不细究了。</li>
+</ul>
+<h3>小结</h3>
+<p>以上是我认为检测循环引用两个比较关键的点，特别是获取 block 捕获的强引用对象环节，block ABI 中并没有详细说明捕获区域布局信息，需要自己结合 block 源码以及 clang 生成 block 的 CodeGen 逻辑去推测实际的布局信息，所以得出的结论不一定正确，也欢迎感兴趣的同学和我交流。</p>
+<h3>参考</h3>
+<ul>
+<li><a href="https://github.com/mikeash/Circle/blob/master/Circle/CircleIVarLayout.m">Circle - a cycle collector for Objective-C ARC</a></li>
+<li><a href="https://github.com/facebook/FBRetainCycleDetector">FBRetainCycleDetector</a></li>
+<li><a href="https://code.fb.com/ios/automatic-memory-leak-detection-on-ios/">Automatic memory leak detection on iOS</a></li>
+<li><a href="https://blog.sunnyxx.com/2015/09/13/class-ivar-layout/">Objective-C Class Ivar Layout 探索</a></li>
+</ul>
+<hr>
+
+<h4><p>原文出处：<a href='https://mp.weixin.qq.com/s?__biz=MzA5NzMwODI0MA==&mid=2647768930&idx=1&sn=4eaddd7450dabaada175698affd36d09&chksm=8887c45dbff04d4b4e484ed59a3b4385460506df1040c001e8304db3e84c8e444da8fcd8c3df&token=2009782742&lang=zh_CN&scene=21#wechat_redirect' target='blank'>arm64 objc_msgSend 源码解读</a></p></h4>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20201222-141130-1.png" alt=""></p>
+<p>最近参照 MikeAsh 的这篇文章，看了 arm64 下 obj_msgSend 的实现。了解了其主体流程，同时对于 arm64 的汇编知识也有了更进一步的了解。</p>
+<p>目前最新 obj4-781 中 objc-msg-arm64.s 的实现，跟 MikeAsh 文中的代码还是有些不一样，但总体思路一致。本着学习的原则，读了最新的源码实现，也算检验下学习成果。</p>
+<p>总的来说，整个过程主要分为如下几部分：</p>
+<ul>
+<li>查找对象的 isa，也就是 class。</li>
+<li>查找缓存。</li>
+<li>缓存未命中时，走慢查找。</li>
+</ul>
+<p>下面来总结回顾一下。</p>
+<h3>arm64 汇编基础</h3>
+<p>在阅读之前，可以先了解下 arm64 汇编的基础知识。</p>
+<p>x0 ~ x31 是通用寄存器。而等会在下面的源码中，我们会看到用到了 p0 而不是 x0，p 代表 pointer-sized，表示指针的大小。在arm64 下，p0 和 x0 是等价的。在 arm64-asm.h 中可以看到如下定义：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#if __LP64__  </span>
+
+<span class="c1">// true arm64  </span>
+
+<span class="cp">#define SUPPORT_TAGGED_POINTERS 1  </span>
+
+<span class="cp">#define PTR .quad  </span>
+
+<span class="cp">#define PTRSIZE 8  </span>
+
+<span class="cp">#define PTRSHIFT 3 </span><span class="c1">// 1&lt;&lt;PTRSHIFT == PTRSIZE  </span>
+
+<span class="c1">// &quot;p&quot; registers are pointer-sized  </span>
+
+<span class="cp">#define UXTP UXTX  </span>
+
+<span class="cp">#define p0 x0  </span>
+
+<span class="cp">#define p1 x1  </span>
+
+<span class="cp">#define p2 x2  </span>
+
+<span class="cp">#define p3 x3  </span>
+
+<span class="cp">#define p4 x4  </span>
+
+<span class="cp">#define p5 x5  </span>
+
+<span class="cp">#define p6 x6  </span>
+
+<span class="cp">#define p7 x7  </span>
+
+<span class="cp">#define p8 x8  </span>
+
+<span class="cp">#define p9 x9  </span>
+
+<span class="cp">#define p10 x10  </span>
+
+<span class="cp">#define p11 x11  </span>
+
+<span class="cp">#define p12 x12  </span>
+
+<span class="cp">#define p13 x13  </span>
+
+<span class="cp">#define p14 x14  </span>
+
+<span class="cp">#define p15 x15  </span>
+
+<span class="cp">#define p16 x16  </span>
+
+<span class="cp">#define p17 x17</span>
+</code></pre></div>
+<h3>objc_msgSend 主流程</h3>
+<h4>流程介绍</h4>
+<p>整体流程如下：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20201222-141130-2.png" alt=""></p>
+<p>我将源码拆分成了如下 4 个文件，这样单个处理看起来会比较清晰，文件放到了 github 上。</p>
+<ul>
+<li>Entry_objc_msgSend.s，objc_msgSend 主干流程。</li>
+<li>GetClassFromIsa_p16.s，获取 class 流程。</li>
+<li>CacheLookup.s，缓存查找流程。</li>
+<li>LNilOrTagged.s，TaggedPointer/nil 的处理。</li>
+</ul>
+<h4>代码实现</h4>
+<p>objc_msgSend 的方法定义如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">id</span><span class="w"> </span><span class="nf">objc_msgSend</span><span class="p">(</span><span class="n">id</span><span class="w"> </span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="n">SEL</span><span class="w"> </span><span class="n">_cmd</span><span class="p">,</span><span class="w"> </span><span class="p">...);</span>
+</code></pre></div>
+<p>第一个参数是 self，第二个参数是 selector，后面跟不定长参数。当方法被调用时，第一个参数放入 x0，第二个参数放入 x1。也就是 x0 = self，x1 = _cmd。</p>
+<p>objcmsgSend 的汇编实现如下:</p>
+<div class="highlight"><pre><code><span></span><span class="n">ENTRY</span><span class="w"> </span><span class="n">_objc_msgSend</span><span class="w">  </span>
+
+<span class="n">UNWIND</span><span class="w"> </span><span class="n">_objc_msgSend</span><span class="p">,</span><span class="w"> </span><span class="n">NoFrame</span><span class="w">  </span>
+
+<span class="c1">// 将 self 和 0 进行比较  </span>
+<span class="n">cmp</span><span class="w">  </span><span class="n">p0</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mi">0</span><span class="w">  </span><span class="c1">// nil check and tagged pointer check  </span>
+
+<span class="cp">#if SUPPORT_TAGGED_POINTERS  </span>
+
+<span class="c1">// &lt;= 0，跳转到 LNilOrTagged，进行 nil 或者 tagged pointer 的处理。因为 tagged pointer 在 arm64 下，最高位为 1，作为有符号数 &lt; 0  </span>
+<span class="n">b</span><span class="p">.</span><span class="n">le</span><span class="w"> </span><span class="n">LNilOrTagged</span><span class="w"> </span><span class="c1">// (MSB tagged pointer looks negative)  </span>
+
+<span class="cp">#else  </span>
+
+<span class="n">b</span><span class="p">.</span><span class="n">eq</span><span class="w">  </span><span class="n">LReturnZero</span><span class="w">  </span>
+
+<span class="cp">#endif  </span>
+
+<span class="c1">// 将 isa 的值放到 x13  </span>
+<span class="n">ldr</span><span class="w">  </span><span class="n">p13</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x0</span><span class="p">]</span><span class="w">  </span><span class="c1">// p13 = isa  </span>
+
+<span class="c1">// 获取 class 的地址，放到 p16  </span>
+<span class="n">GetClassFromIsa_p16</span><span class="w"> </span><span class="n">p13</span><span class="w">  </span><span class="c1">// p16 = class  </span>
+
+<span class="nl">LGetIsaDone</span><span class="p">:</span><span class="w">  </span>
+
+<span class="c1">// calls imp or objc_msgSend_uncached  </span>
+<span class="c1">// 在缓存中查找或进行完整方法查找  </span>
+<span class="n">CacheLookup</span><span class="w"> </span><span class="n">NORMAL</span><span class="p">,</span><span class="w"> </span><span class="n">_objc_msgSend</span>
+</code></pre></div>
+<p>下面来逐句解析下实现过程：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 将 self 和 0 进行比较  </span>
+<span class="n">cmp</span><span class="w">  </span><span class="n">p0</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mi">0</span>
+</code></pre></div>
+<p>第一步，将 self 和 0 比较，以便下一步进行判定走哪种分支处理。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#if SUPPORT_TAGGED_POINTERS  </span>
+<span class="c1">// &lt;= 0，跳转到 LNilOrTagged，进行 nil 或者 tagged pointer 的处理。因为 tagged pointer 在 arm64 下，最高位为 1，作为有符号数 &lt; 0  </span>
+<span class="n">b</span><span class="p">.</span><span class="n">le</span><span class="w"> </span><span class="n">LNilOrTagged</span><span class="w"> </span><span class="c1">// (MSB tagged pointer looks negative)  </span>
+<span class="cp">#else  </span>
+<span class="n">b</span><span class="p">.</span><span class="n">eq</span><span class="w">  </span><span class="n">LReturnZero</span><span class="w">  </span>
+<span class="cp">#endif</span>
+</code></pre></div>
+<ul>
+<li>如果支持 SUPPORT_TAGGED_POINTERS。判断上面的比较结果，是否 ≤ 0，是则跳转到 LNilOrTagged 进行处理。因为在 arm64 下，当为 Tagged pointer 时，最高位是 1，作为有符号数，&lt; 0。</li>
+<li>不支持的话，则判断比较结果是否为 0。如果为 0，则跳转到 LReturnZero 进行 nil 的处理。</li>
+</ul>
+<p>关于 LNilOrTagged 的处理，我们留到后面再讲。先关注正常情况。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 将 isa 的值放到 x13  </span>
+<span class="n">ldr</span><span class="w">  </span><span class="n">p13</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x0</span><span class="p">]</span><span class="w">  </span><span class="c1">// p13 = isa</span>
+</code></pre></div>
+<p>ldr 是 Load Register 的缩写，[] 为间接寻址。它表示从 x0 所表示的地址中取出 8 字节数据，放到 x13 中。x0 中是 self的地址，所以这里取出来的数据其实是 isa 的值。那有没有小伙伴疑惑这是为什么呢？简单解释一下。</p>
+<p>因为 self 是个指针，指向 struct objc_object，它的定义如下。</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">objc_object</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="k">private</span><span class="o">:</span><span class="w">  </span>
+<span class="w">    </span><span class="n">isa_t</span><span class="w"> </span><span class="n">isa</span><span class="p">;</span><span class="w">  </span>
+<span class="p">...</span><span class="w">   </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>objc_object 中只有一个成员 isa， 因此取出指针指向的内容，也就获取到了 isa 的值。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 获取 class 的地址，放到 p16  </span>
+<span class="n">GetClassFromIsa_p16</span><span class="w"> </span><span class="n">p13</span><span class="w">  </span><span class="c1">// p16 = class</span>
+</code></pre></div>
+<p>调用 GetClassFromIsa_p16，进一步获取 class 地址。这是比较关键的一步，因为后续操作都需要用到 class。</p>
+<h4>获取 class</h4>
+<p>GetClassFromIsa_p16 实现如下：</p>
+<div class="highlight"><pre><code><span></span><span class="p">.</span><span class="n">macro</span><span class="w"> </span><span class="n">GetClassFromIsa_p16</span><span class="w"> </span><span class="cm">/* src */</span><span class="w">  </span>
+
+<span class="c1">// 64-bit packed isa  </span>
+<span class="c1">// p16 &amp; 0x0000000ffffffff8ULL，获取真正的类地址  </span>
+<span class="n">and</span><span class="w">  </span><span class="n">p16</span><span class="p">,</span><span class="w"> </span><span class="n">$0</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="n">ISA_MASK</span><span class="w">  </span>
+
+<span class="p">.</span><span class="n">endmacro</span>
+</code></pre></div>
+<p>源码中关于 SUPPORT_INDEXED_ISA 的部分（这里为了简化代码，我删除了），标识是否做了 isa 指针优化。主要在 watchOS上支持，这里我们不做深究。如想了解，可以参看里面的注释。</p>
+<p>主要思想是从 isa 中获取 indexCls，然后从 indexed_classes 表中获取到 class。有兴趣可以查看 runtime 源码中isa.h 关于 indexcls 的布局。</p>
+<p>在 arm64 下，我们主要看这一行就好。</p>
+<div class="highlight"><pre><code><span></span><span class="n">and</span><span class="w"> </span><span class="n">p16</span><span class="p">,</span><span class="w"> </span><span class="n">$0</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="n">ISA_MASK</span>
+</code></pre></div>
+<p>and 表示与运算，<code>p16 = $0 &amp; ISA_MASK</code>。<code>$0</code>是传进来的第一个参数，也就是 isa 的值。那么在 64 位下，为什么要和ISA_MASK 进行与运算才能获取到呢？而 ISA_MASK 的值是 0xffffffff8。</p>
+<p>貌似我们之前的印象里，上述获取到的 isa 就是 class 地址。这是因为老的 struct objc_object 的类型定义如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">objc_object</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">Class</span><span class="w"> </span><span class="n">_Nonnull</span><span class="w"> </span><span class="n">isa</span><span class="w"> </span><span class="n">OBJC_ISA_AVAILABILITY</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>而在 64 位中，isa 的类型由 Class 变为了 union，并不直接是一个指针，cls 的信息存储在其中，如下所示。</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">objc_object</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="k">private</span><span class="o">:</span><span class="w">  </span>
+<span class="w">    </span><span class="n">isa_t</span><span class="w"> </span><span class="n">isa</span><span class="p">;</span><span class="w">  </span>
+<span class="p">...</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="k">union</span><span class="w"> </span><span class="nc">isa_t</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">isa_t</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="n">isa_t</span><span class="p">(</span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">value</span><span class="p">)</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">bits</span><span class="p">(</span><span class="n">value</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="n">Class</span><span class="w"> </span><span class="n">cls</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">bits</span><span class="p">;</span><span class="w">  </span>
+<span class="cp">#if defined(ISA_BITFIELD)  </span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">ISA_BITFIELD</span><span class="p">;</span><span class="w"> </span><span class="c1">// defined in isa.h  </span>
+<span class="w">    </span><span class="p">};</span><span class="w">  </span>
+<span class="cp">#endif  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>下面我们再来看一下 ISA_BITFIELD 的定义，在 isa.h 中，这里是获取 class 的关键。它主要定义了一些位域来存储不同的信息。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">##  define ISA_MASK 0x0000000ffffffff8ULL  </span>
+<span class="cp">##  define ISA_BITFIELD \  </span>
+<span class="w">    </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">nonpointer</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w">  </span><span class="err">\</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">has_assoc</span><span class="w">  </span><span class="o">:</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w">  </span><span class="err">\</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">has_cxx_dtor</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w">  </span><span class="err">\</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">shiftcls</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">33</span><span class="p">;</span><span class="w"> </span><span class="cm">/*MACH_VM_MAX_ADDRESS 0x1000000000*/</span><span class="w"> </span><span class="err">\</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">magic</span><span class="w">  </span><span class="o">:</span><span class="w"> </span><span class="mi">6</span><span class="p">;</span><span class="w">  </span><span class="err">\</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">weakly_referenced</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w">  </span><span class="err">\</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">deallocating</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w">  </span><span class="err">\</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">has_sidetable_rc</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w">  </span><span class="err">\</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">extra_rc</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">19</span>
+</code></pre></div>
+<p>重点关注第 4 项 shiftcls，它占 33 位，存放的是 cls 的地址。ISA_MASK，这个掩码就是用来取出中间的 33 位。</p>
+<p>不知道大家有没有跟我一样的疑问？虽然照这样是取出了 33 位，可末尾还有 3 位是 0。那么按照常规思路，不是应该右移 3 位将其去除吗？</p>
+<p>但事实上这样计算是没错的。因为 shiftcls 在赋值时，就将地址右移了 3 位。由于是 8 字节对齐，最后 3 位肯定为 0，右移之后也无影响，到时再补上 0 即可。不过也看到其他文章说这样做是为了节省空间。所以按照上述方式取出，正好是原始地址。</p>
+<p>到底对不对，我们看下源码就知道了。可以看到在代码最后一行，的确是右移了 3 位。</p>
+<div class="highlight"><pre><code><span></span><span class="kr">inline</span><span class="w"> </span><span class="kt">void</span>
+<span class="nf">objc_object::initIsa</span><span class="p">(</span><span class="n">Class</span><span class="w"> </span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">nonpointer</span><span class="p">,</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">hasCxxDtor</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+
+<span class="c1">// 省略部分代码</span>
+<span class="n">newisa</span><span class="p">.</span><span class="n">bits</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ISA_MAGIC_VALUE</span><span class="p">;</span>
+<span class="c1">// isa.magic is part of ISA_MAGIC_VALUE</span>
+<span class="c1">// isa.nonpointer is part of ISA_MAGIC_VALUE</span>
+<span class="n">newisa</span><span class="p">.</span><span class="n">has_cxx_dtor</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">hasCxxDtor</span><span class="p">;</span>
+<span class="c1">// 这里已经右移了 3 位  </span>
+<span class="n">newisa</span><span class="p">.</span><span class="n">shiftcls</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">uintptr_t</span><span class="p">)</span><span class="n">cls</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">3</span><span class="p">;</span>
+
+<span class="p">}</span>
+</code></pre></div>
+<p>这样我们就完成了 class 地址的获取。关于实例验证部分，可参照我写的这篇文章。接下来下一步，跳转到 LGetIsaDone，进行缓存的查找CacheLookup。</p>
+<h3>缓存查找</h3>
+<h4>缓存结构</h4>
+<p>由于对象的实例方法存储在所属的类中，那么必定方法缓存相关的也在类里面。我们先看下类 objc_class 的定义，类同样也是个对象，继承于objc_object。</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">objc_class</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">objc_object</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// Class ISA;  </span>
+<span class="w">    </span><span class="n">Class</span><span class="w"> </span><span class="n">superclass</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">cache_t</span><span class="w"> </span><span class="n">cache</span><span class="p">;</span><span class="w"> </span><span class="c1">// formerly cache pointer and vtable  </span>
+<span class="w">    </span><span class="n">class_data_bits_t</span><span class="w"> </span><span class="n">bits</span><span class="p">;</span><span class="w"> </span><span class="c1">// class_rw_t * plus custom rr/alloc flags  </span>
+<span class="p">...</span><span class="w">     </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>我们可以看到，第三项 cache 就是缓存信息。缓存查找也就是查找这个变量中的信息。cache_t 的定义如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">cache_t</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 包含 mask 和 buckets，mask 是高 16 位，剩余 48 位是 buckets 地址。  </span>
+<span class="w">    </span><span class="n">explicit_atomic</span><span class="o">&lt;</span><span class="kt">uintptr_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">_maskAndBuckets</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">mask_t</span><span class="w"> </span><span class="n">_mask_unused</span><span class="p">;</span><span class="w">  </span>
+<span class="p">...</span><span class="w">     </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>_maskAndBuckets 将 mask 和 buckets 的信息存放在了一起。</p>
+<ul>
+<li>buckets 是哈希表，每一项包含了 sel 和相应的 imp。</li>
+<li>mask，表示 buckets 表的总大小，它在高 16 位。</li>
+</ul>
+<p>结构如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20201222-141130-3.png" alt=""></p>
+<p>其中 buckets 中每一项 bucket_t 定义如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">bucket_t</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="k">private</span><span class="o">:</span><span class="w">  </span>
+<span class="w">    </span><span class="n">explicit_atomic</span><span class="o">&lt;</span><span class="kt">uintptr_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">_imp</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">explicit_atomic</span><span class="o">&lt;</span><span class="n">SEL</span><span class="o">&gt;</span><span class="w"> </span><span class="n">_sel</span><span class="p">;</span><span class="w">      </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>了解了这些后，你是不是也能大致猜到缓存是如何查找的呢？</p>
+<h4>查找过程</h4>
+<p>首先点击这里查看完整的过程，代码比较长就不贴出来了。（注：我将代码中与 arm64 无关部分删除了）。</p>
+<p>这段稍微有点长，别担心，下面我们来逐一分析。</p>
+<p>首先我们明确下在这个状态下寄存器中的数据情况，即 x1 = SEL, x16 = isa。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// p11 = [x16 + CACHE]，取出 x16+CACHE 地址中的数据，8 字节  </span>
+<span class="n">ldr</span><span class="w">  </span><span class="n">p11</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x16</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="n">CACHE</span><span class="p">]</span>
+</code></pre></div>
+<p>上面我们提到过，ldr 是取数据指令。它表示从 x16 寄存器中偏移 CACHE 的位置取出一个 8 字节数据，放入 p11 中。x16 中存放的是class 地址。在 objc-msg-arm64.s 中，CACHE 的定义如下，2 个指针大小，也就是 16 字节。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#define CACHE (2 * __SIZEOF_POINTER__)</span>
+</code></pre></div>
+<p>为什么要偏移 16 字节呢？我们再次来看下 objc_object 的定义。</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">objc_class</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">objc_object</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// Class ISA;  </span>
+<span class="w">    </span><span class="n">Class</span><span class="w"> </span><span class="n">superclass</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">cache_t</span><span class="w"> </span><span class="n">cache</span><span class="p">;</span><span class="w"> </span><span class="c1">// formerly cache pointer and vtable  </span>
+<span class="w">    </span><span class="n">class_data_bits_t</span><span class="w"> </span><span class="n">bits</span><span class="p">;</span><span class="w"> </span><span class="c1">// class_rw_t * plus custom rr/alloc flags  </span>
+<span class="w">    </span><span class="p">...</span><span class="w">     </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>从定义可以看出，cache 的偏移是 16 字节，在 ISA 和 superclass 之后。</p>
+<p>因此，x16 + #CACHE 正好指向 cache_t。此时再取出 8 字节的内容，就得到了 cache_t 结构的第一项maskAndBuckets。忘记的同学可往上翻看 cachet 的定义。</p>
+<p>这样，p11 中存放的是 _maskAndBuckets 的值。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// p10 = p11 &amp; 0x0000ffffffffffff，取出 buckets 地址  </span>
+<span class="n">and</span><span class="w"> </span><span class="n">p10</span><span class="p">,</span><span class="w"> </span><span class="n">p11</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mh">0x0000ffffffffffff</span>
+</code></pre></div>
+<p>由于 buckets 是低 48 位，将 p11 进行与运算得到 buckets 地址。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 前 16 位是 mask，表示缓存表总共有多少项，x1 里面是 _cmd，根据 _cmd &amp; mask 求出 _cmd 在表中对应的 index。  </span>
+<span class="n">and</span><span class="w"> </span><span class="n">p12</span><span class="p">,</span><span class="w"> </span><span class="n">p1</span><span class="p">,</span><span class="w"> </span><span class="n">p11</span><span class="p">,</span><span class="w"> </span><span class="n">LSR</span><span class="w"> </span><span class="err">#</span><span class="mi">48</span><span class="w">  </span><span class="c1">// x12 = _cmd &amp; mask</span>
+</code></pre></div>
+<p>LSR 表示逻辑右移，即 p11 右移 48 位后，再与 p1 进行与运算。若进行步骤拆分，可表示为如下：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 得到 mask 的值  </span>
+<span class="n">p11</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p11</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">48</span><span class="w">  </span>
+
+<span class="c1">// 求出 index  </span>
+<span class="n">p12</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p1</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">p11</span>
+</code></pre></div>
+<p>这时候，p11 是 mask 的值，也就是总表项大小。p1 是 cmd，cmd &amp; mask 是为了求出 _cmd 在表中的索引，也就等同于 _cmd % mask。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// PTRSHIFT = 3，表中每一项大小为 16 字节，左移 4 位，相当于乘以 16。获取 index 对应项的地址，放到 x12。  </span>
+<span class="c1">// p12 = buckets + ((_cmd &amp; mask) &lt;&lt; (1+PTRSHIFT))  </span>
+<span class="n">add</span><span class="w">  </span><span class="n">p12</span><span class="p">,</span><span class="w"> </span><span class="n">p10</span><span class="p">,</span><span class="w"> </span><span class="n">p12</span><span class="p">,</span><span class="w"> </span><span class="n">LSL</span><span class="w"> </span><span class="err">#</span><span class="p">(</span><span class="mi">1</span><span class="o">+</span><span class="n">PTRSHIFT</span><span class="p">)</span>
+</code></pre></div>
+<p>这步是为了求出索引在缓存表中的表项地址。</p>
+<p>LSL 表示逻辑左移，PTRSHIFT = 3，也就是 p12 &lt;&lt;= 4，相当于乘以 16。因为表中每项大小为 16 字节。而 p10表示缓存表地址，加上偏移量，就可得到索引项地址，再放入 p12 中。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 从定位到的表项地址中，取出 2 个 8 字节数据放到 p17, p9 中。其中 p17 里是 imp，p9 里是 sel。  </span>
+<span class="n">ldp</span><span class="w">  </span><span class="n">p17</span><span class="p">,</span><span class="w"> </span><span class="n">p9</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x12</span><span class="p">]</span><span class="w"> </span><span class="c1">// {imp, sel} = *bucket</span>
+</code></pre></div>
+<p>ldp 是 Load Register Pair 的缩写，它表示从 x12 所表示的地址中取出 2 个 8 字节数据，分别放入 p17、p9 中。从bucket_t 的定义，我们可以得知缓存表中的每一项是 {imp, sel}。正好得到 p17 = imp，p9 = sel。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 比较缓存中的 sel 和传入的 _cmd  </span>
+<span class="mi">1</span><span class="o">:</span><span class="w">  </span><span class="n">cmp</span><span class="w">  </span><span class="n">p9</span><span class="p">,</span><span class="w"> </span><span class="n">p1</span><span class="w"> </span><span class="c1">// if (bucket-&gt;sel != _cmd)  </span>
+
+<span class="c1">// 不相等，跳转到 2  </span>
+<span class="n">b</span><span class="p">.</span><span class="n">ne</span><span class="w">  </span><span class="mf">2f</span><span class="w">  </span><span class="c1">//  scan more  </span>
+
+<span class="c1">// 命中缓存，调用 imp  </span>
+<span class="n">CacheHit</span><span class="w"> </span><span class="n">$0</span><span class="w">  </span><span class="c1">// call or return imp</span>
+</code></pre></div>
+<p>接着，将 p9 中的 sel 与传入的 _cmd 进行比较，如果不相等，则跳转到 2 处理，继续扫描；如果相等，则表示命中缓存。这里我们先不看 2 的处理，紧接着看看缓存命中的实现。</p>
+<h4>缓存命中</h4>
+<p>命中缓存会调用 CacheHit，其实现代码如下（删除了无关代码）：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 命中缓存  </span>
+<span class="p">.</span><span class="n">macro</span><span class="w"> </span><span class="n">CacheHit</span><span class="w">  </span>
+<span class="c1">// 调用 imp  </span>
+<span class="n">TailCallCachedImp</span><span class="w"> </span><span class="n">x17</span><span class="p">,</span><span class="w"> </span><span class="n">x12</span><span class="p">,</span><span class="w"> </span><span class="n">x1</span><span class="p">,</span><span class="w"> </span><span class="n">x16</span><span class="w">  </span><span class="c1">// authenticate and call imp  </span>
+<span class="p">.</span><span class="n">endmacro</span>
+</code></pre></div>
+<p>其实，这里的处理很简单，就是进一步调用 TailCallCachedImp，此时各个寄存器值如下。</p>
+<div class="highlight"><pre><code><span></span><span class="n">x17</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">缓存</span><span class="w"> </span><span class="n">imp</span><span class="w">  </span>
+<span class="n">x12</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">查找到的缓存项地址</span><span class="w">  </span>
+<span class="n">x1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sel</span><span class="w">      </span>
+<span class="n">x16</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">class</span>
+</code></pre></div>
+<p>TailCallCachedImp 的实现如下：</p>
+<div class="highlight"><pre><code><span></span><span class="p">.</span><span class="n">macro</span><span class="w"> </span><span class="n">TailCallCachedImp</span><span class="w">  </span>
+<span class="c1">// $0 = cached imp, $1 = address of cached imp, $2 = SEL, $3 = isa  </span>
+<span class="n">eor</span><span class="w">  </span><span class="n">$0</span><span class="p">,</span><span class="w"> </span><span class="n">$0</span><span class="p">,</span><span class="w"> </span><span class="n">$3</span><span class="w">  </span>
+<span class="n">br</span><span class="w">  </span><span class="n">$0</span><span class="w">  </span>
+<span class="p">.</span><span class="n">endmacro</span>
+</code></pre></div>
+<p>最终使用 br 指令调用 $0，br 表示有返回的跳转，可认为是 x86 中的 call 指令。而 $0 是查找到的缓存imp。这样缓存命中的分支就走完了，最终调用 imp。</p>
+<h4>缓存表扫描过程</h4>
+<p>当第一步缓存未命中时，又是如何处理呢？这步会复杂一些，因为涉及到两次缓存表扫描。</p>
+<ul>
+<li>从索引对应的缓存项不断向上查找，直到表头。</li>
+<li>当到达表头后，继续从表尾开始全表扫描，直至重新回到表头。</li>
+</ul>
+<p>过程如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20201222-141130-4.png" alt=""></p>
+<p>前面我们说到，当未命中时，会跳转到 2 去继续扫描缓存表。2 的内容如下：</p>
+<div class="highlight"><pre><code><span></span><span class="mi">2</span><span class="o">:</span><span class="w"> </span><span class="c1">// not hit: p12 = not-hit bucket  </span>
+<span class="n">CheckMiss</span><span class="w"> </span><span class="n">$0</span><span class="w">  </span><span class="c1">// miss if bucket-&gt;sel == 0  </span>
+<span class="n">cmp</span><span class="w">  </span><span class="n">p12</span><span class="p">,</span><span class="w"> </span><span class="n">p10</span><span class="w"> </span><span class="c1">// wrap if bucket == buckets  </span>
+<span class="n">b</span><span class="p">.</span><span class="n">eq</span><span class="w">  </span><span class="mf">3f</span><span class="w">  </span>
+<span class="n">ldp</span><span class="w">  </span><span class="n">p17</span><span class="p">,</span><span class="w"> </span><span class="n">p9</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x12</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="o">-</span><span class="n">BUCKET_SIZE</span><span class="p">]</span><span class="o">!</span><span class="w">  </span><span class="c1">// {imp, sel} = *--bucket  </span>
+<span class="n">b</span><span class="w">  </span><span class="mi">1</span><span class="n">b</span><span class="w">  </span><span class="c1">// loop</span>
+</code></pre></div>
+<p>首先用 CheckMiss 检查缓存表项是否为空。</p>
+<ul>
+<li>如果为空，则进行 __objc_msgSend_uncached 的查找。CheckMiss 实现如下：</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="c1">// 检查缓存项是否为空  </span>
+<span class="p">.</span><span class="n">macro</span><span class="w"> </span><span class="n">CheckMiss</span><span class="w">  </span>
+<span class="c1">// 检查 p9 中的 sel 是否为空，若为空，则跳转到 __objc_msgSend_uncached，再进行缓存未命中的查找  </span>
+<span class="n">cbz</span><span class="w">  </span><span class="n">p9</span><span class="p">,</span><span class="w"> </span><span class="n">__objc_msgSend_uncached</span><span class="w">  </span>
+<span class="p">.</span><span class="n">endmacro</span>
+</code></pre></div>
+<p>cbz 判断 p9 是否为空，p9 表示 sel。也就是说，缓存表中这一项是空的，会进行 c 方法的慢查找。</p>
+<p>如果不为空，则会进行如下判断。</p>
+<div class="highlight"><pre><code><span></span><span class="n">cmp</span><span class="w">  </span><span class="n">p12</span><span class="p">,</span><span class="w"> </span><span class="n">p10</span><span class="w">  </span>
+<span class="n">b</span><span class="p">.</span><span class="n">eq</span><span class="w">  </span><span class="mf">3f</span>
+</code></pre></div>
+<p>p10 是缓存表地址，这里判断当前缓存表项是否是表头。如果不是，则循环往前遍历缓存表，不断的进行比较。</p>
+<div class="highlight"><pre><code><span></span><span class="n">ldp</span><span class="w">  </span><span class="n">p17</span><span class="p">,</span><span class="w"> </span><span class="n">p9</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x12</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="o">-</span><span class="n">BUCKET_SIZE</span><span class="p">]</span><span class="o">!</span><span class="w">  </span><span class="c1">// {imp, sel} = *--bucket  </span>
+<span class="c1">// 循环进行比较  </span>
+<span class="n">b</span><span class="w">  </span><span class="mi">1</span><span class="n">b</span><span class="w"> </span><span class="c1">// loop</span>
+</code></pre></div>
+<p>ldp 最后跟了一个 ！，它表示将 x12 减去 BUCKET_SIZE，然后写回到 x12 中。分步表示如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">x12</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="n">BUCKET_SIZE</span><span class="w">  </span>
+<span class="n">ldp</span><span class="w"> </span><span class="n">p17</span><span class="p">,</span><span class="w"> </span><span class="n">p9</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x12</span><span class="p">]</span>
+</code></pre></div>
+<p>若当前缓存表项是表头时，会跳转到 3 进行如下处理：</p>
+<div class="highlight"><pre><code><span></span><span class="mi">3</span><span class="o">:</span><span class="w"> </span><span class="c1">// wrap: p12 = first bucket, w11 = mask  </span>
+<span class="c1">// p12 = buckets + (mask &lt;&lt; 1+PTRSHIFT)  </span>
+<span class="n">add</span><span class="w">  </span><span class="n">p12</span><span class="p">,</span><span class="w"> </span><span class="n">p12</span><span class="p">,</span><span class="w"> </span><span class="n">p11</span><span class="p">,</span><span class="w"> </span><span class="n">LSR</span><span class="w"> </span><span class="err">#</span><span class="p">(</span><span class="mi">48</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="o">+</span><span class="n">PTRSHIFT</span><span class="p">))</span><span class="w">  </span>
+<span class="n">ldp</span><span class="w">  </span><span class="n">p17</span><span class="p">,</span><span class="w"> </span><span class="n">p9</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x12</span><span class="p">]</span><span class="w"> </span><span class="c1">// {imp, sel} = *bucket</span>
+</code></pre></div>
+<p>将 p12 指向表尾，然后从表尾向表头遍历比较。</p>
+<div class="highlight"><pre><code><span></span><span class="n">add</span><span class="w">  </span><span class="n">p12</span><span class="p">,</span><span class="w"> </span><span class="n">p12</span><span class="p">,</span><span class="w"> </span><span class="n">p11</span><span class="p">,</span><span class="w"> </span><span class="n">LSR</span><span class="w"> </span><span class="err">#</span><span class="p">(</span><span class="mi">48</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="o">+</span><span class="n">PTRSHIFT</span><span class="p">))</span>
+</code></pre></div>
+<p>这句可能不太好理解，下面来解释一下。</p>
+<p>因为 mask 是高 16 位，需右移 48 位得到 mask 大小。而每项大小是 16 字节，需左移 4 位得到整个表偏移，因此总共需右移 44位。分步表示如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">mask</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p11</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">48</span><span class="w">  </span>
+<span class="n">offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">mask</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">4</span>
+</code></pre></div>
+<p>那么为什么在缓存表项是表头时，需要再次扫描缓存表呢？代码中有如下注释：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// Clone scanning loop to miss instead of hang when cache is corrupt.   </span>
+<span class="c1">// The slow path may detect any corruption and halt later.</span>
+</code></pre></div>
+<p>重复扫描是为了处理缓存被破坏时的情况。</p>
+<p>因为正常情况下，缓存表中，要么是有效数据，要么是空表项，这两种结果都会退出循环。而当缓存破坏时，会存在三种结果，有效数据/无效数据/空表项。当为无效数据时，肯定与 sel 不匹配。假设在极端情况下，缓存被破坏，这样会导致一直查找到表头都是无效数据项。</p>
+<p>所以苹果工程师们，做了这样一种补救措施。当第一次从定位的缓存表项反向扫描到表头后，重新从表尾开始扫描，进行全表查找。当第二次再次扫描到表头时，就会跳转到JumpMiss，表示缓存未命中，进入慢查找过程更新缓存。</p>
+<p>最后看下这个过程的完整代码：</p>
+<div class="highlight"><pre><code><span></span><span class="mi">1</span><span class="o">:</span><span class="w">  </span><span class="n">cmp</span><span class="w">  </span><span class="n">p9</span><span class="p">,</span><span class="w"> </span><span class="n">p1</span><span class="w"> </span><span class="c1">// if (bucket-&gt;sel != _cmd)  </span>
+<span class="c1">// 不相等，跳转到 2  </span>
+<span class="n">b</span><span class="p">.</span><span class="n">ne</span><span class="w">  </span><span class="mf">2f</span><span class="w">  </span><span class="c1">//  scan more  </span>
+<span class="c1">// 命中缓存，调用 imp  </span>
+<span class="n">CacheHit</span><span class="w"> </span><span class="n">$0</span><span class="w">  </span><span class="c1">// call or return imp  </span>
+<span class="mi">2</span><span class="o">:</span><span class="w"> </span><span class="c1">// not hit: p12 = not-hit bucket  </span>
+<span class="n">CheckMiss</span><span class="w"> </span><span class="n">$0</span><span class="w">  </span><span class="c1">// miss if bucket-&gt;sel == 0  </span>
+<span class="n">cmp</span><span class="w">  </span><span class="n">p12</span><span class="p">,</span><span class="w"> </span><span class="n">p10</span><span class="w"> </span><span class="c1">// wrap if bucket == buckets  </span>
+<span class="n">b</span><span class="p">.</span><span class="n">eq</span><span class="w">  </span><span class="mf">3f</span><span class="w">  </span>
+<span class="n">ldp</span><span class="w">  </span><span class="n">p17</span><span class="p">,</span><span class="w"> </span><span class="n">p9</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x12</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="o">-</span><span class="n">BUCKET_SIZE</span><span class="p">]</span><span class="o">!</span><span class="w">  </span><span class="c1">// {imp, sel} = *--bucket  </span>
+<span class="n">b</span><span class="w">  </span><span class="mi">1</span><span class="n">b</span><span class="w">  </span><span class="c1">// loop  </span>
+<span class="mi">3</span><span class="o">:</span><span class="w"> </span><span class="c1">// wrap: p12 = first bucket, w11 = mask  </span>
+<span class="n">add</span><span class="w">  </span><span class="n">p12</span><span class="p">,</span><span class="w"> </span><span class="n">p12</span><span class="p">,</span><span class="w"> </span><span class="n">p11</span><span class="p">,</span><span class="w"> </span><span class="n">LSR</span><span class="w"> </span><span class="err">#</span><span class="p">(</span><span class="mi">48</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="o">+</span><span class="n">PTRSHIFT</span><span class="p">))</span><span class="w">  </span>
+<span class="c1">// Clone scanning loop to miss instead of hang when cache is corrupt.  </span>
+<span class="c1">// The slow path may detect any corruption and halt later.  </span>
+<span class="n">ldp</span><span class="w">  </span><span class="n">p17</span><span class="p">,</span><span class="w"> </span><span class="n">p9</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x12</span><span class="p">]</span><span class="w"> </span><span class="c1">// {imp, sel} = *bucket  </span>
+<span class="mi">1</span><span class="o">:</span><span class="w">  </span><span class="n">cmp</span><span class="w">  </span><span class="n">p9</span><span class="p">,</span><span class="w"> </span><span class="n">p1</span><span class="w"> </span><span class="c1">// if (bucket-&gt;sel != _cmd)  </span>
+<span class="n">b</span><span class="p">.</span><span class="n">ne</span><span class="w">  </span><span class="mf">2f</span><span class="w">  </span><span class="c1">//  scan more  </span>
+<span class="n">CacheHit</span><span class="w"> </span><span class="n">$0</span><span class="w">  </span><span class="c1">// call or return imp  </span>
+<span class="mi">2</span><span class="o">:</span><span class="w"> </span><span class="c1">// not hit: p12 = not-hit bucket  </span>
+<span class="n">CheckMiss</span><span class="w"> </span><span class="n">$0</span><span class="w">  </span><span class="c1">// miss if bucket-&gt;sel == 0  </span>
+<span class="c1">// 比较取到的缓存项和缓存表地址是否一致，也就是是否是第一项  </span>
+<span class="n">cmp</span><span class="w">  </span><span class="n">p12</span><span class="p">,</span><span class="w"> </span><span class="n">p10</span><span class="w"> </span><span class="c1">// wrap if bucket == buckets  </span>
+<span class="c1">// 相等，跳转到 3  </span>
+<span class="n">b</span><span class="p">.</span><span class="n">eq</span><span class="w">  </span><span class="mf">3f</span><span class="w">  </span>
+<span class="c1">// 从当前表项开始，继续往上找上一项  </span>
+<span class="n">ldp</span><span class="w">  </span><span class="n">p17</span><span class="p">,</span><span class="w"> </span><span class="n">p9</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x12</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="o">-</span><span class="n">BUCKET_SIZE</span><span class="p">]</span><span class="o">!</span><span class="w">  </span><span class="c1">// {imp, sel} = *--bucket  </span>
+<span class="c1">// 然后再次跳转到 1，进行循环比较  </span>
+<span class="n">b</span><span class="w">  </span><span class="mi">1</span><span class="n">b</span><span class="w">  </span><span class="c1">// loop  </span>
+<span class="nl">LLookupEnd$1</span><span class="p">:</span><span class="w">  </span>
+<span class="nl">LLookupRecover$1</span><span class="p">:</span><span class="w">  </span>
+<span class="mi">3</span><span class="o">:</span><span class="w"> </span><span class="c1">// double wrap  </span>
+<span class="n">JumpMiss</span><span class="w"> </span><span class="n">$0</span>
+</code></pre></div>
+<p>从代码中可以看到上下分别有 1、2、3 标签。下面的 1、2 跟上面的 1、2 处理过程很类似，只不过下面的 2 跳转到 3 的处理有点不一样。</p>
+<div class="highlight"><pre><code><span></span><span class="mi">3</span><span class="o">:</span><span class="w"> </span><span class="c1">// double wrap  </span>
+<span class="n">JumpMiss</span><span class="w"> </span><span class="n">$0</span>
+</code></pre></div>
+<p>下面 2 中同样是判断表项与表头是否相等，若相等，表示已经遍历完全表，但仍未找到缓存，则跳入到 JumpMiss 的处理。同样，JumpMiss 会调用__objc_msgSend_uncached。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 缓存未命中的处理  </span>
+<span class="p">.</span><span class="n">macro</span><span class="w"> </span><span class="n">JumpMiss</span><span class="w">  </span>
+<span class="c1">// 调用 __objc_msgSend_uncached，进行缓存未命中的查找  </span>
+<span class="n">b</span><span class="w">  </span><span class="n">__objc_msgSend_uncached</span><span class="w">  </span>
+<span class="p">.</span><span class="n">endif</span>
+</code></pre></div>
+<h4>缓存未命中处理</h4>
+<p>缓存未命中时，都会走到 __objc_msgSend_uncached 去处理。</p>
+<p>__objc_msgSend_uncached 的实现很简单，调用 MethodTableLookup 进行方法查找。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 缓存未命中的查找  </span>
+<span class="n">STATIC_ENTRY</span><span class="w"> </span><span class="n">__objc_msgSend_uncached</span><span class="w">  </span>
+<span class="n">UNWIND</span><span class="w"> </span><span class="n">__objc_msgSend_uncached</span><span class="p">,</span><span class="w"> </span><span class="n">FrameWithNoSaves</span><span class="w">  </span>
+<span class="c1">// THIS IS NOT A CALLABLE C FUNCTION  </span>
+<span class="c1">// Out-of-band p16 is the class to search  </span>
+<span class="c1">// 开始方法查找过程  </span>
+<span class="n">MethodTableLookup</span><span class="w">  </span>
+<span class="n">TailCallFunctionPointer</span><span class="w"> </span><span class="n">x17</span><span class="w">  </span>
+<span class="n">END_ENTRY</span><span class="w"> </span><span class="n">__objc_msgSend_uncached</span>
+</code></pre></div>
+<p>MethodTableLookup 的实现如下：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 方法查找  </span>
+<span class="p">.</span><span class="n">macro</span><span class="w"> </span><span class="n">MethodTableLookup</span><span class="w">  </span>
+<span class="c1">// 保存寄存器  </span>
+<span class="n">SAVE_REGS</span><span class="w">  </span>
+<span class="c1">// lookUpImpOrForward(obj, sel, cls, LOOKUP_INITIALIZE | LOOKUP_RESOLVER)  </span>
+<span class="c1">// receiver and selector already in x0 and x1  </span>
+<span class="c1">// 第 3 个参数是 cls，x16 中保存了 cls  </span>
+<span class="n">mov</span><span class="w">  </span><span class="n">x2</span><span class="p">,</span><span class="w"> </span><span class="n">x16</span><span class="w">  </span>
+<span class="c1">// LOOKUP_INITIALIZE = 1, LOOKUP_RESOLVER = 2, 两者或运算 = 3  </span>
+<span class="n">mov</span><span class="w">  </span><span class="n">x3</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mi">3</span><span class="w">  </span>
+<span class="c1">// 调用 _lookUpImpOrForward 进行查找，最后查找到的 imp 放到 x0 中  </span>
+<span class="n">bl</span><span class="w">  </span><span class="n">_lookUpImpOrForward</span><span class="w">  </span>
+<span class="c1">// IMP in x0  </span>
+<span class="c1">// 将 imp 放到 x17  </span>
+<span class="n">mov</span><span class="w">  </span><span class="n">x17</span><span class="p">,</span><span class="w"> </span><span class="n">x0</span><span class="w">  </span>
+<span class="c1">// 恢复寄存器  </span>
+<span class="n">RESTORE_REGS</span><span class="w">  </span>
+<span class="p">.</span><span class="n">endmacro</span>
+</code></pre></div>
+<p>它主要做了如下事情：</p>
+<ul>
+<li>保存寄存器</li>
+<li>设置 lookUpImpOrForward 调用所需的参数，函数调用时前 8 个参数放在 x0 ~ x7 中。</li>
+<li>调用 lookUpImpOrForward 进行方法查找</li>
+<li>由于返回结果是放在 x0 中，之前缓存查找结果的 imp 是放在 x17 中，这里保持一致</li>
+<li>恢复寄存器</li>
+</ul>
+<p>所以最终是调用到 lookUpImpOrForward 去进行方法的查找，在 objc-runtime-new.mm 中有相应的实现。</p>
+<p>通过 lookUpImpOrForward 查找到结果后，会调用 TailCallFunctionPointer x17 来完成最后一步使命。</p>
+<p>TailCallFunctionPointer 实现如下，可见它也只是执行 br 指令，调用传入的 imp。</p>
+<div class="highlight"><pre><code><span></span><span class="p">.</span><span class="n">macro</span><span class="w"> </span><span class="n">TailCallFunctionPointer</span><span class="w">  </span>
+<span class="c1">// $0 = function pointer value  </span>
+<span class="n">br</span><span class="w">  </span><span class="n">$0</span><span class="w">  </span>
+<span class="p">.</span><span class="n">endmacro</span>
+</code></pre></div>
+<p>到这里，完整的流程就走完了。但是，还未完，在文章开头我们跳过了 Tagged pointer 和 nil 的处理，即跳转到 LNilOrTagged。</p>
+<h3>Tagged Pointer 处理</h3>
+<p>为什么 Tagged Pointer 要单独拎出来呢？由于 Tagged Pointer 的特殊性，它本身不是个指针，而是存储了实际的数据，其 class地址的获取方式跟普通对象不一样，所以需要单独处理。</p>
+<p>而 Tagged Pointer 分为 Extend Tagged Pointer 和 Basic Tagged Pointer，并且两者的内存布局不太一样，这无疑又增加了复杂度，需分别处理。</p>
+<h4>Tagged Pointer</h4>
+<p>下面先简要介绍一下 Tagged Pointer，它是一项在 64 位下节省内存空间的技术。当使用一些小对象，比如 NSNumber、NSDate时，可能它们的值用不着 64 位来表示。如果使用普通对象的存储方式，需要分配的内存空间 = 指针 8 字节 + 对象大小，会很浪费空间。这时候，我们可以做一些优化，在 64 位中分配一些位用于存储数据，然后做一些标记，表示它非普通对象的指针。此时，它不再是一个指针，不指向任何内存地址，而是真实的值。当然，如果数值较大，还是会用普通对象存储。</p>
+<h4>判断 Tagged Pointer</h4>
+<p>在代码的最开头部分，判定 self ≤ 0 跳入 LNilOrTagged 的处理。我们说当小于 0 时，表示是 Tagged Pointer。这一点，从源码中可以找到答案。</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="kr">inline</span><span class="w"> </span><span class="kt">bool</span><span class="w">   </span>
+<span class="nf">_objc_isTaggedPointer</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">_Nullable</span><span class="w"> </span><span class="n">ptr</span><span class="p">)</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">((</span><span class="kt">uintptr_t</span><span class="p">)</span><span class="n">ptr</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">_OBJC_TAG_MASK</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">_OBJC_TAG_MASK</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在 arm64 下，_OBJC_TAG_MASK 定义如下。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#define _OBJC_TAG_MASK (1UL&lt;&lt;63)</span>
+</code></pre></div>
+<p>那么根据上述代码，我们可以得知：</p>
+<p>在 arm64 下，当最高位为 1 时，则为 Tagged Pointer。</p>
+<p>另外，Tagged Pointer 中还会区分是否为 Extend Tagged Pointer，实现在 objc-object.h 中。</p>
+<div class="highlight"><pre><code><span></span><span class="kr">inline</span><span class="w"> </span><span class="kt">bool</span><span class="w">   </span>
+<span class="nf">objc_object::isExtTaggedPointer</span><span class="p">()</span><span class="w">   </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_objc_decodeTaggedPointer</span><span class="p">(</span><span class="k">this</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="n">ptr</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">_OBJC_TAG_EXT_MASK</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">_OBJC_TAG_EXT_MASK</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>其中，_OBJC_TAG_EXT_MASK 定义如下，在 objc-internal.h。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#define _OBJC_TAG_EXT_MASK (0xfUL&lt;&lt;60)</span>
+</code></pre></div>
+<p>若高 4 位是全为 1，则表示 Extend Tagged Pointer。</p>
+<h4>class index</h4>
+<p>Tagged Pointer 中记录了对象指向的 class 的索引信息，可根据索引到 Tagged Pointer Table 中查找到对应的 class。索引的信息的布局根据是否为 Extend Tagged Pointer 有所不同。</p>
+<ul>
+<li>如果是普通的 Tagged Pointer，高 4 位为索引，到 Tagged Pointer Table 中查找 class。</li>
+<li>如果是 Extend Tagged Pointer，由于高 4 位都为 1，那么接下来的 8 位表示索引，到 Extend Tagged Pointer Table 表中查找。</li>
+</ul>
+<p>对象布局如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20201222-141130-5.png" alt=""></p>
+<p>获取 index 的方式，我们从通过源码中 objc-object.h 可以得到验证。下面代码中 slot 就代表 index。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#define _OBJC_TAG_SLOT_SHIFT 60  </span>
+<span class="cp">#define _OBJC_TAG_SLOT_MASK 0xf  </span>
+<span class="cp">#define _OBJC_TAG_EXT_SLOT_SHIFT 52  </span>
+<span class="cp">#define _OBJC_TAG_EXT_SLOT_MASK 0xff  </span>
+
+<span class="kr">inline</span><span class="w"> </span><span class="n">Class</span><span class="w">         </span>
+<span class="nf">objc_object::getIsa</span><span class="p">()</span><span class="w">   </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">fastpath</span><span class="p">(</span><span class="o">!</span><span class="n">isTaggedPointer</span><span class="p">()))</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">ISA</span><span class="p">();</span><span class="w">  </span>
+<span class="w">    </span><span class="k">extern</span><span class="w"> </span><span class="n">objc_class</span><span class="w"> </span><span class="n">OBJC_CLASS_$___NSUnrecognizedTaggedPointer</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">slot</span><span class="p">,</span><span class="w"> </span><span class="n">ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">uintptr_t</span><span class="p">)</span><span class="k">this</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">Class</span><span class="w"> </span><span class="n">cls</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">    </span><span class="c1">// 右移 60 位，获取高 4 位  </span>
+<span class="w">    </span><span class="n">slot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">ptr</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">_OBJC_TAG_SLOT_SHIFT</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">_OBJC_TAG_SLOT_MASK</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">cls</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">objc_tag_classes</span><span class="p">[</span><span class="n">slot</span><span class="p">];</span><span class="w">  </span>
+
+<span class="w">    </span><span class="c1">// 如果是 extend tagged pointer，则获取到的 cls 的特殊的 ___NSUnrecognizedTaggedPointer  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">slowpath</span><span class="p">(</span><span class="n">cls</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="p">(</span><span class="n">Class</span><span class="p">)</span><span class="o">&amp;</span><span class="n">OBJC_CLASS_$___NSUnrecognizedTaggedPointer</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="c1">// 获取 extend 的索引，右移 52 位后，取低 8 位  </span>
+<span class="w">        </span><span class="n">slot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">ptr</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">_OBJC_TAG_EXT_SLOT_SHIFT</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">_OBJC_TAG_EXT_SLOT_MASK</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="n">cls</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">objc_tag_ext_classes</span><span class="p">[</span><span class="n">slot</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">cls</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>下面将其拆分来解释一下。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#define _OBJC_TAG_SLOT_SHIFT 60  </span>
+<span class="cp">#define _OBJC_TAG_SLOT_MASK 0xf  </span>
+<span class="c1">// 右移 60 位，获取高 4 位  </span>
+<span class="n">slot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">ptr</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">_OBJC_TAG_SLOT_SHIFT</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">_OBJC_TAG_SLOT_MASK</span><span class="p">;</span>
+</code></pre></div>
+<p>这一步获取 index。将指针右移 60 位，得到高 4 位地址，然后跟掩码 0xf 做与运算。</p>
+<div class="highlight"><pre><code><span></span><span class="n">cls</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">objc_tag_classes</span><span class="p">[</span><span class="n">slot</span><span class="p">];</span>
+</code></pre></div>
+<p>从 objc_tag_classes 表中获取到 cls。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 如果是 extend tagged pointer，则获取到的 cls 的特殊的 ___NSUnrecognizedTaggedPointer  </span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">slowpath</span><span class="p">(</span><span class="n">cls</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="p">(</span><span class="n">Class</span><span class="p">)</span><span class="o">&amp;</span><span class="n">OBJC_CLASS_$___NSUnrecognizedTaggedPointer</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="p">...</span><span class="w">   </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>接着判断是否为 OBJC<em>CLASS</em>$___NSUnrecognizedTaggedPointer。</p>
+<p>为什么要判断呢 <code>__NSUnrecognizedTaggedPointer</code> ？在 NSObject.mm中有这样一段注释。大致意思是它是作为旧调试器的占位符，当检查 extend tagged pointer 时，得到的 cls 会是<code>__NSUnrecognizedTaggedPointer</code>。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// Placeholder for old debuggers. When they inspect an   </span>
+<span class="c1">// extended tagged pointer object they will see this isa.  </span>
+<span class="err">@</span><span class="n">interface</span><span class="w"> </span><span class="n">__NSUnrecognizedTaggedPointer</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">NSObject</span><span class="w">  </span>
+
+<span class="err">@</span><span class="n">end</span>
+</code></pre></div>
+<p>前面我们说过高 4 位是 tagged pointer 的索引。当全为 1 时，则表示是 extend tagged pointer。所以用了一个占位的 cls 来表示是 extend 类型。</p>
+<p>如果是 __NSUnrecognizedTaggedPointer，表明它是 Extend Tagged Pointer，需要再取出 extend index。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#define _OBJC_TAG_EXT_SLOT_SHIFT 52  </span>
+<span class="cp">#define _OBJC_TAG_EXT_SLOT_MASK 0xff  </span>
+
+<span class="c1">// 获取 extend 的索引，右移 52 位后，取低 8 位  </span>
+<span class="n">slot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">ptr</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">_OBJC_TAG_EXT_SLOT_SHIFT</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">_OBJC_TAG_EXT_SLOT_MASK</span><span class="p">;</span><span class="w">  </span>
+<span class="n">cls</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">objc_tag_ext_classes</span><span class="p">[</span><span class="n">slot</span><span class="p">];</span>
+</code></pre></div>
+<p>这一步，指针右移 52 位，与上 0xff，获取 8 位的索引。最后从 objc_tag_ext_classes 表中获取到 cls。</p>
+<p>这一段的源码分析对于理解下一节中的流程处理很有帮助，因为汇编也是按照这个方式来处理的。</p>
+<h4>处理流程</h4>
+<p>LNilOrTagged 的处理如下：</p>
+<div class="highlight"><pre><code><span></span><span class="nl">LNilOrTagged</span><span class="p">:</span><span class="w">  </span>
+
+<span class="c1">// 如果是 nil，跳转 LReturnZero 处理  </span>
+<span class="n">b</span><span class="p">.</span><span class="n">eq</span><span class="w">  </span><span class="n">LReturnZero</span><span class="w">  </span><span class="c1">// nil check  </span>
+
+<span class="c1">// tagged  </span>
+<span class="c1">// 获取 _objc_debug_taggedpointer_classes 表地址，放入 x10  </span>
+<span class="n">adrp</span><span class="w">  </span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">_objc_debug_taggedpointer_classes</span><span class="err">@</span><span class="n">PAGE</span><span class="w">  </span>
+
+<span class="n">add</span><span class="w">  </span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">_objc_debug_taggedpointer_classes</span><span class="err">@</span><span class="n">PAGEOFF</span><span class="w">  </span>
+
+<span class="c1">// 从 x0 中，提取 60 ~ 63 位，也就是 索引值，放入 x11  </span>
+<span class="n">ubfx</span><span class="w">  </span><span class="n">x11</span><span class="p">,</span><span class="w"> </span><span class="n">x0</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mi">60</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mi">4</span><span class="w">  </span>
+
+<span class="c1">// 从表中取出索引对应的项，也就是 class 地址，放入 x16。由于每项为 8 字节，所以左移 3 位  </span>
+<span class="n">ldr</span><span class="w">  </span><span class="n">x16</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">x11</span><span class="p">,</span><span class="w"> </span><span class="n">LSL</span><span class="w"> </span><span class="err">#</span><span class="mi">3</span><span class="p">]</span><span class="w">  </span>
+
+<span class="c1">// 获取 _OBJC_CLASS_$___NSUnrecognizedTaggedPointer 地址  </span>
+<span class="n">adrp</span><span class="w">  </span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">_OBJC_CLASS_$___NSUnrecognizedTaggedPointer</span><span class="err">@</span><span class="n">PAGE</span><span class="w">  </span>
+
+<span class="n">add</span><span class="w">  </span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">_OBJC_CLASS_$___NSUnrecognizedTaggedPointer</span><span class="err">@</span><span class="n">PAGEOFF</span><span class="w">  </span>
+
+<span class="c1">// 将取出的 class 地址与 NSUnrecognizedTaggedPointer 地址进行比较  </span>
+<span class="n">cmp</span><span class="w">  </span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">x16</span><span class="w">  </span>
+
+<span class="c1">// 不相等，则跳回主流程，进行缓存查找或者方法查找  </span>
+<span class="n">b</span><span class="p">.</span><span class="n">ne</span><span class="w">  </span><span class="n">LGetIsaDone</span><span class="w">  </span>
+
+<span class="c1">// ext tagged  </span>
+<span class="c1">// 如果相等，那么表示它是 extend tagged pointer，取出 _objc_debug_taggedpointer_ext_classes 地址放到 X10  </span>
+<span class="n">adrp</span><span class="w">  </span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">_objc_debug_taggedpointer_ext_classes</span><span class="err">@</span><span class="n">PAGE</span><span class="w">  </span>
+
+<span class="n">add</span><span class="w">  </span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">_objc_debug_taggedpointer_ext_classes</span><span class="err">@</span><span class="n">PAGEOFF</span><span class="w">  </span>
+
+<span class="c1">// 从 x0 中，提取 52 ~ 59 位，得到索引值  </span>
+<span class="n">ubfx</span><span class="w">  </span><span class="n">x11</span><span class="p">,</span><span class="w"> </span><span class="n">x0</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mi">52</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mi">8</span><span class="w">  </span>
+
+<span class="c1">// 获取 class 的地址  </span>
+<span class="n">ldr</span><span class="w">  </span><span class="n">x16</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">x11</span><span class="p">,</span><span class="w"> </span><span class="n">LSL</span><span class="w"> </span><span class="err">#</span><span class="mi">3</span><span class="p">]</span><span class="w">  </span>
+
+<span class="c1">// 跳回主流程  </span>
+<span class="n">b</span><span class="w">  </span><span class="n">LGetIsaDone</span><span class="w">  </span>
+
+<span class="c1">// SUPPORT_TAGGED_POINTERS</span>
+</code></pre></div>
+<p>我们来一步步分析：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 如果是 nil，跳转 LReturnZero 处理  </span>
+<span class="n">b</span><span class="p">.</span><span class="n">eq</span><span class="w">  </span><span class="n">LReturnZero</span><span class="w">  </span><span class="c1">// nil check</span>
+</code></pre></div>
+<p>判定 self 与 0 的比较结果是否相等，是则跳转 nil 处理。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 获取 _objc_debug_taggedpointer_classes 表地址，放入 x10  </span>
+<span class="n">adrp</span><span class="w">  </span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">_objc_debug_taggedpointer_classes</span><span class="err">@</span><span class="n">PAGE</span><span class="w">  </span>
+
+<span class="n">add</span><span class="w">  </span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">_objc_debug_taggedpointer_classes</span><span class="err">@</span><span class="n">PAGEOFF</span>
+</code></pre></div>
+<p>这里通过 adrp 和 add 两条指令，获取 objcdebug_taggedpointer_classes 的地址。因为 arm64 指令是固定长度 32 位，操作数中不能放下 64 位的地址。因此先用 adrp 来获取地址的高 32 位部分，然后再加上低 32 位，放入到 x10。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 从 x0 中，提取 60 ~ 63 位，也就是 索引值，放入 x11  </span>
+<span class="n">ubfx</span><span class="w">  </span><span class="n">x11</span><span class="p">,</span><span class="w"> </span><span class="n">x0</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mi">60</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mi">4</span>
+</code></pre></div>
+<p>ubfx 是字节提取指令，从第 60 位开始，总共提取 4 位。这里 x0 = self，从 x0 中提取高 4 位，放入 x11。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 从表中取出索引对应的项，也就是 class 地址，放入 x16。由于每项为 8 字节，所以左移 3 位  </span>
+<span class="n">ldr</span><span class="w">  </span><span class="n">x16</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">x11</span><span class="p">,</span><span class="w"> </span><span class="n">LSL</span><span class="w"> </span><span class="err">#</span><span class="mi">3</span><span class="p">]</span>
+</code></pre></div>
+<p>ldr 指令我们应该比较熟悉，上面用到很多。_objc_debug_taggedpointer_classes 表项大小为 8， 所以 x11 左移 3 位，计算相对于表头的偏移，然后将地址中的数据放到 x16 中。这里就获取到了 class 地址。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 获取 _OBJC_CLASS_$___NSUnrecognizedTaggedPointer 地址  </span>
+<span class="n">adrp</span><span class="w">  </span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">_OBJC_CLASS_$___NSUnrecognizedTaggedPointer</span><span class="err">@</span><span class="n">PAGE</span><span class="w">  </span>
+<span class="n">add</span><span class="w">  </span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">_OBJC_CLASS_$___NSUnrecognizedTaggedPointer</span><span class="err">@</span><span class="n">PAGEOFF</span><span class="w">  </span>
+<span class="c1">// 将取出的 class 地址与 NSUnrecognizedTaggedPointer 地址进行比较  </span>
+<span class="n">cmp</span><span class="w">  </span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">x16</span><span class="w">  </span>
+<span class="c1">// 不相等，则跳回主流程，进行缓存查找或者方法查找  </span>
+<span class="n">b</span><span class="p">.</span><span class="n">ne</span><span class="w">  </span><span class="n">LGetIsaDone</span>
+</code></pre></div>
+<p>这里，以同样的方式获取到 OBJCCLASS_$___NSUnrecognizedTaggedPointer 的地址。用来判定是否是 extend tagged pinter。</p>
+<p>如果不是，则跳回主流程，执行我们前面部分讲解的过程。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 如果相等，那么表示它是 extend tagged pointer，取出 _objc_debug_taggedpointer_ext_classes 地址放到 X10  </span>
+<span class="n">adrp</span><span class="w">  </span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">_objc_debug_taggedpointer_ext_classes</span><span class="err">@</span><span class="n">PAGE</span><span class="w">  </span>
+<span class="n">add</span><span class="w">  </span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">_objc_debug_taggedpointer_ext_classes</span><span class="err">@</span><span class="n">PAGEOFF</span><span class="w">  </span>
+<span class="c1">// 从 x0 中，提取 52 ~ 59 位，得到索引值  </span>
+<span class="n">ubfx</span><span class="w">  </span><span class="n">x11</span><span class="p">,</span><span class="w"> </span><span class="n">x0</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mi">52</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mi">8</span><span class="w">  </span>
+<span class="c1">// 获取 class 的地址  </span>
+<span class="n">ldr</span><span class="w">  </span><span class="n">x16</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="n">x11</span><span class="p">,</span><span class="w"> </span><span class="n">LSL</span><span class="w"> </span><span class="err">#</span><span class="mi">3</span><span class="p">]</span><span class="w">  </span>
+<span class="c1">// 跳回主流程  </span>
+<span class="n">b</span><span class="w">  </span><span class="n">LGetIsaDone</span>
+</code></pre></div>
+<p>否则表明它是 extend tagged pointer，得从 objcdebug_taggedpointer_ext_classes 获取 class 地址。</p>
+<p>而 extend tagged pointer 的索引位在高 4 位后面接下来的 8 位，也就是 52 ~ 59 位中，进行上述类似的提取过程，然后获取 class 的地址，放到 x16 中，跳回主流程继续处理。</p>
+<h4>nil 处理</h4>
+<p>nil 的处理如下，比较简单，将可能用于存储函数返回值的寄存器清 0。</p>
+<div class="highlight"><pre><code><span></span><span class="nl">LReturnZero</span><span class="p">:</span><span class="w">  </span>
+
+<span class="c1">// x0 is already zero  </span>
+<span class="c1">// 将寄存器清 0  </span>
+<span class="n">mov</span><span class="w">  </span><span class="n">x1</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mi">0</span><span class="w">  </span>
+<span class="n">movi</span><span class="w">  </span><span class="n">d0</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mi">0</span><span class="w">  </span>
+<span class="n">movi</span><span class="w">  </span><span class="n">d1</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mi">0</span><span class="w">  </span>
+<span class="n">movi</span><span class="w">  </span><span class="n">d2</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mi">0</span><span class="w">  </span>
+<span class="n">movi</span><span class="w">  </span><span class="n">d3</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mi">0</span><span class="w">   </span>
+<span class="n">ret</span>
+</code></pre></div>
+<p>x0 和 x1 用来存储整形返回值，v0 ~ v3 用来存储浮点型返回值，d0 ~ d3 表示其低 32 位。</p>
+<h3>总结</h3>
+<p>这里我将 objc_msgSend 的流程大致捋了一遍，包括 class 查找、缓存查找、缓存未命中的处理、taggedPointer 和 nil 处理。对于 class 查找的过程，是比较核心的一部分。不同类型的对象有着不同的查找方式，相信如果弄懂了这部分，对于对象结构的布局会有进一步的理解。</p>
+<p>另外，看 objc_msgSend 的源码对于学习 arm64 汇编的基础指令也是一种比较好的途径，因为大部分同学对于 x86的指令会熟悉一些。虽然汇编起初会让人觉得云里雾里，还没看就放弃。但是如果一句句读下来，你会发现它和平常我们写的代码逻辑也没啥两样。</p>
+<p>最后，希望这篇文章能带给你一些不同的知识。</p>
+<h3>参考资料</h3>
+<ul>
+<li><a href="https://www.mikeash.com/pyblog/friday-qa-2017-06-30-dissecting-objc_msgsend-on-arm64.html">https://www.mikeash.com/pyblog/friday-qa-2017-06-30-dissecting-objc_msgsend-on-arm64.html</a></li>
+<li><a href="http://madmark.cc/2017/08/01/ARM64_objc-msgSend/">http://madmark.cc/2017/08/01/ARM64_objc-msgSend/</a></li>
+<li>runtime 源码：git@github.com:0xxd0/objc4.git</li>
+</ul>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "聊聊Objective-C循环引用的检测及objc_msgSend源码解读.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

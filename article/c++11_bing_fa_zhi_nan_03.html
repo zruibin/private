@@ -1,0 +1,487 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>C++11并发指南03 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="C++11并发指南03,C/C++,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="C++11并发指南五(std::condition_variable 详解)" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>C++11并发指南03</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2020-10-02 17:18
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://www.cnblogs.com/haippy/p/3252041.html' target='blank'>C++11并发指南五(std::condition_variable 详解)</a></p></h4>
+<p>前面三讲《<a href="http://www.cnblogs.com/haippy/p/3236136.html">C++11 并发指南二(std::thread详解)</a>》，《<a href="http://www.cnblogs.com/haippy/p/3237213.html">C++11 并发指南三(std::mutex详解)</a>》分别介绍了std::thread，std::mutex，std::future 等相关内容，相信读者对 C++11 中的多线程编程有了一个最基本的认识，本文将介绍C++11 标准中 <condition_variable> 头文件里面的类和相关函数。</p>
+<p><condition_variable > 头文件主要包含了与条件变量相关的类和函数。相关的类包括 std::condition_variable 和std::condition_variable_any，还有枚举类型std::cv_status。另外还包括函数std::notify_all_at_thread_exit()，下面分别介绍一下以上几种类型。</p>
+<h3>std::condition_variable 类介绍</h3>
+<p><code>std::condition_variable</code>是条件变量，更多有关条件变量的定义参考<a href="http://en.wikipedia.org/wiki/Monitor%28synchronization%29">维基百科</a>。Linux 下使用 Pthread 库中的 pthread<em>cond</em>*()函数提供了与条件变量相关的功能， Windows 则参考 <a href="http://msdn.microsoft.com/en-us/library/windows/desktop/ms682052%28v=vs.85%29.aspx">MSDN</a>。</p>
+<p>当<code>std::condition_variable</code>对象的某个 wait 函数被调用的时候，它使用<code>std::unique_lock</code>(通过<code>std::mutex</code>)来锁住当前线程。当前线程会一直被阻塞，直到另外一个线程在相同的<code>std::condition_variable</code>对象上调用了notification 函数来唤醒当前线程。</p>
+<p>std::condition_variable 对象通常使用 std::unique_lock<std::mutex> 来等待，如果需要使用另外的lockable 类型，可以使用 std::condition_variable_any 类，本文后面会讲到std::condition_variable_any 的用法。</p>
+<p>首先我们来看一个简单的<a href="http://www.cplusplus.com/reference/condition_variable/condition_variable/">例子</a></p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span><span class="c1">                // std::cout</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;thread&gt;</span><span class="c1">                // std::thread</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;mutex&gt;</span><span class="c1">                // std::mutex, std::unique_lock</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;condition_variable&gt;</span><span class="c1">    // std::condition_variable</span>
+
+<span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="w"> </span><span class="n">mtx</span><span class="p">;</span><span class="w"> </span><span class="c1">// 全局互斥锁.</span>
+<span class="n">std</span><span class="o">::</span><span class="n">condition_variable</span><span class="w"> </span><span class="n">cv</span><span class="p">;</span><span class="w"> </span><span class="c1">// 全局条件变量.</span>
+<span class="kt">bool</span><span class="w"> </span><span class="n">ready</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span><span class="w"> </span><span class="c1">// 全局标志位.</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">do_print_id</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">id</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">unique_lock</span><span class="w"> </span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="o">&gt;</span><span class="w"> </span><span class="n">lck</span><span class="p">(</span><span class="n">mtx</span><span class="p">);</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">ready</span><span class="p">)</span><span class="w"> </span><span class="c1">// 如果标志位不为 true, 则等待...</span>
+<span class="w">        </span><span class="n">cv</span><span class="p">.</span><span class="n">wait</span><span class="p">(</span><span class="n">lck</span><span class="p">);</span><span class="w"> </span><span class="c1">// 当前线程被阻塞, 当全局标志位变为 true 之后,</span>
+<span class="w">    </span><span class="c1">// 线程被唤醒, 继续往下执行打印线程编号id.</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;thread &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="sc">&#39;\n&#39;</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">go</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">unique_lock</span><span class="w"> </span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="o">&gt;</span><span class="w"> </span><span class="n">lck</span><span class="p">(</span><span class="n">mtx</span><span class="p">);</span>
+<span class="w">    </span><span class="n">ready</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span><span class="w"> </span><span class="c1">// 设置全局标志位为 true.</span>
+<span class="w">    </span><span class="n">cv</span><span class="p">.</span><span class="n">notify_all</span><span class="p">();</span><span class="w"> </span><span class="c1">// 唤醒所有线程.</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="n">threads</span><span class="p">[</span><span class="mi">10</span><span class="p">];</span>
+<span class="w">    </span><span class="c1">// spawn 10 threads:</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">10</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span>
+<span class="w">        </span><span class="n">threads</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="p">(</span><span class="n">do_print_id</span><span class="p">,</span><span class="w"> </span><span class="n">i</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;10 threads ready to race...</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="n">go</span><span class="p">();</span><span class="w"> </span><span class="c1">// go!</span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">th</span><span class="o">:</span><span class="n">threads</span><span class="p">)</span>
+<span class="w">        </span><span class="n">th</span><span class="p">.</span><span class="n">join</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>执行结果如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">concurrency</span><span class="w"> </span><span class="p">)</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="n">ConditionVariable</span><span class="o">-</span><span class="n">basic1</span><span class="w"> </span>
+<span class="mi">10</span><span class="w"> </span><span class="n">threads</span><span class="w"> </span><span class="n">ready</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">race</span><span class="p">...</span>
+<span class="kr">thread</span><span class="w"> </span><span class="mi">1</span>
+<span class="kr">thread</span><span class="w"> </span><span class="mi">0</span>
+<span class="kr">thread</span><span class="w"> </span><span class="mi">2</span>
+<span class="kr">thread</span><span class="w"> </span><span class="mi">3</span>
+<span class="kr">thread</span><span class="w"> </span><span class="mi">4</span>
+<span class="kr">thread</span><span class="w"> </span><span class="mi">5</span>
+<span class="kr">thread</span><span class="w"> </span><span class="mi">6</span>
+<span class="kr">thread</span><span class="w"> </span><span class="mi">7</span>
+<span class="kr">thread</span><span class="w"> </span><span class="mi">8</span>
+<span class="kr">thread</span><span class="w"> </span><span class="mi">9</span>
+</code></pre></div>
+<p>好了，对条件变量有了一个基本的了解之后，我们来看看 std::condition_variable 的各个成员函数。</p>
+<p><strong>std::condition_variable 构造函数</strong></p>
+<table>
+<tbody>
+<tr class="odd"><th>default (1)</th>
+<td>
+<pre>condition_variable();
+</pre>
+</td>
+</tr>
+<tr class="even"><th>copy [deleted] (2)</th>
+<td>
+<pre>condition_variable (const condition_variable&amp;) = delete;</pre>
+</td>
+</tr>
+</tbody>
+</table><p>std::condition_variable 的拷贝构造函数被禁用，只提供了默认构造函数。</p>
+<p><strong>std::condition_variable::wait() 介绍</strong></p>
+<table>
+<tbody>
+<tr class="odd"><th>unconditional (1)</th>
+<td>
+<pre>void wait (unique_lock&lt;mutex&gt;&amp; lck);
+</pre>
+</td>
+</tr>
+<tr class="even"><th>predicate (2)</th>
+<td>
+<pre>template &lt;class Predicate&gt;
+  void wait (unique_lock&lt;mutex&gt;&amp; lck, Predicate pred);</pre>
+</td>
+</tr>
+</tbody>
+</table><p><code>std::condition_variable</code>提供了两种<code>wait()</code>函数。当前线程调用<code>wait()</code>后将被阻塞(此时当前线程应该获得了锁（mutex），不妨设获得锁 lck)，直到另外某个线程调用<code>notify_*</code>唤醒了当前线程。</p>
+<p>在线程被阻塞时，该函数会自动调用 <code>lck.unlock()释放锁，使得其他被阻塞在锁竞争上的线程得以继续执行。</code>另外，一旦当前线程获得通知(notified，通常是另外某个线程调用 notify_*唤醒了当前线程)，wait() 函数也是自动调用 lck.lock()，使得 lck 的状态和 wait 函数被调用时相同。</p>
+<p>在第二种情况下（即设置了 Predicate），只有当 pred 条件为 false 时调用 wait()才会阻塞当前线程，并且在收到其他线程的通知后只有当 pred 为 true 时才会被解除阻塞。因此第二种情况类似以下代码：</p>
+<div class="highlight"><pre><code><span></span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">pred</span><span class="p">())</span><span class="w"> </span><span class="n">wait</span><span class="p">(</span><span class="n">lck</span><span class="p">);</span>
+</code></pre></div>
+<p>请看下面例子（<a href="http://www.cplusplus.com/reference/condition_variable/condition_variable/wait/">参考</a>）：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span><span class="c1">                // std::cout</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;thread&gt;</span><span class="c1">                // std::thread, std::this_thread::yield</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;mutex&gt;</span><span class="c1">                // std::mutex, std::unique_lock</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;condition_variable&gt;</span><span class="c1">    // std::condition_variable</span>
+
+<span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="w"> </span><span class="n">mtx</span><span class="p">;</span>
+<span class="n">std</span><span class="o">::</span><span class="n">condition_variable</span><span class="w"> </span><span class="n">cv</span><span class="p">;</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="n">cargo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="kt">bool</span><span class="w"> </span><span class="nf">shipment_available</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">cargo</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// 消费者线程.</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">consume</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">n</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">n</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">unique_lock</span><span class="w"> </span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="o">&gt;</span><span class="w"> </span><span class="n">lck</span><span class="p">(</span><span class="n">mtx</span><span class="p">);</span>
+<span class="w">        </span><span class="n">cv</span><span class="p">.</span><span class="n">wait</span><span class="p">(</span><span class="n">lck</span><span class="p">,</span><span class="w"> </span><span class="n">shipment_available</span><span class="p">);</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">cargo</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="sc">&#39;\n&#39;</span><span class="p">;</span>
+<span class="w">        </span><span class="n">cargo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="n">consumer_thread</span><span class="p">(</span><span class="n">consume</span><span class="p">,</span><span class="w"> </span><span class="mi">10</span><span class="p">);</span><span class="w"> </span><span class="c1">// 消费者线程.</span>
+
+<span class="w">    </span><span class="c1">// 主线程为生产者线程, 生产 10 个物品.</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">10</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">shipment_available</span><span class="p">())</span>
+<span class="w">            </span><span class="n">std</span><span class="o">::</span><span class="n">this_thread</span><span class="o">::</span><span class="n">yield</span><span class="p">();</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">unique_lock</span><span class="w"> </span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="o">&gt;</span><span class="w"> </span><span class="n">lck</span><span class="p">(</span><span class="n">mtx</span><span class="p">);</span>
+<span class="w">        </span><span class="n">cargo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">        </span><span class="n">cv</span><span class="p">.</span><span class="n">notify_one</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="n">consumer_thread</span><span class="p">.</span><span class="n">join</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>程序执行结果如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">concurrency</span><span class="w"> </span><span class="p">)</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="n">ConditionVariable</span><span class="o">-</span><span class="n">wait</span><span class="w"> </span>
+<span class="mi">1</span>
+<span class="mi">2</span>
+<span class="mi">3</span>
+<span class="mi">4</span>
+<span class="mi">5</span>
+<span class="mi">6</span>
+<span class="mi">7</span>
+<span class="mi">8</span>
+<span class="mi">9</span>
+<span class="mi">10</span>
+</code></pre></div>
+<p><strong>std::condition_variable::wait_for() 介绍</strong></p>
+<table>
+<tbody>
+<tr class="odd"><th>unconditional (1)</th>
+<td>
+<pre>template &lt;class Rep, class Period&gt;
+  cv_status wait_for (unique_lock&lt;mutex&gt;&amp; lck,
+                      const chrono::duration&lt;Rep,Period&gt;&amp; rel_time);
+</pre>
+</td>
+</tr>
+<tr class="even"><th>predicate (2)</th>
+<td>
+<pre>template &lt;class Rep, class Period, class Predicate&gt;
+       bool wait_for (unique_lock&lt;mutex&gt;&amp; lck,
+                      const chrono::duration&lt;Rep,Period&gt;&amp; rel_time, Predicate pred);</pre>
+</td>
+</tr>
+</tbody>
+</table><p>与 <strong>std::condition_variable::wait()</strong> 类似，不过 wait_for可以指定一个时间段，在当前线程收到通知或者指定的时间 rel_time超时之前，该线程都会处于阻塞状态。而一旦超时或者收到了其他线程的通知，wait_for 返回，剩下的处理步骤和 wait() 类似。</p>
+<p>另外，wait_for 的重载版本（<strong>predicte(2)</strong>）的最后一个参数 pred 表示 wait_for 的预测条件，只有当 pred 条件为false 时调用 wait() 才会阻塞当前线程，并且在收到其他线程的通知后只有当 pred 为 true 时才会被解除阻塞，因此相当于如下代码：</p>
+<div class="highlight"><pre><code><span></span><span class="k">return</span><span class="w"> </span><span class="n">wait_until</span><span class="w"> </span><span class="p">(</span><span class="n">lck</span><span class="p">,</span><span class="w"> </span><span class="n">chrono</span><span class="o">::</span><span class="n">steady_clock</span><span class="o">::</span><span class="n">now</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">rel_time</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">pred</span><span class="p">));</span>
+</code></pre></div>
+<p>请看下面的例子（<a href="http://www.cplusplus.com/reference/condition_variable/condition_variable/wait_for/">参考</a>），下面的例子中，主线程等待 th 线程输入一个值，然后将 th 线程从终端接收的值打印出来，在 th 线程接受到值之前，主线程一直等待，每个一秒超时一次，并打印一个 "."：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span><span class="c1">           // std::cout</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;thread&gt;</span><span class="c1">             // std::thread</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;chrono&gt;</span><span class="c1">             // std::chrono::seconds</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;mutex&gt;</span><span class="c1">              // std::mutex, std::unique_lock</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;condition_variable&gt;</span><span class="c1"> // std::condition_variable, std::cv_status</span>
+
+<span class="n">std</span><span class="o">::</span><span class="n">condition_variable</span><span class="w"> </span><span class="n">cv</span><span class="p">;</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="n">value</span><span class="p">;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">do_read_value</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cin</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">value</span><span class="p">;</span>
+<span class="w">    </span><span class="n">cv</span><span class="p">.</span><span class="n">notify_one</span><span class="p">();</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="w"> </span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Please, enter an integer (I&#39;ll be printing dots): </span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="n">th</span><span class="p">(</span><span class="n">do_read_value</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="w"> </span><span class="n">mtx</span><span class="p">;</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">unique_lock</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="o">&gt;</span><span class="w"> </span><span class="n">lck</span><span class="p">(</span><span class="n">mtx</span><span class="p">);</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">cv</span><span class="p">.</span><span class="n">wait_for</span><span class="p">(</span><span class="n">lck</span><span class="p">,</span><span class="n">std</span><span class="o">::</span><span class="n">chrono</span><span class="o">::</span><span class="n">seconds</span><span class="p">(</span><span class="mi">1</span><span class="p">))</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">cv_status</span><span class="o">::</span><span class="n">timeout</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="sc">&#39;.&#39;</span><span class="p">;</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="p">.</span><span class="n">flush</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;You entered: &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">value</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="sc">&#39;\n&#39;</span><span class="p">;</span>
+
+<span class="w">    </span><span class="n">th</span><span class="p">.</span><span class="n">join</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>std::condition_variable::wait_until 介绍</strong></p>
+<table>
+<tbody>
+<tr class="odd"><th>unconditional (1)</th>
+<td>
+<pre>template &lt;class Clock, class Duration&gt;
+  cv_status wait_until (unique_lock&lt;mutex&gt;&amp; lck,
+                        const chrono::time_point&lt;Clock,Duration&gt;&amp; abs_time);
+</pre>
+</td>
+</tr>
+<tr class="even"><th>predicate (2)</th>
+<td>
+<pre>template &lt;class Clock, class Duration, class Predicate&gt;
+       bool wait_until (unique_lock&lt;mutex&gt;&amp; lck,
+                        const chrono::time_point&lt;Clock,Duration&gt;&amp; abs_time,
+                        Predicate pred);</pre>
+</td>
+</tr>
+</tbody>
+</table><p>与 <strong>std::condition_variable::wait_for </strong>类似，但是 wait_until可以指定一个时间点，在当前线程收到通知或者指定的时间点 abs_time超时之前，该线程都会处于阻塞状态。而一旦超时或者收到了其他线程的通知，wait_until 返回，剩下的处理步骤和 wait_until() 类似。</p>
+<p>另外，wait_until 的重载版本（<strong>predicte(2)</strong>）的最后一个参数 pred 表示 wait_until 的预测条件，只有当 pred条件为 false 时调用 wait() 才会阻塞当前线程，并且在收到其他线程的通知后只有当 pred 为 true 时才会被解除阻塞，因此相当于如下代码：</p>
+<div class="highlight"><pre><code><span></span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">pred</span><span class="p">())</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="w"> </span><span class="n">wait_until</span><span class="p">(</span><span class="n">lck</span><span class="p">,</span><span class="n">abs_time</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">cv_status</span><span class="o">::</span><span class="n">timeout</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">pred</span><span class="p">();</span>
+<span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+</code></pre></div>
+<p><strong>std::condition_variable::notify_one() 介绍</strong></p>
+<p>唤醒某个等待(wait)线程。如果当前没有等待线程，则该函数什么也不做，如果同时存在多个等待线程，则唤醒某个线程是不确定的(unspecified)。</p>
+<p>请看下例（<a href="http://www.cplusplus.com/reference/condition_variable/condition_variable/notify_one/">参考</a>）：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span><span class="c1">                // std::cout</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;thread&gt;</span><span class="c1">                // std::thread</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;mutex&gt;</span><span class="c1">                // std::mutex, std::unique_lock</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;condition_variable&gt;</span><span class="c1">    // std::condition_variable</span>
+
+<span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="w"> </span><span class="n">mtx</span><span class="p">;</span>
+<span class="n">std</span><span class="o">::</span><span class="n">condition_variable</span><span class="w"> </span><span class="n">cv</span><span class="p">;</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="n">cargo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="c1">// shared value by producers and consumers</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">consumer</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">unique_lock</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">lck</span><span class="p">(</span><span class="n">mtx</span><span class="p">);</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">cargo</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">        </span><span class="n">cv</span><span class="p">.</span><span class="n">wait</span><span class="p">(</span><span class="n">lck</span><span class="p">);</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">cargo</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="sc">&#39;\n&#39;</span><span class="p">;</span>
+<span class="w">    </span><span class="n">cargo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">producer</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">id</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">unique_lock</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">lck</span><span class="p">(</span><span class="n">mtx</span><span class="p">);</span>
+<span class="w">    </span><span class="n">cargo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">id</span><span class="p">;</span>
+<span class="w">    </span><span class="n">cv</span><span class="p">.</span><span class="n">notify_one</span><span class="p">();</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="n">consumers</span><span class="p">[</span><span class="mi">10</span><span class="p">],</span><span class="w"> </span><span class="n">producers</span><span class="p">[</span><span class="mi">10</span><span class="p">];</span>
+
+<span class="w">    </span><span class="c1">// spawn 10 consumers and 10 producers:</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">10</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">consumers</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="p">(</span><span class="n">consumer</span><span class="p">);</span>
+<span class="w">        </span><span class="n">producers</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="p">(</span><span class="n">producer</span><span class="p">,</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// join them back:</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">10</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">producers</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">join</span><span class="p">();</span>
+<span class="w">        </span><span class="n">consumers</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">join</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>std::condition_variable::notify_all() 介绍</strong></p>
+<p>唤醒所有的等待(wait)线程。如果当前没有等待线程，则该函数什么也不做。请看下面的例子：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span><span class="c1">                // std::cout</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;thread&gt;</span><span class="c1">                // std::thread</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;mutex&gt;</span><span class="c1">                // std::mutex, std::unique_lock</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;condition_variable&gt;</span><span class="c1">    // std::condition_variable</span>
+
+<span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="w"> </span><span class="n">mtx</span><span class="p">;</span><span class="w"> </span><span class="c1">// 全局互斥锁.</span>
+<span class="n">std</span><span class="o">::</span><span class="n">condition_variable</span><span class="w"> </span><span class="n">cv</span><span class="p">;</span><span class="w"> </span><span class="c1">// 全局条件变量.</span>
+<span class="kt">bool</span><span class="w"> </span><span class="n">ready</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span><span class="w"> </span><span class="c1">// 全局标志位.</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">do_print_id</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">id</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">unique_lock</span><span class="w"> </span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="o">&gt;</span><span class="w"> </span><span class="n">lck</span><span class="p">(</span><span class="n">mtx</span><span class="p">);</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">ready</span><span class="p">)</span><span class="w"> </span><span class="c1">// 如果标志位不为 true, 则等待...</span>
+<span class="w">        </span><span class="n">cv</span><span class="p">.</span><span class="n">wait</span><span class="p">(</span><span class="n">lck</span><span class="p">);</span><span class="w"> </span><span class="c1">// 当前线程被阻塞, 当全局标志位变为 true 之后,</span>
+<span class="w">    </span><span class="c1">// 线程被唤醒, 继续往下执行打印线程编号id.</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;thread &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="sc">&#39;\n&#39;</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">go</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">unique_lock</span><span class="w"> </span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="o">&gt;</span><span class="w"> </span><span class="n">lck</span><span class="p">(</span><span class="n">mtx</span><span class="p">);</span>
+<span class="w">    </span><span class="n">ready</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span><span class="w"> </span><span class="c1">// 设置全局标志位为 true.</span>
+<span class="w">    </span><span class="n">cv</span><span class="p">.</span><span class="n">notify_all</span><span class="p">();</span><span class="w"> </span><span class="c1">// 唤醒所有线程.</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="n">threads</span><span class="p">[</span><span class="mi">10</span><span class="p">];</span>
+<span class="w">    </span><span class="c1">// spawn 10 threads:</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">10</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span>
+<span class="w">        </span><span class="n">threads</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="p">(</span><span class="n">do_print_id</span><span class="p">,</span><span class="w"> </span><span class="n">i</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;10 threads ready to race...</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="n">go</span><span class="p">();</span><span class="w"> </span><span class="c1">// go!</span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">th</span><span class="o">:</span><span class="n">threads</span><span class="p">)</span>
+<span class="w">        </span><span class="n">th</span><span class="p">.</span><span class="n">join</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>std::condition_variable_any 介绍</h3>
+<p>与 std::condition_variable 类似，只不过 std::condition_variable_any 的 wait 函数可以接受任何lockable 参数，而 std::condition_variable 只能接受 std::unique_lock<std::mutex>类型的参数，除此以外，和 std::condition_variable 几乎完全一样。</p>
+<h3>std::cv_status 枚举类型介绍</h3>
+<table class="boxed">
+<tbody>
+<tr>
+<td><samp><span style="font-size: 14px">cv_status::no_timeout</span></samp></td>
+<td><span style="font-size: 14px">wait_for 或者 wait_until 没有超时，即在规定的时间段内线程收到了通知。</span></td>
+</tr>
+<tr>
+<td><samp><span style="font-size: 14px">cv_status::timeout</span></samp></td>
+<td><span style="font-size: 14px"><span style="font-size: 14px">wait_for 或者 wait_until 超时。</span></span></td>
+</tr>
+</tbody>
+</table><p>函数原型为：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">notify_all_at_thread_exit</span><span class="w"> </span><span class="p">(</span><span class="n">condition_variable</span><span class="o">&amp;</span><span class="w"> </span><span class="n">cond</span><span class="p">,</span><span class="w"> </span><span class="n">unique_lock</span><span class="o">&lt;</span><span class="n">mutex</span><span class="o">&gt;</span><span class="w"> </span><span class="n">lck</span><span class="p">);</span>
+</code></pre></div>
+<p>当调用该函数的线程退出时，所有在 cond 条件变量上等待的线程都会收到通知。请看下例（<a href="http://www.cplusplus.com/reference/condition_variable/notify_all_at_thread_exit/">参考</a>）：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span><span class="c1">           // std::cout</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;thread&gt;</span><span class="c1">             // std::thread</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;mutex&gt;</span><span class="c1">              // std::mutex, std::unique_lock</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;condition_variable&gt;</span><span class="c1"> // std::condition_variable</span>
+
+<span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="w"> </span><span class="n">mtx</span><span class="p">;</span>
+<span class="n">std</span><span class="o">::</span><span class="n">condition_variable</span><span class="w"> </span><span class="n">cv</span><span class="p">;</span>
+<span class="kt">bool</span><span class="w"> </span><span class="n">ready</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">print_id</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">id</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">unique_lock</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="o">&gt;</span><span class="w"> </span><span class="n">lck</span><span class="p">(</span><span class="n">mtx</span><span class="p">);</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">ready</span><span class="p">)</span><span class="w"> </span><span class="n">cv</span><span class="p">.</span><span class="n">wait</span><span class="p">(</span><span class="n">lck</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// ...</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;thread &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="sc">&#39;\n&#39;</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">go</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">unique_lock</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="o">&gt;</span><span class="w"> </span><span class="n">lck</span><span class="p">(</span><span class="n">mtx</span><span class="p">);</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">notify_all_at_thread_exit</span><span class="p">(</span><span class="n">cv</span><span class="p">,</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">lck</span><span class="p">));</span>
+<span class="w">  </span><span class="n">ready</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="w"> </span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="n">threads</span><span class="p">[</span><span class="mi">10</span><span class="p">];</span>
+<span class="w">  </span><span class="c1">// spawn 10 threads:</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="o">=</span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">&lt;</span><span class="mi">10</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span>
+<span class="w">    </span><span class="n">threads</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="p">(</span><span class="n">print_id</span><span class="p">,</span><span class="n">i</span><span class="p">);</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;10 threads ready to race...</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="p">(</span><span class="n">go</span><span class="p">).</span><span class="n">detach</span><span class="p">();</span><span class="w">   </span><span class="c1">// go!</span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">th</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">threads</span><span class="p">)</span><span class="w"> </span><span class="n">th</span><span class="p">.</span><span class="n">join</span><span class="p">();</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>好了，到此为止，<condition_variable> 头文件中的两个条件变量类（std::condition_variable 和 std::condition_variable_any）、枚举类型（std::cv_status）、以及辅助函数（std::notify_all_at_thread_exit()）都已经介绍完了。从下一章开始我会逐步开始介绍 <atomic> 头文件中的内容，后续的文章还会介绍 C++11的内存模型，涉及内容稍微底层一些，希望大家能够保持兴趣，学完 C++11 并发编程，如果你发现本文中的错误，也请给我反馈 ;-)。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "C++11并发指南03.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

@@ -1,0 +1,637 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>g++下string多线程访问的bug - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="g++下string多线程访问的bug,C/C++,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="g++下string多线程访问的bug" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>g++下string多线程访问的bug</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2022-02-01 23:20
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://blog.csdn.net/qq_24663421/article/details/123670723' target='blank'>g++下string多线程访问的bug</a></p></h4>
+<p>之前在某个功能下写了类似以下的一段代码(p-&gt;flags的类型为std::string)，功能上线之后，服务器上会偶发崩溃（频率大约几小时一次）。查看崩溃的coredump文件，发现大部分崩溃堆栈位于<code>std::count_if</code>中，还有少部分的崩溃堆栈随机的分布在程序各处，怀疑是多线程问题。</p>
+<div class="highlight"><pre><code><span></span><span class="k">auto</span><span class="w"> </span><span class="n">cnt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">count_if</span><span class="p">(</span><span class="n">p</span><span class="o">-&gt;</span><span class="n">flags</span><span class="p">.</span><span class="n">begin</span><span class="p">(),</span><span class="w"> </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">flags</span><span class="p">.</span><span class="n">end</span><span class="p">(),</span>
+<span class="w">                         </span><span class="p">[](</span><span class="kt">char</span><span class="w"> </span><span class="n">c</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">c</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="sc">&#39;0&#39;</span><span class="p">;});</span>
+</code></pre></div>
+<p>经过排查，发现此字符串仅在另一个线程中有读操作，代码示意如下。</p>
+<div class="highlight"><pre><code><span></span><span class="k">auto</span><span class="w"> </span><span class="n">tmp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">flags</span><span class="p">;</span>
+</code></pre></div>
+<p>随后将程序上传到测试平台，重试产生崩溃的请求，未复现崩溃。然后进行压测，可以复现程序中的崩溃，因此感到非常奇怪，为何对std::string的并发读访问会出现线程不安全的情况。虽然C++标准未对stl容器的线程安全性做规定，但并发的读访问是不应该有线程不安全的情况出现。</p>
+<h2>一、问题复现</h2>
+<p>由于标准未规定stl容器以及字符串的线程安全性，因此对std::string的并发读写显然是有可能导致线程不安全，因此以下代码是线程不安全的。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;string&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;thread&gt;</span>
+
+<span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="o">*</span><span class="n">sp</span><span class="p">;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">readstr</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">100000</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">tmp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="p">(</span><span class="s">&quot;&quot;</span><span class="p">)</span><span class="w"> </span><span class="p">;</span>
+<span class="w">        </span><span class="n">tmp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">sp</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">writestr</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">100000</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="o">*</span><span class="n">sp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">to_string</span><span class="p">(</span><span class="n">i</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">long</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">cnt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="nb">true</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;start&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="p">(</span><span class="o">++</span><span class="n">cnt</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+<span class="w">        </span><span class="n">sp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="p">(</span><span class="s">&quot;000111&quot;</span><span class="p">);</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="n">t1</span><span class="p">(</span><span class="n">readstr</span><span class="p">);</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="n">t2</span><span class="p">(</span><span class="n">writestr</span><span class="p">);</span>
+<span class="w">        </span><span class="n">t1</span><span class="p">.</span><span class="n">join</span><span class="p">();</span>
+<span class="w">        </span><span class="n">t2</span><span class="p">.</span><span class="n">join</span><span class="p">();</span>
+<span class="w">        </span><span class="k">delete</span><span class="w"> </span><span class="n">sp</span><span class="p">;</span>
+<span class="w">        </span><span class="n">sp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>然而对于以下代码，依然会出现崩溃的情况</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;string&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;thread&gt;</span>
+
+<span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="o">*</span><span class="n">sp</span><span class="p">;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">readstr</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">100000</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">tmp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="p">(</span><span class="s">&quot;&quot;</span><span class="p">)</span><span class="w"> </span><span class="p">;</span>
+<span class="w">        </span><span class="n">tmp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">sp</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">opstr</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">100000</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="k">auto</span><span class="w"> </span><span class="n">it</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sp</span><span class="o">-&gt;</span><span class="n">end</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">_GLIBCXX_USE_CXX11_ABI</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">long</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">cnt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="nb">true</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;start&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="p">(</span><span class="o">++</span><span class="n">cnt</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+<span class="w">        </span><span class="n">sp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="p">(</span><span class="s">&quot;000111&quot;</span><span class="p">);</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="n">t1</span><span class="p">(</span><span class="n">readstr</span><span class="p">);</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="n">t2</span><span class="p">(</span><span class="n">opstr</span><span class="p">);</span>
+<span class="w">        </span><span class="n">t1</span><span class="p">.</span><span class="n">join</span><span class="p">();</span>
+<span class="w">        </span><span class="n">t2</span><span class="p">.</span><span class="n">join</span><span class="p">();</span>
+<span class="w">        </span><span class="k">delete</span><span class="w"> </span><span class="n">sp</span><span class="p">;</span>
+<span class="w">        </span><span class="n">sp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在CentOS Linux release 7.9.2009，1核2G内存，g++ version 7.3.1 20180303 (Red Hat 7.3.1-5) (GCC)的云主机上编译此段代码，编译命令：</p>
+<div class="highlight"><pre><code><span></span><span class="n">g</span><span class="o">++</span><span class="w"> </span><span class="o">-</span><span class="n">pthread</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">cpp</span>
+</code></pre></div>
+<p>执行后出现以下崩溃信息（双重释放），问题成功复现。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220201-232000-0.png" alt=""></p>
+<h2>二、源码分析</h2>
+<p>通过对std::string的源码阅读，发现问题出在std::string的实现上，下面对std::string源码进行分析，源码位于<code>bits/basic_string.h</code>和<code>bits/basic_string.tcc</code>中。</p>
+<h3>1.std::basic_string内存布局分析</h3>
+<p>std::string就是std::basic_string的别名，因此需要查看std::basic_string源码，首先我们看一下源码文件开头，有以下一段代码。</p>
+<div class="highlight"><pre><code><span></span><span class="p">...</span>
+<span class="k">namespace</span><span class="w"> </span><span class="nn">std</span><span class="w"> </span><span class="nn">_GLIBCXX_VISIBILITY</span><span class="p">(</span><span class="nn">default</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="n">_GLIBCXX_BEGIN_NAMESPACE_VERSION</span>
+<span class="cp">#if _GLIBCXX_USE_CXX11_ABI</span>
+<span class="n">_GLIBCXX_BEGIN_NAMESPACE_CXX11</span>
+<span class="w">  </span><span class="cm">/**</span>
+<span class="cm">   *  @class basic_string basic_string.h &lt;string&gt;</span>
+<span class="cm">   *  @brief  Managing sequences of characters and character-like objects.</span>
+<span class="cm">   *</span>
+<span class="cm">   *  @ingroup strings</span>
+<span class="cm">   *  @ingroup sequences</span>
+<span class="cm">   *</span>
+<span class="cm">   *  @tparam _CharT  Type of character</span>
+<span class="cm">   *  @tparam _Traits  Traits for character type, defaults to</span>
+<span class="cm">   *                   char_traits&lt;_CharT&gt;.</span>
+<span class="cm">   *  @tparam _Alloc  Allocator type, defaults to allocator&lt;_CharT&gt;.</span>
+<span class="cm">   *</span>
+<span class="cm">   *  Meets the requirements of a &lt;a href=&quot;tables.html#65&quot;&gt;container&lt;/a&gt;, a</span>
+<span class="cm">   *  &lt;a href=&quot;tables.html#66&quot;&gt;reversible container&lt;/a&gt;, and a</span>
+<span class="cm">   *  &lt;a href=&quot;tables.html#67&quot;&gt;sequence&lt;/a&gt;.  Of the</span>
+<span class="cm">   *  &lt;a href=&quot;tables.html#68&quot;&gt;optional sequence requirements&lt;/a&gt;, only</span>
+<span class="cm">   *  @c push_back, @c at, and @c %array access are supported.</span>
+<span class="cm">   */</span>
+<span class="w">  </span><span class="k">template</span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">_CharT</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">_Traits</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">_Alloc</span><span class="o">&gt;</span>
+<span class="w">    </span><span class="k">class</span><span class="w"> </span><span class="nc">basic_string</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">typedef</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">__gnu_cxx</span><span class="o">::</span><span class="n">__alloc_traits</span><span class="o">&lt;</span><span class="n">_Alloc</span><span class="o">&gt;::</span><span class="k">template</span>
+<span class="w">    </span><span class="n">rebind</span><span class="o">&lt;</span><span class="n">_CharT</span><span class="o">&gt;::</span><span class="n">other</span><span class="w"> </span><span class="n">_Char_alloc_type</span><span class="p">;</span>
+<span class="p">...</span>
+</code></pre></div>
+<p>经测试<code>_GLIBCXX_USE_CXX11_ABI</code>的值在对应测试环境下为0，因此该#if对应的#else处的代码生效。#else处代码如下所示</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#else  </span><span class="c1">// !_GLIBCXX_USE_CXX11_ABI</span>
+<span class="w">  </span><span class="c1">// Reference-counted COW string implentation</span>
+<span class="w">  </span><span class="cm">/**</span>
+<span class="cm">   *  @class basic_string basic_string.h &lt;string&gt;</span>
+<span class="cm">   *  @brief  Managing sequences of characters and character-like objects.</span>
+<span class="cm">   *</span>
+<span class="cm">   *  @ingroup strings</span>
+<span class="cm">   *  @ingroup sequences</span>
+<span class="cm">   *</span>
+<span class="cm">   *  @tparam _CharT  Type of character</span>
+<span class="cm">   *  @tparam _Traits  Traits for character type, defaults to</span>
+<span class="cm">   *                   char_traits&lt;_CharT&gt;.</span>
+<span class="cm">   *  @tparam _Alloc  Allocator type, defaults to allocator&lt;_CharT&gt;.</span>
+<span class="cm">   *</span>
+<span class="cm">   *  Meets the requirements of a &lt;a href=&quot;tables.html#65&quot;&gt;container&lt;/a&gt;, a</span>
+<span class="cm">   *  &lt;a href=&quot;tables.html#66&quot;&gt;reversible container&lt;/a&gt;, and a</span>
+<span class="cm">   *  &lt;a href=&quot;tables.html#67&quot;&gt;sequence&lt;/a&gt;.  Of the</span>
+<span class="cm">   *  &lt;a href=&quot;tables.html#68&quot;&gt;optional sequence requirements&lt;/a&gt;, only</span>
+<span class="cm">   *  @c push_back, @c at, and @c %array access are supported.</span>
+<span class="cm">   *</span>
+<span class="cm">   *  @doctodo</span>
+<span class="cm">   *</span>
+<span class="cm">   *</span>
+<span class="cm">   *  Documentation?  What&#39;s that?</span>
+<span class="cm">   *  Nathan Myers &lt;ncm@cantrip.org&gt;.</span>
+<span class="cm">   *</span>
+<span class="cm">   *  A string looks like this:</span>
+<span class="cm">   *</span>
+<span class="cm">   *  @code</span>
+<span class="cm">   *                                        [_Rep]</span>
+<span class="cm">   *                                        _M_length</span>
+<span class="cm">   *   [basic_string&lt;char_type&gt;]            _M_capacity</span>
+<span class="cm">   *   _M_dataplus                          _M_refcount</span>
+<span class="cm">   *   _M_p ----------------&gt;               unnamed array of char_type</span>
+<span class="cm">   *  @endcode</span>
+<span class="cm">   *</span>
+<span class="cm">   *  Where the _M_p points to the first character in the string, and</span>
+<span class="cm">   *  you cast it to a pointer-to-_Rep and subtract 1 to get a</span>
+<span class="cm">   *  pointer to the header.</span>
+<span class="cm">   *</span>
+<span class="cm">   *  This approach has the enormous advantage that a string object</span>
+<span class="cm">   *  requires only one allocation.  All the ugliness is confined</span>
+<span class="cm">   *  within a single %pair of inline functions, which each compile to</span>
+<span class="cm">   *  a single @a add instruction: _Rep::_M_data(), and</span>
+<span class="cm">   *  string::_M_rep(); and the allocation function which gets a</span>
+<span class="cm">   *  block of raw bytes and with room enough and constructs a _Rep</span>
+<span class="cm">   *  object at the front.</span>
+<span class="cm">   *</span>
+<span class="cm">   *  The reason you want _M_data pointing to the character %array and</span>
+<span class="cm">   *  not the _Rep is so that the debugger can see the string</span>
+<span class="cm">   *  contents. (Probably we should add a non-inline member to get</span>
+<span class="cm">   *  the _Rep for the debugger to use, so users can check the actual</span>
+<span class="cm">   *  string length.)</span>
+<span class="cm">   *</span>
+<span class="cm">   *  Note that the _Rep object is a POD so that you can have a</span>
+<span class="cm">   *  static &lt;em&gt;empty string&lt;/em&gt; _Rep object already @a constructed before</span>
+<span class="cm">   *  static constructors have run.  The reference-count encoding is</span>
+<span class="cm">   *  chosen so that a 0 indicates one reference, so you never try to</span>
+<span class="cm">   *  destroy the empty-string _Rep object.</span>
+<span class="cm">   *</span>
+<span class="cm">   *  All but the last paragraph is considered pretty conventional</span>
+<span class="cm">   *  for a C++ string implementation.</span>
+<span class="cm">  */</span>
+<span class="w">  </span><span class="c1">// 21.3  Template class basic_string</span>
+<span class="w">  </span><span class="k">template</span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">_CharT</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">_Traits</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">_Alloc</span><span class="o">&gt;</span>
+<span class="w">    </span><span class="k">class</span><span class="w"> </span><span class="nc">basic_string</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">typedef</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">_Alloc</span><span class="o">::</span><span class="k">template</span><span class="w"> </span><span class="n">rebind</span><span class="o">&lt;</span><span class="n">_CharT</span><span class="o">&gt;::</span><span class="n">other</span><span class="w"> </span><span class="n">_CharT_alloc_type</span><span class="p">;</span>
+<span class="p">...</span>
+</code></pre></div>
+<p>上方代码中注释的意思是说<code>basic_string</code>使用了基于引用计数的写时拷贝（Copy On Write，COW）的方式实现，当调用字符串的拷贝构造或者赋值运算符的时候，并不是直接将字符串复制一份，而是仅仅将引用计数加1。当真正修改字符串的时候，再去复制字符串。而析构的时候会将引用计数减1，当所有的引用都析构的时候，再真正的删除字符串对象。</p>
+<p>继续看<code>basic_string</code>的源码，在测试环境下，调用sizeof(std::string)，会返回8。原因是std::basic_string中真正包含的成员变量仅仅是一个指针，代码如下所示。可以看到，std::string的成员变量仅有一个<code>_Alloc_hider</code>类型的<code>_M_dataplus。_Alloc_hider</code>继承自<code>_Alloc</code>，<code>_Alloc</code>为std::string的分配器(std::allocator)，不含任何成员变量，因此<code>_Alloc_hider</code>仅含有一个<code>_CharT *</code>的指针，该指针指向字符串真正的首个字符位置。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// Use empty-base optimization: http://www.cantrip.org/emptyopt.html</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">_Alloc_hider</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">_Alloc</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">_Alloc_hider</span><span class="p">(</span><span class="n">_CharT</span><span class="o">*</span><span class="w"> </span><span class="n">__dat</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">_Alloc</span><span class="o">&amp;</span><span class="w"> </span><span class="n">__a</span><span class="p">)</span><span class="w"> </span><span class="n">_GLIBCXX_NOEXCEPT</span>
+<span class="w">    </span><span class="o">:</span><span class="w"> </span><span class="n">_Alloc</span><span class="p">(</span><span class="n">__a</span><span class="p">),</span><span class="w"> </span><span class="n">_M_p</span><span class="p">(</span><span class="n">__dat</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">}</span>
+<span class="w">    </span><span class="n">_CharT</span><span class="o">*</span><span class="w"> </span><span class="n">_M_p</span><span class="p">;</span><span class="w"> </span><span class="c1">// The actual data.</span>
+<span class="p">};</span>
+<span class="p">...</span>
+<span class="k">private</span><span class="o">:</span>
+<span class="w">    </span><span class="c1">// Data Members (private):</span>
+<span class="w">    </span><span class="k">mutable</span><span class="w"> </span><span class="n">_Alloc_hider</span><span class="w">    </span><span class="n">_M_dataplus</span><span class="p">;</span>
+</code></pre></div>
+<p>std::basic_string的实现类似于智能指针，即在std::basic_string中存放指向真正字符串的指针，而表示字符串状态(length、capacity、refcount)的对象则存放在真正字符串前，示意图如下所示。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220201-232000-1.png" alt=""></p>
+<p>源码如下所示。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// _Rep: string representation</span>
+<span class="c1">//   Invariants:</span>
+<span class="c1">//   1. String really contains _M_length + 1 characters: due to 21.3.4</span>
+<span class="c1">//      must be kept null-terminated.</span>
+<span class="c1">//   2. _M_capacity &gt;= _M_length</span>
+<span class="c1">//      Allocated memory is always (_M_capacity + 1) * sizeof(_CharT).</span>
+<span class="c1">//   3. _M_refcount has three states:</span>
+<span class="c1">//      -1: leaked, one reference, no ref-copies allowed, non-const.</span>
+<span class="c1">//       0: one reference, non-const.</span>
+<span class="c1">//     n&gt;0: n + 1 references, operations require a lock, const.</span>
+<span class="c1">//   4. All fields==0 is an empty string, given the extra storage</span>
+<span class="c1">//      beyond-the-end for a null terminator; thus, the shared</span>
+<span class="c1">//      empty string representation needs no constructor.</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">_Rep_base</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">size_type</span><span class="w">        </span><span class="n">_M_length</span><span class="p">;</span>
+<span class="w">    </span><span class="n">size_type</span><span class="w">        </span><span class="n">_M_capacity</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_Atomic_word</span><span class="w">        </span><span class="n">_M_refcount</span><span class="p">;</span>
+<span class="p">};</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">_Rep</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">_Rep_base</span>
+<span class="p">...</span>
+</code></pre></div>
+<p>代理对象_Rep继承自<code>_Rep_base</code>类，本身没有成员变量，<code>_Rep_base</code>中的三个成员变量即为示意图中前面的三个变量<code>_M_length</code>、<code>_M_capacity</code>、<code>_M_refcount</code>。其中，std::string构造时（非拷贝或移动构造）<code>_M_refcount</code>默认为0。</p>
+<p>std::basic_string中有private的<code>_M_rep()</code>函数来获取_Rep对象，其中<code>_M_data()</code>函数用于获取真正字符数组的首个字符地址，再通过强制转换的方式获取前面的_Rep对象，如示意图所示。</p>
+<div class="highlight"><pre><code><span></span><span class="k">private</span><span class="o">:</span>
+<span class="w">  </span><span class="c1">// Data Members (private):</span>
+<span class="w">  </span><span class="k">mutable</span><span class="w"> </span><span class="n">_Alloc_hider</span><span class="w">    </span><span class="n">_M_dataplus</span><span class="p">;</span>
+<span class="w">  </span><span class="n">_CharT</span><span class="o">*</span>
+<span class="w">  </span><span class="nf">_M_data</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">_GLIBCXX_NOEXCEPT</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w">  </span><span class="n">_M_dataplus</span><span class="p">.</span><span class="n">_M_p</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+<span class="p">...</span>
+<span class="w">  </span><span class="n">_Rep</span><span class="o">*</span>
+<span class="w">  </span><span class="n">_M_rep</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">_GLIBCXX_NOEXCEPT</span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="o">&amp;</span><span class="p">((</span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="n">_Rep</span><span class="o">*&gt;</span><span class="w"> </span><span class="p">(</span><span class="n">_M_data</span><span class="p">()))[</span><span class="mi">-1</span><span class="p">]);</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p>std::string对象完整示意图如下所示，图中的s1和s2为共享同一<code>_Rep</code>对象的两个std::string对象。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220201-232000-2.png" alt=""></p>
+<p>2.std::string成员函数调用源码分析</p>
+<p>了解了std::string的结构之后，继续来看两个线程中调用的两个std::string成员函数，首先是tmp=*sp对应的operator=运算符。</p>
+<div class="highlight"><pre><code><span></span><span class="n">basic_string</span><span class="o">&amp;</span>
+<span class="k">operator</span><span class="o">=</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">basic_string</span><span class="o">&amp;</span><span class="w"> </span><span class="n">__str</span><span class="p">)</span><span class="w"> </span>
+<span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">assign</span><span class="p">(</span><span class="n">__str</span><span class="p">);</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p>operator=调用了assign函数，再查看assign函数，源码位于<code>basic_string.tcc</code>中。</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">_CharT</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">_Traits</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">_Alloc</span><span class="o">&gt;</span>
+<span class="n">basic_string</span><span class="o">&lt;</span><span class="n">_CharT</span><span class="p">,</span><span class="w"> </span><span class="n">_Traits</span><span class="p">,</span><span class="w"> </span><span class="n">_Alloc</span><span class="o">&gt;&amp;</span>
+<span class="n">basic_string</span><span class="o">&lt;</span><span class="n">_CharT</span><span class="p">,</span><span class="w"> </span><span class="n">_Traits</span><span class="p">,</span><span class="w"> </span><span class="n">_Alloc</span><span class="o">&gt;::</span>
+<span class="n">assign</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">basic_string</span><span class="o">&amp;</span><span class="w"> </span><span class="n">__str</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">_M_rep</span><span class="p">()</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">__str</span><span class="p">.</span><span class="n">_M_rep</span><span class="p">())</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="c1">// XXX MT</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">allocator_type</span><span class="w"> </span><span class="n">__a</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">get_allocator</span><span class="p">();</span>
+<span class="w">  </span><span class="n">_CharT</span><span class="o">*</span><span class="w"> </span><span class="n">__tmp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__str</span><span class="p">.</span><span class="n">_M_rep</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">_M_grab</span><span class="p">(</span><span class="n">__a</span><span class="p">,</span><span class="w"> </span><span class="n">__str</span><span class="p">.</span><span class="n">get_allocator</span><span class="p">());</span>
+<span class="w">  </span><span class="n">_M_rep</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">_M_dispose</span><span class="p">(</span><span class="n">__a</span><span class="p">);</span>
+<span class="w">  </span><span class="n">_M_data</span><span class="p">(</span><span class="n">__tmp</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="o">*</span><span class="k">this</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>然后注意其中的<code>_M_grab</code>函数，并顺着调用链继续往下看。</p>
+<div class="highlight"><pre><code><span></span><span class="n">_CharT</span><span class="o">*</span>
+<span class="w">    </span><span class="nf">_M_grab</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">_Alloc</span><span class="o">&amp;</span><span class="w"> </span><span class="n">__alloc1</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">_Alloc</span><span class="o">&amp;</span><span class="w"> </span><span class="n">__alloc2</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">_M_is_leaked</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">__alloc1</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">__alloc2</span><span class="p">)</span>
+<span class="w">              </span><span class="o">?</span><span class="w"> </span><span class="n">_M_refcopy</span><span class="p">()</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">_M_clone</span><span class="p">(</span><span class="n">__alloc1</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">...</span>
+<span class="w">        </span><span class="kt">bool</span>
+<span class="w">    </span><span class="n">_M_is_leaked</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">_GLIBCXX_NOEXCEPT</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="cp">#if defined(__GTHREADS)</span>
+<span class="w">          </span><span class="c1">// _M_refcount is mutated concurrently by _M_refcopy/_M_dispose,</span>
+<span class="w">          </span><span class="c1">// so we need to use an atomic load. However, _M_is_leaked</span>
+<span class="w">          </span><span class="c1">// predicate does not change concurrently (i.e. the string is either</span>
+<span class="w">          </span><span class="c1">// leaked or not), so a relaxed load is enough.</span>
+<span class="w">          </span><span class="k">return</span><span class="w"> </span><span class="n">__atomic_load_n</span><span class="p">(</span><span class="o">&amp;</span><span class="k">this</span><span class="o">-&gt;</span><span class="n">_M_refcount</span><span class="p">,</span><span class="w"> </span><span class="n">__ATOMIC_RELAXED</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="cp">#else</span>
+<span class="w">          </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">_M_refcount</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="cp">#endif</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="p">...</span>
+<span class="w">    </span><span class="n">_CharT</span><span class="o">*</span>
+<span class="w">    </span><span class="n">_M_refcopy</span><span class="p">()</span><span class="w"> </span><span class="k">throw</span><span class="p">()</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="cp">#if _GLIBCXX_FULLY_DYNAMIC_STRING == 0</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">__builtin_expect</span><span class="p">(</span><span class="k">this</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">_S_empty_rep</span><span class="p">(),</span><span class="w"> </span><span class="nb">false</span><span class="p">))</span>
+<span class="cp">#endif</span>
+<span class="w">            </span><span class="n">__gnu_cxx</span><span class="o">::</span><span class="n">__atomic_add_dispatch</span><span class="p">(</span><span class="o">&amp;</span><span class="k">this</span><span class="o">-&gt;</span><span class="n">_M_refcount</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">_M_refdata</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span><span class="c1">// XXX MT</span>
+<span class="p">...</span>
+<span class="w">    </span><span class="n">_CharT</span><span class="o">*</span>
+<span class="w">    </span><span class="n">_M_refdata</span><span class="p">()</span><span class="w"> </span><span class="k">throw</span><span class="p">()</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="n">_CharT</span><span class="o">*&gt;</span><span class="p">(</span><span class="k">this</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span><span class="w"> </span><span class="p">}</span>
+<span class="w">    </span><span class="n">_CharT</span><span class="o">*</span>
+<span class="w">    </span><span class="n">_M_grab</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">_Alloc</span><span class="o">&amp;</span><span class="w"> </span><span class="n">__alloc1</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">_Alloc</span><span class="o">&amp;</span><span class="w"> </span><span class="n">__alloc2</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">_M_is_leaked</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">__alloc1</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">__alloc2</span><span class="p">)</span>
+<span class="w">              </span><span class="o">?</span><span class="w"> </span><span class="n">_M_refcopy</span><span class="p">()</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">_M_clone</span><span class="p">(</span><span class="n">__alloc1</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+</code></pre></div>
+<p>从图中可以看出，<code>_M_grab</code>函数会判断当前std::string指向的<code>_Rep</code>对象是否leak，而判断方式则是判断其<code>_M_refcount</code>是否小于0（<code>_M_refcount</code>默认为0，每复制一次加1，每析构一次减1），并且使用了原子变量来确保<code>_M_refcount</code>访问可见性（可见g++确实考虑了使用引用计数情况下的线程安全问题，却还是在部分函数中未保证线程安全）。</p>
+<p>如果<code>_M_is_leaked()</code>返回false，则三目运算符应该走<code>_M_refcopy</code>分支（<code>__alloc1,__alloc2</code>均为std::allocator，因此<code>__alloc1 == __alloc2</code>永远返回true，细节在此不谈，记住结论就好）。在<code>_M_refcopy()</code>中将<code>_M_refcount</code>即引用计数加1，再返回对应的字符数组的首地址。</p>
+<p>注：<code>__builtin_expect</code>仅用于编译器分支预测优化，代码逻辑上，<code>if (__builtin_expect(this != &amp;_S_empty_rep(), false))</code>等价于<code>if (this != &amp;_S_empty_rep())</code>。</p>
+<p>总结一下，<code>_M_grab</code>函数的返回值是一个<code>_Rep</code>对象的字符数组首地址，他通过判断<code>_Rep</code>是否leak来决定是单纯将引用计数加1，还是调用<code>_M_clone</code>来复制一份<code>_Rep（_M_clone</code>复制逻辑在此忽略，因为对于这个bug来说走不到这个分支）。</p>
+<p><code>_M_grab()</code>执行之后，继续调用<code>_M_dispose</code>函数。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span>
+<span class="w">    </span><span class="nf">_M_dispose</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">_Alloc</span><span class="o">&amp;</span><span class="w"> </span><span class="n">__a</span><span class="p">)</span><span class="w"> </span><span class="n">_GLIBCXX_NOEXCEPT</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="cp">#if _GLIBCXX_FULLY_DYNAMIC_STRING == 0</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">__builtin_expect</span><span class="p">(</span><span class="k">this</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">_S_empty_rep</span><span class="p">(),</span><span class="w"> </span><span class="nb">false</span><span class="p">))</span>
+<span class="cp">#endif</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="c1">// Be race-detector-friendly.  For more info see bits/c++config.</span>
+<span class="w">          </span><span class="n">_GLIBCXX_SYNCHRONIZATION_HAPPENS_BEFORE</span><span class="p">(</span><span class="o">&amp;</span><span class="k">this</span><span class="o">-&gt;</span><span class="n">_M_refcount</span><span class="p">);</span>
+<span class="w">              </span><span class="c1">// Decrement of _M_refcount is acq_rel, because:</span>
+<span class="w">              </span><span class="c1">// - all but last decrements need to release to synchronize with</span>
+<span class="w">              </span><span class="c1">//   the last decrement that will delete the object.</span>
+<span class="w">              </span><span class="c1">// - the last decrement needs to acquire to synchronize with</span>
+<span class="w">              </span><span class="c1">//   all the previous decrements.</span>
+<span class="w">              </span><span class="c1">// - last but one decrement needs to release to synchronize with</span>
+<span class="w">              </span><span class="c1">//   the acquire load in _M_is_shared that will conclude that</span>
+<span class="w">              </span><span class="c1">//   the object is not shared anymore.</span>
+<span class="w">          </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">__gnu_cxx</span><span class="o">::</span><span class="n">__exchange_and_add_dispatch</span><span class="p">(</span><span class="o">&amp;</span><span class="k">this</span><span class="o">-&gt;</span><span class="n">_M_refcount</span><span class="p">,</span>
+<span class="w">                             </span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="n">_GLIBCXX_SYNCHRONIZATION_HAPPENS_AFTER</span><span class="p">(</span><span class="o">&amp;</span><span class="k">this</span><span class="o">-&gt;</span><span class="n">_M_refcount</span><span class="p">);</span>
+<span class="w">          </span><span class="n">_M_destroy</span><span class="p">(</span><span class="n">__a</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span><span class="c1">// XXX MT</span>
+<span class="p">...</span>
+<span class="w">  </span><span class="k">template</span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">_CharT</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">_Traits</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">_Alloc</span><span class="o">&gt;</span>
+<span class="w">    </span><span class="kt">void</span>
+<span class="w">    </span><span class="n">basic_string</span><span class="o">&lt;</span><span class="n">_CharT</span><span class="p">,</span><span class="w"> </span><span class="n">_Traits</span><span class="p">,</span><span class="w"> </span><span class="n">_Alloc</span><span class="o">&gt;::</span><span class="n">_Rep</span><span class="o">::</span>
+<span class="w">    </span><span class="n">_M_destroy</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">_Alloc</span><span class="o">&amp;</span><span class="w"> </span><span class="n">__a</span><span class="p">)</span><span class="w"> </span><span class="k">throw</span><span class="w"> </span><span class="p">()</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">const</span><span class="w"> </span><span class="n">size_type</span><span class="w"> </span><span class="n">__size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">_Rep_base</span><span class="p">)</span><span class="w"> </span><span class="o">+</span>
+<span class="w">                           </span><span class="p">(</span><span class="k">this</span><span class="o">-&gt;</span><span class="n">_M_capacity</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">_CharT</span><span class="p">);</span>
+<span class="w">      </span><span class="n">_Raw_bytes_alloc</span><span class="p">(</span><span class="n">__a</span><span class="p">).</span><span class="n">deallocate</span><span class="p">(</span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="kt">char</span><span class="o">*&gt;</span><span class="p">(</span><span class="k">this</span><span class="p">),</span><span class="w"> </span><span class="n">__size</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+</code></pre></div>
+<p><code>_M_dispose</code>的功能即将<code>_M_refcount</code>减1，若减完之后小于0，即删除整个_Rep对象，包括字符数组的部分。调用<code>_M_dispose</code>的目的为将当前std::string对象到_Rep的指向清除（类似于智能指针重新设置内部指针指向时的行为）。</p>
+<p>随后调用<code>_M_data(__tmp)</code>，将刚刚_M_grab返回的_Rep覆盖当前std::string对应的<code>_Rep</code>对象，以实现std::string对象指向的更新。</p>
+<p>再来看sp-&gt;end()中对应的end()函数。</p>
+<div class="highlight"><pre><code><span></span><span class="n">iterator</span>
+<span class="nf">end</span><span class="p">()</span><span class="w"> </span><span class="c1">// FIXME C++11: should be noexcept.</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">_M_leak</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">iterator</span><span class="p">(</span><span class="n">_M_data</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">size</span><span class="p">());</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>重点放在<code>_M_leak()</code>函数上。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span>
+<span class="nf">_M_leak</span><span class="p">()</span><span class="w">    </span><span class="c1">// for use in begin() &amp; non-const op[]</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">_M_rep</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">_M_is_leaked</span><span class="p">())</span>
+<span class="w">    </span><span class="n">_M_leak_hard</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>_M_rep()-&gt;_M_is_leaked()</code>返回false，所以<code>!_M_rep()-&gt;_M_is_leaked()</code>为true，所以调用<code>_M_leak_hard()</code>。</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">_CharT</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">_Traits</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">_Alloc</span><span class="o">&gt;</span>
+<span class="w">    </span><span class="kt">void</span>
+<span class="w">    </span><span class="n">basic_string</span><span class="o">&lt;</span><span class="n">_CharT</span><span class="p">,</span><span class="w"> </span><span class="n">_Traits</span><span class="p">,</span><span class="w"> </span><span class="n">_Alloc</span><span class="o">&gt;::</span>
+<span class="w">    </span><span class="n">_M_leak_hard</span><span class="p">()</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="cp">#if _GLIBCXX_FULLY_DYNAMIC_STRING == 0</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">_M_rep</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="o">&amp;</span><span class="n">_S_empty_rep</span><span class="p">())</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="cp">#endif</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">_M_rep</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">_M_is_shared</span><span class="p">())</span>
+<span class="w">    </span><span class="n">_M_mutate</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="w">      </span><span class="n">_M_rep</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">_M_set_leaked</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">...</span>
+<span class="w">        </span><span class="kt">bool</span>
+<span class="w">    </span><span class="n">_M_is_shared</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">_GLIBCXX_NOEXCEPT</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="cp">#if defined(__GTHREADS)</span>
+<span class="w">          </span><span class="c1">// _M_refcount is mutated concurrently by _M_refcopy/_M_dispose,</span>
+<span class="w">          </span><span class="c1">// so we need to use an atomic load. Another thread can drop last</span>
+<span class="w">          </span><span class="c1">// but one reference concurrently with this check, so we need this</span>
+<span class="w">          </span><span class="c1">// load to be acquire to synchronize with release fetch_and_add in</span>
+<span class="w">          </span><span class="c1">// _M_dispose.</span>
+<span class="w">          </span><span class="k">return</span><span class="w"> </span><span class="n">__atomic_load_n</span><span class="p">(</span><span class="o">&amp;</span><span class="k">this</span><span class="o">-&gt;</span><span class="n">_M_refcount</span><span class="p">,</span><span class="w"> </span><span class="n">__ATOMIC_ACQUIRE</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="cp">#else</span>
+<span class="w">          </span><span class="k">return</span><span class="w"> </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">_M_refcount</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="cp">#endif</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="p">...</span>
+<span class="w">        </span><span class="kt">void</span>
+<span class="w">    </span><span class="n">_M_set_leaked</span><span class="p">()</span><span class="w"> </span><span class="n">_GLIBCXX_NOEXCEPT</span>
+<span class="w">        </span><span class="p">{</span><span class="w"> </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">_M_refcount</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">-1</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p>我们逐行分析代码，首先，<code>_GLIBCXX_FULLY_DYNAMIC_STRING==0</code>成立，但<code>_M_rep() == &amp;_S_empty_rep()</code>不成立，不会直接return。</p>
+<p>随后，在本测试用例中<code>_M_rep()-&gt;_M_is_shared()</code>会返回false，因此不调用<code>_M_mutate(0, 0, 0)</code>，随后调用<code>_M_set_leaked</code>将<code>_M_refcount</code>设置为-1。</p>
+<h2>三、问题分析</h2>
+<p>刚刚崩溃的测试程序中，所出现的线程不安全问题，正是来自这两个函数的交叉执行导致的，这里指出其中1处线程不安全的地方。</p>
+<p>我们这里使用串行化的方式分析该多线程程序。</p>
+<p>这里再贴一次测试程序方便阅读，并去除线程中循环的部分方便理解。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;string&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;thread&gt;</span>
+
+<span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="o">*</span><span class="n">sp</span><span class="p">;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">readstr</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">tmp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="p">(</span><span class="s">&quot;&quot;</span><span class="p">)</span><span class="w"> </span><span class="p">;</span>
+<span class="w">    </span><span class="n">tmp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">sp</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">opstr</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">it</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sp</span><span class="o">-&gt;</span><span class="n">end</span><span class="p">();</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">long</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">cnt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="nb">true</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;start&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="p">(</span><span class="o">++</span><span class="n">cnt</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+<span class="w">        </span><span class="n">sp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="p">(</span><span class="s">&quot;000111&quot;</span><span class="p">);</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="n">t1</span><span class="p">(</span><span class="n">readstr</span><span class="p">);</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="n">t2</span><span class="p">(</span><span class="n">opstr</span><span class="p">);</span>
+<span class="w">        </span><span class="n">t1</span><span class="p">.</span><span class="n">join</span><span class="p">();</span>
+<span class="w">        </span><span class="n">t2</span><span class="p">.</span><span class="n">join</span><span class="p">();</span>
+<span class="w">        </span><span class="k">delete</span><span class="w"> </span><span class="n">sp</span><span class="p">;</span>
+<span class="w">        </span><span class="n">sp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>首先，t2线程挂起，t1线程执行，一直执行到上述所述的<code>_M_grab</code>函数中，调用<code>_M_is_leaked()</code>函数，函数返回false之后，我们看一下几个变量当前的状态：</p>
+<p><strong>字符串tmp，指向一个<code>_Rep</code>(命名为<code>_Rep_tmp</code>)。</strong></p>
+<p><strong>字符串sp，指向另一个<code>_Rep</code>(命名为<code>_Rep_sp</code>)。</strong></p>
+<p><strong><code>_Rep_sp</code>中，<code>_M_refcount</code>目前等于0。</strong></p>
+<p>随后，线程切换，t1挂起，t2开始执行，并完整执行end函数，随后我们再来看变量状态：</p>
+<p><strong>字符串tmp，指向一个<code>_Rep</code>(命名为<code>_Rep_tmp</code>)，跟上一步保持不变。</strong></p>
+<p><strong>字符串sp，指向另一个<code>_Rep</code>(命名为<code>_Rep_sp</code>)。</strong></p>
+<p><strong><code>_Rep_sp</code>，由于end函数调用<code>_M_leak_hard</code>，再调用<code>_M_set_leaked</code>，导致<code>_M_refcount</code>修改为-1。</strong></p>
+<p>随后，线程t2执行完成，t1继续执行，现在我们逐行阅读代码分析程序状态。</p>
+<p>由于刚刚的<code>_M_is_leaked</code>返回了false，因此三目运算符走<code>_M_refcopy</code>的分支，<code>_M_refcopy</code>中，将<code>_M_refcount</code>加1，执行完<code>_M_grab</code>后，我们再看变量状态：</p>
+<p><strong>字符串tmp，指向一个<code>_Rep</code>(命名为<code>_Rep_tmp</code>)，跟上一步保持不变。</strong></p>
+<p><strong>字符串sp，指向另一个<code>_Rep</code>(命名为<code>_Rep_sp</code>)。</strong></p>
+<p><strong><code>_Rep_sp</code>，由于_M_refcopy函数的调用，其<code>_M_refcount</code>加1后变为0。</strong></p>
+<p>继续执行tmp的assign函数中的<code>_M_rep()-&gt;_M_dispose(__a)</code>，tmp指向的<code>_Rep</code>的<code>_M_refcount</code>减1，从0变为-1，因此tmp指向的<code>_Rep</code>被销毁，此时状态：</p>
+<p><strong>字符串tmp，指向一个被销毁<code>_Rep</code>(命名为<code>_Rep_tmp</code>)。</strong></p>
+<p><strong>字符串sp，指向另一个<code>_Rep</code>(命名为<code>_Rep_sp</code>)。</strong></p>
+<p><strong><code>_Rep_sp</code>，与上一步保持不变，依然为0**</strong>。**</p>
+<p>继续执行tmp的assign函数中的<code>_M_data(__tmp)</code>，将tmp对象的指向修改为sp指向的同一个<code>_Rep</code>，此时状态：</p>
+<p><strong>字符串tmp，指向<code>_Rep_sp</code>。</strong></p>
+<p><strong>字符串sp，也指向<code>_Rep_sp</code>。</strong></p>
+<p><strong><code>_Rep_sp</code>，与上一步保持不变，依然为0。</strong></p>
+<p>然后operator=函数完成，此时我们发现一个不变式被打破，<code>_Rep_sp</code>被两个std::string对象指向，<code>_M_refcount</code>的值却是0（应该为1）。</p>
+<p>然后当tmp析构的时候，<code>_Rep_sp</code>被销毁，而当回到主线程执行delete sp时，<code>_Rep_sp</code>被二次销毁，因此出现了double free的未定义行为错误。</p>
+<h2>四、串行化复现问题</h2>
+<p>既然已经找到了问题所在，我们就可以使用串行化模拟的方式复现该bug，代码如下。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#define private public</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;string&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;thread&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;memory&gt;</span>
+
+<span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">sp</span><span class="p">;</span>
+<span class="k">using</span><span class="w"> </span><span class="n">_Alloc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">::</span><span class="n">allocator_type</span><span class="p">;</span>
+
+<span class="k">auto</span><span class="w"> </span><span class="n">mygrab</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="o">&amp;</span><span class="n">__str</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">_Alloc</span><span class="o">&amp;</span><span class="w"> </span><span class="n">__alloc1</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">_Alloc</span><span class="o">&amp;</span><span class="w"> </span><span class="n">__alloc2</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">that</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__str</span><span class="p">.</span><span class="n">_M_rep</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">that</span><span class="o">-&gt;</span><span class="n">_M_is_leaked</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">__alloc1</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">__alloc2</span><span class="p">)</span>
+<span class="w">           </span><span class="o">?</span><span class="w"> </span><span class="p">(</span><span class="n">sp</span><span class="p">.</span><span class="n">end</span><span class="p">(),</span><span class="w"> </span><span class="n">that</span><span class="o">-&gt;</span><span class="n">_M_refcopy</span><span class="p">())</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">that</span><span class="o">-&gt;</span><span class="n">_M_clone</span><span class="p">(</span><span class="n">__alloc1</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="n">myassign</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="o">*</span><span class="n">that</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&amp;</span><span class="w"> </span><span class="n">__str</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">that</span><span class="o">-&gt;</span><span class="n">_M_rep</span><span class="p">()</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">__str</span><span class="p">.</span><span class="n">_M_rep</span><span class="p">())</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// XXX MT</span>
+<span class="w">        </span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="w"> </span><span class="n">__a</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">that</span><span class="o">-&gt;</span><span class="n">get_allocator</span><span class="p">();</span>
+<span class="w">        </span><span class="k">auto</span><span class="w"> </span><span class="n">__tmp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">mygrab</span><span class="p">(</span><span class="n">__str</span><span class="p">,</span><span class="w"> </span><span class="n">__a</span><span class="p">,</span><span class="w"> </span><span class="n">__str</span><span class="p">.</span><span class="n">get_allocator</span><span class="p">());</span>
+<span class="w">        </span><span class="n">that</span><span class="o">-&gt;</span><span class="n">_M_rep</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">_M_dispose</span><span class="p">(</span><span class="n">__a</span><span class="p">);</span>
+<span class="w">        </span><span class="n">that</span><span class="o">-&gt;</span><span class="n">_M_data</span><span class="p">(</span><span class="n">__tmp</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;tmp:&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="o">*</span><span class="n">that</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="n">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">sp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">&quot;000111&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="o">*</span><span class="n">tmp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="p">;</span>
+<span class="w">    </span><span class="n">myassign</span><span class="p">(</span><span class="n">tmp</span><span class="p">,</span><span class="w"> </span><span class="n">sp</span><span class="p">);</span>
+<span class="w">    </span><span class="k">delete</span><span class="w"> </span><span class="n">tmp</span><span class="p">;</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;sp:&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">sp</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+<span class="w">    </span><span class="n">sp</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sc">&#39;a&#39;</span><span class="p">;</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;sp:&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">sp</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>我们使用myassign来模拟operator=调用的assign函数，使用mygrab替代真正调用的<code>_M_grab</code>函数。在<code>_M_is_leaked</code>调用之后，我们调用sp.end()函数来模拟线程之间交替执行的情况，然后成功复现问题，执行结果如下。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220201-232000-3.png" alt=""></p>
+<h2>五、说说_GLIBCXX_BEGIN_NAMESPACE_CXX11宏</h2>
+<p>在gcc5.1版本之后，libstdc++引入了一个新的std::string实现（也包括std::list的新实现，在此不谈），而C++11的标准禁止了写时拷贝的字符串实现。</p>
+<p>为了保持向后兼容性，使用<code>_GLIBCXX_USE_CXX11_ABI</code>宏来控制程序使用新的还是旧的（写时拷贝实现）std::string实现。从之前的源码我们可以看出，<code>_GLIBCXX_USE_CXX11_ABI</code>宏的不同值控制了程序会编译引入不同的std::basic_string实现。当<code>_GLIBCXX_USE_CXX11_ABI</code>为1时，使用新的std::string实现（没有线程安全问题），当<code>_GLIBCXX_USE_CXX11_ABI</code>为0时，会使用老的std::string实现（有本文提到的线程安全问题）。而<code>_GLIBCXX_USE_CXX11_ABI</code>的值却并不是由-std选项控制的，并不是-std=c++11就会使<code>_GLIBCXX_USE_CXX11_ABI</code>变为1，这保证了链接时的向后兼容性。</p>
+<p>使用g++ -posix -dM -E --with-default-libstdcxx-abi=OPTION`</p>
+<p>Set the default value for the _GLIBCXX_USE_CXX11_ABI macro (see <a href="https://gcc.gnu.org/onlinedocs/libstdc++/manual/using_macros.html">Macros</a>).</p>
+<p>The default is <code>OPTION=new</code> which sets the macro to <code>1</code>, use <code>OPTION=gcc4-compatible</code> to set it to <code>0</code>. This option does not change the library ABI.</p>
+<p>在gcc官网上（<a href="https://gcc.gnu.org/onlinedocs/libstdc++/manual/configure.html">https://gcc.gnu.org/onlinedocs/libstdc++/manual/configure.html</a>），可以看到以上一段描述，意思就是当g++的构建参数中有--with-default-libstdcxx-abi=gcc4-compatible的时候，<code>_GLIBCXX_USE_CXX11_ABI</code>会设置为0，我们查看一下测试服务器上的g++构建参数。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220201-232000-4.png" alt=""></p>
+<p>上图中，<code>--with-default-libstdcxx-abi的值正是被设置为了</code>gcc4-compatible，导致<code>_GLIBCXX_USE_CXX11_ABI</code>被设置为0。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220201-232000-5.png" alt=""></p>
+<p>上图中，在同一台机器上安装的9.3.1版本的g++中， <code>--with-default-libstdcxx-abi也是被设置为</code>gcc4-compatible（测试了在该机器9.3.1版本中，同样的问题依然会复现）。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220201-232000-6.png" alt=""></p>
+<p>上图中，在另一台机器上，<code>--with-default-libstdcxx-abi被设置为new，在此机器上_GLIBCXX_USE_CXX11_ABI</code>为1，同样代码未测试出线程安全的bug，因此可以认为新的std::string实现不存在上述线程安全问题。</p>
+<h2>六、解决方案</h2>
+<p>如果你的编译环境中<code>_GLIBCXX_USE_CXX11_ABI</code>为1，那么就不用担心上述线程安全问题了，因为新版std::string的实现已经解决了这个问题。如果在<code>_GLIBCXX_USE_CXX11_ABI</code>为0的机器上，可以尝试重新安装g++或在构建项目时在参数中手动将<code>_GLIBCXX_USE_CXX11_ABI</code>设置为1来避免问题。</p>
+<p>若由于项目依赖较多，导致无法将<code>_GLIBCXX_USE_CXX11_ABI</code>宏修改为1，由于线程安全的冲突来源为end函数中调用的<code>_M_leak</code>函数，所以所有调用<code>_M_leak</code>函数的成员函数都有风险。调用了<code>_M_leak()</code>函数的成员函数有begin()、end()、operator[]、at四个函数。</p>
+<p>对于可能被多线程访问的字符串，避免线程安全问题方式有以下几种：</p>
+<p>1、首先将字符串复制一份，然后在复制的字符串上调用begin()、end()、operator[]、at等函数。</p>
+<p>2、调用cbegin、cend，返回常量迭代器，这两个函数中不会调用<code>_M_leak</code>。</p>
+<p>3、使用常引用传递被共享的字符串，以上4个函数begin()、end()、operator[]、at的const版本不会调用<code>_M_leak</code>。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "g++下string多线程访问的bug.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

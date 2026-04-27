@@ -1,0 +1,480 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>UE4和C++ STL智能指针对比分析 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="UE4和C++ STL智能指针对比分析,C/C++,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="UE4和C++ STL智能指针对比分析" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>UE4和C++ STL智能指针对比分析</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2022-02-01 21:20
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://km.woa.com/group/29321/articles/show/507298' target='blank'>UE4和C++ STL智能指针对比分析</a></p></h4>
+<p>本文以UE4 4.27中智能指针及微软VS2022下MSVC版STL智能指针的实现作对比，从C++设计与结构层面上分析（涉及C++技术及模板知识偏多，或许有点枯燥）。总的来说两者各有千秋，MVSC版毫无疑问更复杂全面，在写法上技巧性更高，细节更多，比如支持分配器，支持数组，异常等；但UE结合自身量身定制更加轻量化，数据与接口实现分离更加清晰，部分功能支持配置化，使得从顶层看可以隐藏很多具体细节。</p>
+<h2>UE4智能指针与STL智能指针对比分析</h2>
+<h3>一、 概要</h3>
+<p>UE4的智能指针有很多种，大体分为两类，一类是专门为UObject设计的，比如TStrongObjectPtr，TWeakObjectPtr，一类是通用的智能指针，比如：TSharedPtr常用的共享智能指针，TSharedRef为UE原创非空共享引用，TWeakPtr弱指针，TSharedFromThis能共享自己的智能指针。文章主要从UE的C++设计与结构层面上分析，主要以UE为主，STL为辅，UE中关键细节设计在第二章节讨论。</p>
+<p>先看UE4的智能指针一些特性，当然这不是全部：</p>
+<ol>
+<li>结构设计良好，模块化，耦合度低（会分析）</li>
+<li>防止内存泄漏：就是自动销毁回收资源</li>
+<li>实现了弱引用：在资源销毁时，弱指针会进一步进行检查，能更加安全</li>
+<li>线程安全与否可以通过模板参数配置，非安全版速度更快，默认是非安全版（会分析）</li>
+<li>可消除循环引用，通过弱指针来实现</li>
+<li>开销小，支持const，很好的类型转换、占用空间小。（会分析）</li>
+<li>支持非空智能引用，就是UE原创的TSharedRef（会分析）</li>
+<li>支持自身智能指针，就是TSharedFromThis（会分析）</li>
+<li>和UE内部方法与命名一致</li>
+<li>没有异常处理，没有支持分配器</li>
+<li>对比stl暂不支持数组</li>
+</ol>
+<p>文中UE代码源文件：SharedPointer.h与SharedPointerInternals.h，属于UE的基础模板库代码，STL源码我用VS2022的
+版本，对应\MSVC\14.30.30704\include\memory文件下。四种智能指针除了TSharedRef为UE原创外，基它在STL标准库中均有
+对标的实现，关系如下：</p>
+<ul>
+<li><code>TSharedPtr&lt;----&gt;std::shared_ptr</code></li>
+<li><code>TWeakPtr&lt;----&gt;std::weak_ptr</code></li>
+<li><code>TSharedFromThis&lt;----&gt;std::enable_shared_from_this</code></li>
+<li><code>TUniquePtr&lt;----&gt;std::unique_ptr</code> 这次就不再单独讨论了</li>
+</ul>
+<h3>二、UE设计结构与STL区别</h3>
+<h4>2.0 UE智能指针总览</h4>
+<p>个人感觉UE这一点可能没有STL那么多版本迭代与兼容的包袱，也不用细节面面具到，个人感觉模块化与结构化都比较好。数据，操作，接口与继承都不错，部分可以自由的组合。先看一张整体结构图，可能字比较小，请点击放大查看原图</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220201-212000-0.png" alt=""></p>
+<h4>2.1 计数基类FReferenceControllerBase</h4>
+<p>智能指针之所以智能，就是对托管的资源引入一个计数器，总体上当发生复制时计数器自动增加一，析构时自动减一;当计数减少到0就释放资源，否则不释放。所以只要把这个计数器管理好，就能做到用户无需显式的释放资源，相比原来手动释放资源更加智能，因此叫作智能指针。</p>
+<p>UE的计数器基类FReferenceControllerBase，可以看上面总览图，它处于最上层。它只是计数，里面有两个int32成员：<strong>SharedReferenceCount共享计数器</strong>与<strong>WeakReferenceCount弱指针引用计数器</strong>，并且构造时初始化都为1。这个类<strong>禁拷贝</strong>，并提供DestroyObject释放纯虚接口。</p>
+<p>对比STL中的类<code>_Ref_count_base</code>，两者设计基本没有区别，计数都是32位的，只是名称不同，同样初始化都为1。同样禁拷贝，只是stl引用delete关键字删除了拷贝相关函数，UE用原始private修饰禁用法。同样提供了destory纯虚接口。</p>
+<p>不同之处：<strong>STL把计数器增加、减少，读取直接放到到这个基类中，采用无锁原子化操作，这些操作强制支持多线程（注STL的数据读取并非支持多线程处理）；反观UE就把这块抽象出来了到后面要说的纯操作接口类中，更加模块化，并且是否多线程让用户用模板参数可选，从所周知，非多线程速度更快</strong>，另外STL直接也提供了<code>_Delete_this</code>释放自己纯虚接口。</p>
+<h4>2.2 多种计数派生类</h4>
+<p>继续看结构图，再向下面，UE提供了两种计数派生类TReferenceControllerWithDeleter和TIntrusiveReferenceController，分别表示带自定义释放器的引用计数器与内存块的引用计数器。而我这边STL看了提供了<strong>十个派生类，对，是十个</strong>版本，毫无疑问UE中这两个STL必然能找到对应，STL主要多了无自定义删除器，自定义内存分配器及支持数组及这几种结构之间组合，如<code>_Ref_count_obj2</code>，<code>_Ref_count_unbounded_array_alloc</code>，所以复杂的多，毕竟他们是语言专家，供给所有人使用，这也正常。下面继续看UE的派生类</p>
+<h5>2.2.1 TReferenceControllerWithDeleter</h5>
+<p>我们主要看UE的，更多的是最常用的TReferenceControllerWithDeleter，STL版本对应<code>_Ref_count_resource</code>，就不贴代码了，有兴趣自己跳转看一下。</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">ObjectType</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">DeleterType</span><span class="o">&gt;</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">TReferenceControllerWithDeleter</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="k">private</span><span class="w"> </span><span class="n">DeleterType</span><span class="p">,</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">FReferenceControllerBase</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">virtual</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">DestroyObject</span><span class="p">()</span><span class="w"> </span><span class="k">override</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="p">(</span><span class="o">*</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">DeleterType</span><span class="o">*&gt;</span><span class="p">(</span><span class="k">this</span><span class="p">))(</span><span class="n">Object</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// 省略其它代码</span>
+<span class="k">private</span><span class="o">:</span>
+<span class="w">    </span><span class="n">ObjectType</span><span class="o">*</span><span class="w"> </span><span class="n">Object</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>TReferenceControllerWithDeleter和前面的FReferenceControllerBase不同之处，多了两个模板参数：<strong>ObjectType</strong>表示数据类型，<strong>DeleterType</strong>表示删除器类型，删除器实质算是一个仿函数，内部<strong>重载了()</strong>用来自定义内存释放的处理。成员上多了一个ObjectType*类型指针对象Object，用来存智能指针所指的对象。同样和基类一样，都是要禁止拷贝的。</p>
+<p>设计结构上注意<strong>私继承了DeleteType</strong>与公有继承FReferenceControllerBase，构造函数传入的<code>ObjectType_</code> 指针与DeleterType型对象并进行初始化;重点重写了DestroyObject虚函数，将this指针强转为DeleterType_指针，并且调用释放器重载()函数，传入指针对象Ojbect，进行内存的释放。</p>
+<h5>2.2.2 对比STL设计，私有继承好还是组合好？</h5>
+<p>反现STL中，设计总体差不多，没有私有继承DeleterType，而是将其放到<code>_Compressed_pair&lt;_Dx, _Resource&gt;</code>使用了类<strong>组合结构</strong>代替了继承，同样也重写_Destroy，同样也继续调用重载()，还过这里STL版本提供了重载<code>_Delete_this()</code>，直接能释放自己，UE给还的更高层次才提供同功能。</p>
+<blockquote><p>关于么有私有继承与组合是C++一个比较有争议的话题，个人理解UE这里使用<strong>私有继承才是高水平的体现</strong>，能进行<strong>空基类优化</strong>，还能阻止<strong>向基类参数转换时歧义</strong>，以及避免部分<strong>移动语意时资源交换的不完整性</strong>。但STL的这个pair组合可不是吃素的，内部也挺复杂，我这种菜鸟都能考虑到的点，他们早就能想到了，<strong>其内部也是私有继承，也支持空基类优化</strong>，有兴趣的可以看看源码。所以STL的也没问题，有问题的是我们自己简单写写组合！</p>
+</blockquote>
+<h5>2.2.3 TIntrusiveReferenceController</h5>
+<p>有了2.2.1，2.2.2小节内容，这里就比较容易了。这里STL版本对应<code>_Ref_count_obj2</code>，就不贴代码了，有兴趣自己跳转看一下</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">ObjectType</span><span class="o">&gt;</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">TIntrusiveReferenceController</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">FReferenceControllerBase</span>
+<span class="p">{</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w">    </span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">typename</span><span class="p">...</span><span class="w"> </span><span class="n">ArgTypes</span><span class="o">&gt;</span>
+<span class="w">    </span><span class="k">explicit</span><span class="w"> </span><span class="n">TIntrusiveReferenceController</span><span class="p">(</span><span class="n">ArgTypes</span><span class="o">&amp;&amp;</span><span class="p">...</span><span class="w"> </span><span class="n">Args</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="k">new</span><span class="w"> </span><span class="p">((</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">ObjectStorage</span><span class="p">)</span><span class="w"> </span><span class="n">ObjectType</span><span class="p">(</span><span class="n">Forward</span><span class="o">&lt;</span><span class="n">ArgTypes</span><span class="o">&gt;</span><span class="p">(</span><span class="n">Args</span><span class="p">)...);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">virtual</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">DestroyObject</span><span class="p">()</span><span class="w"> </span><span class="k">override</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="n">DestructItem</span><span class="p">((</span><span class="n">ObjectType</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">ObjectStorage</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// 省略其它代码</span>
+<span class="k">private</span><span class="o">:</span>
+<span class="w">    </span><span class="k">mutable</span><span class="w"> </span><span class="n">TTypeCompatibleBytes</span><span class="o">&lt;</span><span class="n">ObjectType</span><span class="o">&gt;</span><span class="w"> </span><span class="n">ObjectStorage</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>TIntrusiveReferenceController与TReferenceControllerWithDeleter除了保留相同的不可拷贝与复制及继承自FReferenceControllerBase，还是有较大的不同，首先只有一个模板参数，不再可以定制化删除器，走统一流程：DestructItem调用,就是<strong>编译期用模板判断是否可以析构，如果可以调用其析构函数，容器中常用这招</strong>。更大是结构上不同，这里没有保存指针，而是类保留ObjectType对象大小的内存块，这导致本controller类对象通常比较大。</p>
+<p>具体来说：成员对象ObjectStorage是个具体的对象而非指针，是UE封装的模板类<code>TTypeCompatibleBytes&lt;ObjectType&gt;</code>，<strong>跟踪模板代码实质上就是等同<code>int8[sizeof(ObjectType)]</code>大小的内存块</strong>，当然还有考虑对齐，后绪留给我们自己显式的对这块内存初始化。这里等同一份对象准备好了同等内存空间，只是这一步还没有初始化。</p>
+<p>构造函数：设计上我们已经有了一块对象大小的内存块，还没有初始化，ObjectType构造函数可能带多个参数或者不带参，设计上要用<strong>C++的可变参及万能引用及完美转发</strong>，由于我们已经有了内存块，设计上直接进行new placement重载加构造函数调用，看上面的代码也是和我们分析一致。</p>
+<blockquote><p>对比STL一下，STL并非像UE在内部用模板转来转去显式的构造sizeof(ObjectType)大小内存块。MSVC的团队实现STL代码，不愧是大师级，整些<code>union {_Wrap&lt;_Ty&gt; _Storage;}</code>，经过wrap一下,他们宁愿#pragma warning(disable : 4624)压警告，也要采用简洁的炫技之流来代替，我只能说牛X。构造函数实质实一样的，我开了C++20编译，他们写的更加牛，只能膜拜那帮大佬。</p>
+</blockquote>
+<h4>2.3 操作接口类FReferenceControllerOps</h4>
+<p>前面2.1小节提到STL版本对计数基类中的强/弱引用计数是直接放到基类<code>_Ref_count_base</code>中了，并且只提供了多线程安全版本。作为对比UE将其抽出，封装成模板类<code>FReferenceControllerOps</code>，给定模板参数Mode进行特化。包括<code>FReferenceControllerOps&lt;ESPMode::ThreadSafe&gt;</code>多线程安全版本与<code>FReferenceControllerOps&lt;ESPMode::NotThreadSafe&gt;</code>非多线程安全版本。两者的实质区别就是读写计数器s数据是否经过原子化封装，比如AtomicRead，InterlockedIncrement，InterlockedCompareExchange，肯定这种支持多线程安全版本会慢一些，但能换来计数的的安全。</p>
+<p>从设计来上说FReferenceControllerOps内部没有存储任何的成员，纯属功能接口类，实现都放到静态成员函数中了，这一点UE做的确不错，隔离的比较好，且支持配制，再略调整一点整个类都可以做为模板参数传入了。操作对象<code>FReferenceControllerBase*</code>都是函数传过来的基类指针。提供了6个函数</p>
+<ul>
+<li>增加共享指针计数</li>
+<li>获取共享指针计数</li>
+<li>条件增加共享指针计数，条件是这个共享引用至少保留一次计数，如果已经失效的，不再增加</li>
+<li>增加弱引用指针计数</li>
+<li>释放共享指针对象，条件是共享计数器本次减到0，会调用计数类的DestroyObject()函数，释放托管的资源。<strong>同时尝试释放一次弱引用，如果弱引用计数刚好减到0，回收计数器ReferenceController本身的资源，同STL中2.2.2小节中的<code>_Delete_this()</code></strong></li>
+<li>释放弱引用计数，如果弱引用计数刚好减到0，回收计数器ReferenceController本身的资源，同STL中2.2.2小节中的<code>_Delete_this()</code>，这些<strong>ReferenceController一定是在堆上分配的内存</strong>。</li>
+</ul>
+<h4>2.4 多种辅助模板类及模板函数</h4>
+<h5>2.4.1 生成计数类的模板函数</h5>
+<p>主要借助模板函数能较好根据传入的参数，推断出参数的类型，无需显式的写出。在函数内部再对模板参进行再组合或变换，生成新的结构，这也是模板编程中常用的技术巧。UE提供了三个模板函数，用来动态生成2.2小节的TReferenceControllerWithDeleter与TIntrusiveReferenceController对象,第二个函数删除器我们可以自己定义，第一人合用默认DefaultDeleter删除器。三个函数内部用new将对象<strong>生成堆内存上，这点非常重要</strong>，一般用于传给某些类的构造函数调用，只不过返回值类型擦除为基类。</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">ObjectType</span><span class="o">&gt;</span>
+<span class="kr">inline</span><span class="w"> </span><span class="n">FReferenceControllerBase</span><span class="o">*</span><span class="w"> </span><span class="n">NewDefaultReferenceController</span><span class="p">(</span><span class="n">ObjectType</span><span class="o">*</span><span class="w"> </span><span class="n">Object</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">TReferenceControllerWithDeleter</span><span class="o">&lt;</span><span class="n">ObjectType</span><span class="p">,</span><span class="w"> </span><span class="n">DefaultDeleter</span><span class="o">&lt;</span><span class="n">ObjectType</span><span class="o">&gt;&gt;</span><span class="p">(</span><span class="n">Object</span><span class="p">,</span><span class="w"> </span><span class="n">DefaultDeleter</span><span class="o">&lt;</span><span class="n">ObjectType</span><span class="o">&gt;</span><span class="p">());</span>
+<span class="p">}</span>
+
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">ObjectType</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">DeleterType</span><span class="o">&gt;</span>
+<span class="kr">inline</span><span class="w"> </span><span class="n">FReferenceControllerBase</span><span class="o">*</span><span class="w"> </span><span class="n">NewCustomReferenceController</span><span class="p">(</span><span class="n">ObjectType</span><span class="o">*</span><span class="w"> </span><span class="n">Object</span><span class="p">,</span><span class="w"> </span><span class="n">DeleterType</span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">Deleter</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">TReferenceControllerWithDeleter</span><span class="o">&lt;</span><span class="n">ObjectType</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">TRemoveReference</span><span class="o">&lt;</span><span class="n">DeleterType</span><span class="o">&gt;::</span><span class="n">Type</span><span class="o">&gt;</span><span class="p">(</span><span class="n">Object</span><span class="p">,</span><span class="w"> </span><span class="n">Forward</span><span class="o">&lt;</span><span class="n">DeleterType</span><span class="o">&gt;</span><span class="p">(</span><span class="n">Deleter</span><span class="p">));</span>
+<span class="p">}</span>
+
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">ObjectType</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="p">...</span><span class="w"> </span><span class="n">ArgTypes</span><span class="o">&gt;</span>
+<span class="kr">inline</span><span class="w"> </span><span class="n">TIntrusiveReferenceController</span><span class="o">&lt;</span><span class="n">ObjectType</span><span class="o">&gt;*</span><span class="w"> </span><span class="n">NewIntrusiveReferenceController</span><span class="p">(</span><span class="n">ArgTypes</span><span class="o">&amp;&amp;</span><span class="p">...</span><span class="w"> </span><span class="n">Args</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">TIntrusiveReferenceController</span><span class="o">&lt;</span><span class="n">ObjectType</span><span class="o">&gt;</span><span class="p">(</span><span class="n">Forward</span><span class="o">&lt;</span><span class="n">ArgTypes</span><span class="o">&gt;</span><span class="p">(</span><span class="n">Args</span><span class="p">)...);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>对比STL版本，他们提供了更多，部分直接放到智能指类的私有函数中直接new对象，有的经过模板转来转去，设计的比较复杂。</p>
+<h5>2.4.2 默认的删除器</h5>
+<p>这个比较简单，就是重载一下()调用，内部转到系统delete调用。</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">Type</span><span class="o">&gt;</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">DefaultDeleter</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">FORCEINLINE</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="k">operator</span><span class="p">()(</span><span class="n">Type</span><span class="o">*</span><span class="w"> </span><span class="n">Object</span><span class="p">)</span><span class="w"> </span><span class="k">const</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="k">delete</span><span class="w"> </span><span class="n">Object</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>对比一下STL的也提供了名为default_delete默认删除器，核心实质相同，不同的是他们进行了特化，增加了对数组的特化处理<code>struct default_delete&lt;_Ty[]&gt;</code>，然后就是一些细节考虑的更多。</p>
+<h5>2.4.3 原生指针代理FRawPtrProxy</h5>
+<p>这个比较简单，主要为了配套后面用MakeShareable()函数，隐式的将原生指针转换给UE的智能指针，实际上像TSharedPtr他们也提供了直接原生指针的构造函数重载，加这个重载可能防止有人就想传原生指针，这个好像STL没有完全直接人对应。</p>
+<blockquote><p>实质这里我想到的意义就是一些C++深层次考虑，不知道他们是不是这样想的：<strong>当智能指针构造与函数调用连一起时，在编译器优化为先new内存，再调用后绪函数，最后才传到<code>std::shared_ptr</code>构造中，第二步函数发生了异常，可能造成非常隐藏的内存泄露，STL推荐使用<code>std::make_shared</code>，我个人感觉意思上差不多</strong>,其他大佬有什么见解也可以说一下。</p>
+</blockquote>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">ObjectType</span><span class="w"> </span><span class="o">&gt;</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">FRawPtrProxy</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">ObjectType</span><span class="o">*</span><span class="w"> </span><span class="n">Object</span><span class="p">;</span>
+<span class="w">    </span><span class="n">FReferenceControllerBase</span><span class="o">*</span><span class="w"> </span><span class="n">ReferenceController</span><span class="p">;</span>
+
+<span class="w">    </span><span class="n">FORCEINLINE</span><span class="w"> </span><span class="nf">FRawPtrProxy</span><span class="p">(</span><span class="w"> </span><span class="n">ObjectType</span><span class="o">*</span><span class="w"> </span><span class="n">InObject</span><span class="w"> </span><span class="p">)</span>
+<span class="w">        </span><span class="o">:</span><span class="w"> </span><span class="n">Object</span><span class="w">             </span><span class="p">(</span><span class="w"> </span><span class="n">InObject</span><span class="w"> </span><span class="p">)</span>
+<span class="w">        </span><span class="p">,</span><span class="w"> </span><span class="n">ReferenceController</span><span class="p">(</span><span class="w"> </span><span class="n">NewDefaultReferenceController</span><span class="p">(</span><span class="w"> </span><span class="n">InObject</span><span class="w"> </span><span class="p">)</span><span class="w"> </span><span class="p">){}</span>
+<span class="w">    </span><span class="k">template</span><span class="o">&lt;</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">Deleter</span><span class="w"> </span><span class="o">&gt;</span>
+<span class="w">    </span><span class="n">FORCEINLINE</span><span class="w"> </span><span class="n">FRawPtrProxy</span><span class="p">(</span><span class="w"> </span><span class="n">ObjectType</span><span class="o">*</span><span class="w"> </span><span class="n">InObject</span><span class="p">,</span><span class="w"> </span><span class="n">Deleter</span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">InDeleter</span><span class="w"> </span><span class="p">)</span>
+<span class="w">        </span><span class="o">:</span><span class="w"> </span><span class="n">Object</span><span class="w">             </span><span class="p">(</span><span class="w"> </span><span class="n">InObject</span><span class="w"> </span><span class="p">)</span>
+<span class="w">        </span><span class="p">,</span><span class="w"> </span><span class="n">ReferenceController</span><span class="p">(</span><span class="w"> </span><span class="n">NewCustomReferenceController</span><span class="p">(</span><span class="w"> </span><span class="n">InObject</span><span class="p">,</span><span class="w"> </span><span class="n">Forward</span><span class="o">&lt;</span><span class="w"> </span><span class="n">Deleter</span><span class="w"> </span><span class="o">&gt;</span><span class="p">(</span><span class="w"> </span><span class="n">InDeleter</span><span class="w"> </span><span class="p">)</span><span class="w"> </span><span class="p">)</span><span class="w"> </span><span class="p">){}</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>实现上就是直接将原生指针保存起来，另外保存一个计数器类，使用实质是TReferenceControllerWithDeleter类型，都是放在构函数中。</p>
+<h5>2.4.4 辅助生成共享自身指针</h5>
+<p>UE提供了5个EnableSharedFromThis辅助函数尝试生成共享自己的指针，原理上主要借助模板函数的重载与隐式转换及SFINAE技术，两个是处理TSharedRef共享引用，两个是处理TSharedPtr共享指针，包括带不带const版本，形式差不多，只贴一个代码就行了。最后一个必然能够调到重载函数，什么也不做。</p>
+<p>先大致说一下，<strong>如果一个自身指针能支持转换到TSharedFromThis</strong>，那么通过UpdateWeakReferenceInternal从共享引用或共享指针条件的拷贝，生成弱指针引用，完成对自己的引用计数，更加安全。这里实际有点绕人，参见3.4.1小节一步一步具体阐述。</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">SharedRefType</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">ObjectType</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">OtherType</span><span class="p">,</span><span class="w"> </span><span class="n">ESPMode</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span>
+<span class="n">FORCEINLINE</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">EnableSharedFromThis</span><span class="p">(</span><span class="w"> </span><span class="n">TSharedRef</span><span class="o">&lt;</span><span class="w"> </span><span class="n">SharedRefType</span><span class="p">,</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="k">const</span><span class="o">*</span><span class="w"> </span><span class="n">InSharedRef</span><span class="p">,</span><span class="w"> </span><span class="n">ObjectType</span><span class="w"> </span><span class="k">const</span><span class="o">*</span><span class="w"> </span><span class="n">InObject</span><span class="p">,</span><span class="w"> </span><span class="n">TSharedFromThis</span><span class="o">&lt;</span><span class="w"> </span><span class="n">OtherType</span><span class="p">,</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="k">const</span><span class="o">*</span><span class="w"> </span><span class="n">InShareable</span><span class="w"> </span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="p">(</span><span class="w"> </span><span class="n">InShareable</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="k">nullptr</span><span class="w"> </span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="n">InShareable</span><span class="o">-&gt;</span><span class="n">UpdateWeakReferenceInternal</span><span class="p">(</span><span class="w"> </span><span class="n">InSharedRef</span><span class="p">,</span><span class="w"> </span><span class="k">const_cast</span><span class="o">&lt;</span><span class="w"> </span><span class="n">ObjectType</span><span class="o">*</span><span class="w"> </span><span class="o">&gt;</span><span class="p">(</span><span class="w"> </span><span class="n">InObject</span><span class="w"> </span><span class="p">)</span><span class="w"> </span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+<span class="n">FORCEINLINE</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">EnableSharedFromThis</span><span class="p">(</span><span class="w"> </span><span class="p">...</span><span class="w"> </span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<h4>2.5 核心的FSharedReferencer与FWeakReferencer</h4>
+<p>这两个类实质是将FReferenceControllerBase与FReferenceControllerOps绑在一起就行了一层封装，前面说过FReferenceControllerBase只负责数据，FReferenceControllerOps只负责操作，这一小节的类就是将两者紧密的取系起来，形成切实有效的逻辑。从上面总体表格中也可以看到和直正智能指针的实现起着承上启下的作用。因为STL没有这样抽象，所以STL没有完全相似的，非要类比的话有个<code>_Ptr_base</code>类作为stl智能指针的基类，有那么一点点的接近，并不能等同。不过stl那边是更多是继承思想，这边是组合思想。</p>
+<h5>2.5.1 FSharedReferencer</h5>
+<p><code>FSharedReferencer&lt;Mode&gt;</code>用作TSharedRef与TSharedPtr的引用数据实现的根源，控制着托管资源的生命周期控制核心，本身作为成员放到了两个类中，UE这里使用了组合思想，本身模板参数Mode留给用户配置是多线程安全版还是普通快速版。</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="w"> </span><span class="n">ESPMode</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">FSharedReferencer</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">typedef</span><span class="w"> </span><span class="n">FReferenceControllerOps</span><span class="o">&lt;</span><span class="n">Mode</span><span class="o">&gt;</span><span class="w"> </span><span class="n">TOps</span><span class="p">;</span>
+<span class="k">private</span><span class="o">:</span>
+<span class="w">    </span><span class="k">template</span><span class="o">&lt;</span><span class="w"> </span><span class="n">ESPMode</span><span class="w"> </span><span class="n">OtherMode</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="k">friend</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">FWeakReferencer</span><span class="p">;</span>
+<span class="k">private</span><span class="o">:</span>
+<span class="w">    </span><span class="n">FReferenceControllerBase</span><span class="o">*</span><span class="w"> </span><span class="n">ReferenceController</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>设计上：本身有个成员<code>FReferenceControllerBase* ReferenceController;</code>,想一下也知道，这里只是用基类指针来进行类型擦除后的存储，真正对象肯定是2.2小节的派生类。类内部有个操作重定义<code>typedef FReferenceControllerOps&lt;Mode&gt; TOps;</code>，这一步前面提到，再进一步更灵活的话，也可以作为模板参数提供。最后就是提供了友元FWeakReferencer，让其也能相到访问。</p>
+<p>功能上<strong>非常重要非常重要</strong>： 构造函数肯定提供多种，主要完成指针类型成员ReferenceController的赋值，析构时要尝试释放共享资源。如果没有拷贝时，直接赋值就可以了，但如果是<strong>拷贝就要特别小心处理，这一点是基础</strong>，举出他的几个例子：</p>
+<ol>
+<li>const ReferenceController&amp;左引用拷贝构造：直接指针赋值，<strong>如果指针不为空，直接TOps调用增加一次共享指针计数</strong></li>
+<li>FSharedReferencer&amp;&amp; 右引用拷贝构造：直接指针赋值，<strong>不增加计数，并将右引用的指针ReferenceController清空，完成转移控制权</strong></li>
+<li>FWeakReferencer&lt; Mode &gt; const&amp;左引用拷贝构造：直接指针赋值，因为来自弱指针，要充分考虑共享引用。<strong>如果指针不为空，TOps要尝试条件调用，只有引指针的共享引用不为空才增加一次共享指针计数，否则将赋值过的指针也置空，换句话说就是只要还有效的弱指针</strong></li>
+<li>FWeakReferencer&lt; Mode &gt;&amp;&amp; InWeakReference 右引用拷贝构造：直接指针赋值，因为来自弱指针，要充分考虑共享引用。<strong>如果指针不为空，TOps要尝试条件调用，只有引指针的共享引用不为空才增加一次共享指针计数，否则将赋值过的指针也置空，换句话说就是只要还有效的弱指针,处理完后TOps尝试将右引用ReleaseWeakReference释放（不一定能释放），并将右引用指针ReferenceController清空，完成转移控制权</strong></li>
+<li>FSharedReferencer const&amp;左引用赋值构造：设计上首先排除是不是给自己赋值。功能上和拷贝一致，但注意一点，当自身的ReferenceController计数器指针不为空，<strong>一定要调用ReleaseSharedReference释放一次资源</strong>，再进行赋值交换，增加计数，这点同拷贝不同。</li>
+<li>FSharedReferencer&amp;&amp; 右引用赋值构造：设计上首先排除是不是给自己赋值。功能上和拷贝一致，<strong>也不增加计数</strong>，但注意一点，当自身的ReferenceController计数器指针不为空，<strong>一定要调用ReleaseSharedReference释放一次资源</strong>。</li>
+<li><strong>析构函数</strong>：当ReferenceController指针不为空，TOps调用ReleaseSharedReference进行资源释放，不为零只是减少一次计数，非常重要</li>
+<li>其它功能函数，IsValid通过指针是否为空判断是否有效;GetSharedReferenceCount通这TOps获取共享计数，IsUnique通过判断是否引用计数为1来判断是否只有一个共享引用。</li>
+</ol>
+<h5>2.5.2 FWeakReferencer</h5>
+<p><code>FWeakReferencer&lt;Mode&gt;</code>用作TWeakPtr弱指针引用数据实现的根源，设计和功能上基本等同2.5.1小节的FSharedReferencer，相同的部分就不再累述。</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="w"> </span><span class="n">ESPMode</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">FWeakReferencer</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">typedef</span><span class="w"> </span><span class="n">FReferenceControllerOps</span><span class="o">&lt;</span><span class="n">Mode</span><span class="o">&gt;</span><span class="w"> </span><span class="n">TOps</span><span class="p">;</span>
+<span class="k">private</span><span class="o">:</span>
+<span class="w">    </span><span class="k">template</span><span class="o">&lt;</span><span class="w"> </span><span class="n">ESPMode</span><span class="w"> </span><span class="n">OtherMode</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="k">friend</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">FSharedReferencer</span><span class="p">;</span>
+<span class="k">private</span><span class="o">:</span>
+<span class="w">    </span><span class="n">FReferenceControllerBase</span><span class="o">*</span><span class="w"> </span><span class="n">ReferenceController</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>不同之处：</p>
+<ol>
+<li>友元为FSharedReferencer，毕竞要相互访问</li>
+<li>拷贝构造函数略不同，大体相同，细节不同，拷贝左引用时<strong>增加弱引用计数</strong>，而非共享引用计数，右引用相同逻辑。</li>
+<li>FSharedReferencer&lt; Mode &gt; const&amp;左引用拷贝构造，直接指针赋值，<strong>如果指针不为空，直接TOps调用增加一次弱引用计数</strong>，同时不再提供右值引用版本，因为const T&amp;可以接受右值。</li>
+<li>赋值构造总体没有区别，同样设计上首先排除是不是给自己赋值，当自身的ReferenceController计数器指针不为空，<strong>一定要调用ReleaseWeakReference释放一次资源</strong>，只是这点不同。左值的增加一次<strong>弱引用计数</strong>，否则不处理，再进行赋值交换。</li>
+<li>析构函数：当ReferenceController指针不为空，TOps调用ReleaseWeakReference进行自身释放，不为零只是减少一次弱引用计数</li>
+<li>其它功能函数，IsValid通过指针是否为空判断是否有效，还要加上共享指针计数是否大于0判断</li>
+</ol>
+<blockquote><p>对于FSharedReferencer与FWeakReferencer来说，通过C++析构时间，自己调用计数器的资源释放，这样UE真正智能指针TSharedRef与TSharedPtr等上层就无需处理析构函数，显得优雅一点，这是因为逻辑功能抽离的更彻底，放到这层了；相反STL的智能指针<code>std::shared_ptr</code>与<code>std::weak_ptr</code>都是在自己的析构函数，处理计数的减少及托管资源的释放，抽象与剥离这点UE还是不错的。</p>
+</blockquote>
+<p>至此设计结构都讲完了，如果认真理解，应用层不会有什么难度了。</p>
+<h3>三、UE四种智能指针</h3>
+<p>这一部分是应用，我们讲的少一点，不然就重复了，背后原理请阅读第二章节，更多示例可以参考UE源文件：<strong>SharedPointerTesting.inl</strong></p>
+<h4>3.1 TSharedPtr</h4>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">ObjectType</span><span class="p">,</span><span class="w"> </span><span class="n">ESPMode</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">TSharedPtr</span>
+<span class="p">{</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w">    </span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span>
+<span class="w">        </span><span class="k">typename</span><span class="w"> </span><span class="nc">OtherType</span><span class="p">,</span>
+<span class="w">        </span><span class="k">typename</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">decltype</span><span class="p">(</span><span class="n">ImplicitConv</span><span class="o">&lt;</span><span class="n">ObjectType</span><span class="o">*&gt;</span><span class="p">((</span><span class="n">OtherType</span><span class="o">*</span><span class="p">)</span><span class="k">nullptr</span><span class="p">))</span>
+<span class="w">    </span><span class="o">&gt;</span>
+<span class="w">    </span><span class="n">FORCEINLINE</span><span class="w"> </span><span class="n">TSharedPtr</span><span class="p">(</span><span class="w"> </span><span class="n">TSharedPtr</span><span class="o">&lt;</span><span class="w"> </span><span class="n">OtherType</span><span class="p">,</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="k">const</span><span class="o">&amp;</span><span class="w"> </span><span class="n">InSharedPtr</span><span class="w"> </span><span class="p">)</span>
+<span class="w">        </span><span class="o">:</span><span class="w"> </span><span class="n">Object</span><span class="p">(</span><span class="w"> </span><span class="n">InSharedPtr</span><span class="p">.</span><span class="n">Object</span><span class="w"> </span><span class="p">)</span>
+<span class="w">        </span><span class="p">,</span><span class="w"> </span><span class="n">SharedReferenceCount</span><span class="p">(</span><span class="w"> </span><span class="n">InSharedPtr</span><span class="p">.</span><span class="n">SharedReferenceCount</span><span class="w"> </span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="k">private</span><span class="o">:</span>
+<span class="w">    </span><span class="n">ObjectType</span><span class="o">*</span><span class="w"> </span><span class="n">Object</span><span class="p">;</span>
+<span class="w">    </span><span class="n">SharedPointerInternals</span><span class="o">::</span><span class="n">FSharedReferencer</span><span class="o">&lt;</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">SharedReferenceCount</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>TSharedPtr设计上</p>
+<ol>
+<li>模板设计，第一个模板参ObjectType参数表示我们要传入类型智能指针对应的类型，第二个模板参数Mode控制是否多线程安全，参考2.3小节内容。</li>
+<li>采用了组合思想，成员上Object存指针数据，SharedReferenceCount成员对象存我们计数（<strong>实质在堆区</strong>）与操作接口类，FSharedReferencer在2.5小节我们重点讲了，是最核心，可以再阅读这一小节。</li>
+<li>相比STL是采用继承<code>_Ptr_base</code>，<code>std::shared_ptr</code>不存数据，真正功能都是最转到基类中了,不过STL的实现的确更复杂。</li>
+<li>UE接口与数据分离比较干净，比如<strong>引用计数，资源释放操作封装在SharedReferenceCount中</strong>，在TSharedPtr这一层没有内部实现细节，封装良好，应用使用时无需关心。前面说过析构函数这里UE这一层都不用单独处理，这一点是优点。</li>
+<li>支持多种构造函数</li>
+<li>支持移动语意</li>
+<li><strong>支持良好的向上的类型转换</strong>。作为底层库基本上构造函数都采用模板参OtherType，利用编译期SFINAE技术，利用模板函数<strong>ImplicitConv</strong>结合decltype对隐式转换判断，体现库设计的严谨与通用性。</li>
+<li>支持原生指针及原生指针转换到RawPtrProxy</li>
+<li>如果这个类派生自TSharedFromThis，对TSharedFromThis类型安全与自身类型安全检查，通过函数重载，支持返回自己的TSharedPtr，<strong>在3.4小节重点讲这个</strong>。</li>
+<li><strong>ToSharedRef支持向TSharedRef类型转换，内部使用IsValid保证非空</strong></li>
+<li>支持显示bool类型重载，即explicit operator bool</li>
+<li>当<strong>使用Get()函数不进行获取目标时，不进行安全判断，当使用重载*或重载-&gt;时，都会利用IsValid()进行安全检查</strong></li>
+<li>Reset()对本自己进行一次减少引用，并将新引用设为空指针对象</li>
+</ol>
+<h4>3.2 TSharedRef</h4>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">ObjectType</span><span class="p">,</span><span class="w"> </span><span class="n">ESPMode</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">TSharedRef</span>
+<span class="p">{</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w">    </span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span>
+<span class="w">        </span><span class="k">typename</span><span class="w"> </span><span class="nc">OtherType</span><span class="p">,</span>
+<span class="w">        </span><span class="k">typename</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">decltype</span><span class="p">(</span><span class="n">ImplicitConv</span><span class="o">&lt;</span><span class="n">ObjectType</span><span class="o">*&gt;</span><span class="p">((</span><span class="n">OtherType</span><span class="o">*</span><span class="p">)</span><span class="k">nullptr</span><span class="p">))</span>
+<span class="w">    </span><span class="o">&gt;</span>
+<span class="w">    </span><span class="n">FORCEINLINE</span><span class="w"> </span><span class="k">explicit</span><span class="w"> </span><span class="n">TSharedRef</span><span class="p">(</span><span class="w"> </span><span class="n">OtherType</span><span class="o">*</span><span class="w"> </span><span class="n">InObject</span><span class="w"> </span><span class="p">)</span>
+<span class="w">        </span><span class="o">:</span><span class="w"> </span><span class="n">Object</span><span class="p">(</span><span class="w"> </span><span class="n">InObject</span><span class="w"> </span><span class="p">)</span>
+<span class="w">        </span><span class="p">,</span><span class="w"> </span><span class="n">SharedReferenceCount</span><span class="p">(</span><span class="w"> </span><span class="n">SharedPointerInternals</span><span class="o">::</span><span class="n">NewDefaultReferenceController</span><span class="p">(</span><span class="w"> </span><span class="n">InObject</span><span class="w"> </span><span class="p">)</span><span class="w"> </span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="n">UE_TSHAREDPTR_STATIC_ASSERT_VALID_MODE</span><span class="p">(</span><span class="n">ObjectType</span><span class="p">,</span><span class="w"> </span><span class="n">Mode</span><span class="p">)</span>
+<span class="w">        </span><span class="n">Init</span><span class="p">(</span><span class="n">InObject</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="k">private</span><span class="o">:</span>
+<span class="w">    </span><span class="n">ObjectType</span><span class="o">*</span><span class="w"> </span><span class="n">Object</span><span class="p">;</span>
+<span class="w">    </span><span class="n">SharedPointerInternals</span><span class="o">::</span><span class="n">FSharedReferencer</span><span class="o">&lt;</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">SharedReferenceCount</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>TSharedRef为UE原创，设计上基本等同TSharedPtr，细节不再累述。不过他<strong>保证所引用的对象非空</strong>，核心原因是<strong>生成TSharedRef时</strong>就做<code>check(InObject != nullptr);</code>检测，空指针就无法成功，对于使用时，Get(),重载*，重载-&gt;都进行了安全检测，不过这里TSharedRef的Get()函数返回的是引用类型，而TSharedPtr返回的指针类型。</p>
+<p>因为保证了非空，所以TSharedRef没有了bool类型重载。</p>
+<h4>3.3 TWeakPtr</h4>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">ObjectType</span><span class="p">,</span><span class="w"> </span><span class="n">ESPMode</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">TWeakPtr</span>
+<span class="p">{</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w">    </span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span>
+<span class="w">        </span><span class="k">typename</span><span class="w"> </span><span class="nc">OtherType</span><span class="p">,</span>
+<span class="w">        </span><span class="k">typename</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">decltype</span><span class="p">(</span><span class="n">ImplicitConv</span><span class="o">&lt;</span><span class="n">ObjectType</span><span class="o">*&gt;</span><span class="p">((</span><span class="n">OtherType</span><span class="o">*</span><span class="p">)</span><span class="k">nullptr</span><span class="p">))</span>
+<span class="w">    </span><span class="o">&gt;</span>
+<span class="w">    </span><span class="n">FORCEINLINE</span><span class="w"> </span><span class="n">TWeakPtr</span><span class="p">(</span><span class="w"> </span><span class="n">TSharedRef</span><span class="o">&lt;</span><span class="w"> </span><span class="n">OtherType</span><span class="p">,</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="k">const</span><span class="o">&amp;</span><span class="w"> </span><span class="n">InSharedRef</span><span class="w"> </span><span class="p">)</span>
+<span class="w">        </span><span class="o">:</span><span class="w"> </span><span class="n">Object</span><span class="p">(</span><span class="w"> </span><span class="n">InSharedRef</span><span class="p">.</span><span class="n">Object</span><span class="w"> </span><span class="p">)</span>
+<span class="w">        </span><span class="p">,</span><span class="w"> </span><span class="n">WeakReferenceCount</span><span class="p">(</span><span class="w"> </span><span class="n">InSharedRef</span><span class="p">.</span><span class="n">SharedReferenceCount</span><span class="w"> </span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">FORCEINLINE</span><span class="w"> </span><span class="n">TSharedPtr</span><span class="o">&lt;</span><span class="w"> </span><span class="n">ObjectType</span><span class="p">,</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">Pin</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="o">&amp;</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">TSharedPtr</span><span class="o">&lt;</span><span class="w"> </span><span class="n">ObjectType</span><span class="p">,</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span><span class="p">(</span><span class="w"> </span><span class="o">*</span><span class="k">this</span><span class="w"> </span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="k">private</span><span class="o">:</span>
+<span class="w">    </span><span class="n">ObjectType</span><span class="o">*</span><span class="w"> </span><span class="n">Object</span><span class="p">;</span>
+<span class="w">    </span><span class="n">SharedPointerInternals</span><span class="o">::</span><span class="n">FWeakReferencer</span><span class="o">&lt;</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">WeakReferenceCount</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>有了前面的TSharedRef与TSharedPtr作铺垫，TWeakPtr就经较简单了，结构上跟前面两者基本相同，除去Object指针相同，引用计数与控制换成了<code>FWeakReferencer&lt; Mode &gt;</code>型的WeakReferenceCount，其它结构上区别不是很大。</p>
+<p>当然构造函数原理差不多，只是有一定限制，<strong>弱指针不能单独使用，要配套TSharedRef，TSharedPtr使用，它的真正计数是计数类中的WeakReferenceCount</strong>。只支持从TSharedRef，TSharedPtr，TWeakPtr三种类型上构造，以及一个空的构造，同时也是支持向上类型转换，这和STL差不多。注意构造时用的WeakReferenceCount，UE这么一封装，要看细节就要回到2.5.2小节的FWeakReferencer，这里不再累述。</p>
+<p>注意这里的IsValid()除了指针判断为非空，还要判断其对应的共享计数是否大于0，都满足才有效，否则就是失效的。</p>
+<p>Reset()函数，将自己指向空引用，并将原来自己减少一次弱引用，如果弱引用为0，释放原来的计数器。</p>
+<p>Pin()函数，将弱引用转为TSharedPtr，因为弱引用不支持直接-&gt;访问。这里注意一点，就是原来的共享引用为失效为空时，转换后的TSharedPtr是一个空指针，直接解引用，很可能就会崩溃，如果需要这样处理，请进行安全检测。这里实际由于UE的封装，将转换隐藏了，要回到第二章节2.5.1，FSharedReferencer对传入的FWeakReferencer构造时，会进行共享引用计数判断，大于0才真正赋值。封装深的好处就是使用觉得容易，但想掌握原理还是比较麻烦。</p>
+<p><code>HasSameObject( const void* InOtherPtr )</code>这个函数直接提供了和InOtherPtr地址是否相等的判断。</p>
+<h4>3.4 TSharedFromThis</h4>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">ObjectType</span><span class="p">,</span><span class="w"> </span><span class="n">ESPMode</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">TSharedFromThis</span>
+<span class="p">{</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w">    </span><span class="n">TSharedRef</span><span class="o">&lt;</span><span class="w"> </span><span class="n">ObjectType</span><span class="p">,</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">AsShared</span><span class="p">()</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="n">TSharedPtr</span><span class="o">&lt;</span><span class="w"> </span><span class="n">ObjectType</span><span class="p">,</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">SharedThis</span><span class="p">(</span><span class="w"> </span><span class="n">WeakThis</span><span class="p">.</span><span class="n">Pin</span><span class="p">()</span><span class="w"> </span><span class="p">);</span>
+<span class="w">        </span><span class="n">check</span><span class="p">(</span><span class="w"> </span><span class="n">SharedThis</span><span class="p">.</span><span class="n">Get</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="k">this</span><span class="w"> </span><span class="p">);</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">MoveTemp</span><span class="p">(</span><span class="w"> </span><span class="n">SharedThis</span><span class="w"> </span><span class="p">).</span><span class="n">ToSharedRef</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="k">private</span><span class="o">:</span>
+<span class="w">    </span><span class="k">mutable</span><span class="w"> </span><span class="n">TWeakPtr</span><span class="o">&lt;</span><span class="w"> </span><span class="n">ObjectType</span><span class="p">,</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">WeakThis</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>TSharedFromThis是返回自己的共享引用的智能指针，实现与功能上基本等同STL的enable_shared_from_this，内部都持一个弱指针，写法上将我们的ObjectType类继承于TSharedFromThis就可以了。</p>
+<p><strong>用法</strong>：上当我们在自己对象已经交给UE的智能指针托管，生命周期由智能指针控制。当我们的<strong>类成员函数处理异步调用</strong>时，如果将this指针传给某个回调函数，延迟一段时间后调用，这段时间内我们对象生命周期结束可能已经回收，调用时很可能就崩溃。所以注册这个回调时，如果用AsShared()函数能拿到自己的智能指针，那就安全了，这样我们有法保证我们对象有效性，这是一个典型的用法。</p>
+<h5>3.4.1 TSharedFromThis用法原理</h5>
+<p>以这个简单代码为例FMyClass继承TSharedFromThis为例，MyClass假设在成员函数中的this指针，MyClass-&gt;AsShared()便得到共享指针，下面分析详细原理：</p>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">FMyClass</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">TSharedFromThis</span><span class="o">&lt;</span><span class="w"> </span><span class="n">FMyClass</span><span class="o">&gt;</span><span class="p">{};</span>
+<span class="n">TSharedPtr</span><span class="o">&lt;</span><span class="n">FMyClass</span><span class="o">&gt;</span><span class="w"> </span><span class="n">TheClassPtr1</span><span class="p">(</span><span class="k">new</span><span class="w"> </span><span class="n">FMyClass</span><span class="p">());</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">FMyClass</span><span class="o">*</span><span class="w"> </span><span class="n">MyClass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TheClassPtr1</span><span class="p">.</span><span class="n">Get</span><span class="p">();</span>
+<span class="w">    </span><span class="n">TSharedRef</span><span class="o">&lt;</span><span class="n">FMyClass</span><span class="o">&gt;</span><span class="w"> </span><span class="n">TheClassPtr2</span><span class="p">(</span><span class="n">MyClass</span><span class="o">-&gt;</span><span class="n">AsShared</span><span class="p">());</span>
+<span class="p">}</span>
+</code></pre></div>
+<ol>
+<li>当new FMyClass()从堆申请内存时，此时基类<code>TSharedFromThis&lt;FMyClass&gt;</code>并没有真正给其WeakThis赋值，假设结果为pkRet</li>
+<li>当用pkRet构造<code>TSharedPtr&lt;FMyClass&gt;</code>对象时，进入TSharedPtr( OtherType_ InObject )构造函数调用,内部再进行赋值，并从*堆内存上申请出产生TReferenceControllerWithDeleter计数器，此时share与weak计数器都为1</li>
+</ol>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span>
+<span class="k">typename</span><span class="w"> </span><span class="nc">OtherType</span><span class="p">,</span>
+<span class="k">typename</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">decltype</span><span class="p">(</span><span class="n">ImplicitConv</span><span class="o">&lt;</span><span class="n">ObjectType</span><span class="o">*&gt;</span><span class="p">((</span><span class="n">OtherType</span><span class="o">*</span><span class="p">)</span><span class="k">nullptr</span><span class="p">))</span>
+<span class="o">&gt;</span>
+<span class="n">FORCEINLINE</span><span class="w"> </span><span class="k">explicit</span><span class="w"> </span><span class="n">TSharedPtr</span><span class="p">(</span><span class="w"> </span><span class="n">OtherType</span><span class="o">*</span><span class="w"> </span><span class="n">InObject</span><span class="w"> </span><span class="p">)</span>
+<span class="w">     </span><span class="o">:</span><span class="w"> </span><span class="n">Object</span><span class="p">(</span><span class="w"> </span><span class="n">InObject</span><span class="w"> </span><span class="p">)</span>
+<span class="w">     </span><span class="p">,</span><span class="w"> </span><span class="n">SharedReferenceCount</span><span class="p">(</span><span class="w"> </span><span class="n">SharedPointerInternals</span><span class="o">::</span><span class="n">NewDefaultReferenceController</span><span class="p">(</span><span class="w"> </span><span class="n">InObject</span><span class="w"> </span><span class="p">)</span><span class="w"> </span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">     </span><span class="n">UE_TSHAREDPTR_STATIC_ASSERT_VALID_MODE</span><span class="p">(</span><span class="n">ObjectType</span><span class="p">,</span><span class="w"> </span><span class="n">Mode</span><span class="p">)</span>
+<span class="w">     </span><span class="n">SharedPointerInternals</span><span class="o">::</span><span class="n">EnableSharedFromThis</span><span class="p">(</span><span class="w"> </span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="n">InObject</span><span class="p">,</span><span class="w"> </span><span class="n">InObject</span><span class="w"> </span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<ol>
+<li><code>UE_TSHAREDPTR_STATIC_ASSERT_VALID_MODE</code>宏，用模板编译期检查是否继承TSharedFromThis线程安全相反的版本，可以忽略</li>
+<li>关键的一步：EnableSharedFromThis()，这是第二章节提到的共有5个重载版本模板函数，我们这里因为继承<code>TSharedFromThis&lt;FMyClass&gt;</code>，所以InObject能转换成<code>TSharedFromThis&lt;FMyClass&gt;</code>类型指针，同时this指针就是<code>TSharedPtr&lt;FMyClass&gt;</code>,因此调用这个版本函数  </li>
+</ol>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">SharedPtrType</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">ObjectType</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">OtherType</span><span class="p">,</span><span class="w"> </span><span class="n">ESPMode</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span>
+<span class="n">FORCEINLINE</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">EnableSharedFromThis</span><span class="p">(</span><span class="w"> </span><span class="n">TSharedPtr</span><span class="o">&lt;</span><span class="w"> </span><span class="n">SharedPtrType</span><span class="p">,</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;*</span><span class="w"> </span><span class="n">InSharedPtr</span><span class="p">,</span><span class="w"> </span><span class="n">ObjectType</span><span class="w"> </span><span class="k">const</span><span class="o">*</span><span class="w"> </span><span class="n">InObject</span><span class="p">,</span><span class="w"> </span><span class="n">TSharedFromThis</span><span class="o">&lt;</span><span class="w"> </span><span class="n">OtherType</span><span class="p">,</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="k">const</span><span class="o">*</span><span class="w"> </span><span class="n">InShareable</span><span class="w"> </span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="p">(</span><span class="w"> </span><span class="n">InShareable</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="k">nullptr</span><span class="w"> </span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">         </span><span class="n">InShareable</span><span class="o">-&gt;</span><span class="n">UpdateWeakReferenceInternal</span><span class="p">(</span><span class="w"> </span><span class="n">InSharedPtr</span><span class="p">,</span><span class="w"> </span><span class="k">const_cast</span><span class="o">&lt;</span><span class="w"> </span><span class="n">ObjectType</span><span class="o">*</span><span class="w"> </span><span class="o">&gt;</span><span class="p">(</span><span class="w"> </span><span class="n">InObject</span><span class="w"> </span><span class="p">)</span><span class="w"> </span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<ol>
+<li>显然进一步就到了下面UpdateWeakReferenceInternal调用，WeakThis这时还没初始化为真正有效值，TSharedPtr的临时构造了，此时share与weak计数器为2，1，再进入WeakThis = TSharedPtr的赋值构造函数  </li>
+</ol>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">SharedPtrType</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">OtherType</span><span class="w"> </span><span class="o">&gt;</span>
+<span class="n">FORCEINLINE</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">UpdateWeakReferenceInternal</span><span class="p">(</span><span class="w"> </span><span class="n">TSharedPtr</span><span class="o">&lt;</span><span class="w"> </span><span class="n">SharedPtrType</span><span class="p">,</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="k">const</span><span class="o">*</span><span class="w"> </span><span class="n">InSharedPtr</span><span class="p">,</span><span class="w"> </span><span class="n">OtherType</span><span class="o">*</span><span class="w"> </span><span class="n">InObject</span><span class="w"> </span><span class="p">)</span><span class="w"> </span><span class="k">const</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="p">(</span><span class="w"> </span><span class="o">!</span><span class="n">WeakThis</span><span class="p">.</span><span class="n">IsValid</span><span class="p">()</span><span class="w"> </span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="n">WeakThis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TSharedPtr</span><span class="o">&lt;</span><span class="w"> </span><span class="n">ObjectType</span><span class="p">,</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span><span class="p">(</span><span class="w"> </span><span class="o">*</span><span class="n">InSharedPtr</span><span class="p">,</span><span class="w"> </span><span class="n">InObject</span><span class="w"> </span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<ol>
+<li>也就是TWeakPtr用TSharePtr赋值构造，进而触发：FWeakReferencer用FSharedReferencer的赋值构造，AssignReferenceController内部会增加一次weak计数，此时share与weak计数器为2，2，  </li>
+</ol>
+<div class="highlight"><pre><code><span></span><span class="n">FORCEINLINE</span><span class="w"> </span><span class="n">FWeakReferencer</span><span class="o">&amp;</span><span class="w"> </span><span class="k">operator</span><span class="o">=</span><span class="p">(</span><span class="w"> </span><span class="n">FSharedReferencer</span><span class="o">&lt;</span><span class="w"> </span><span class="n">Mode</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="k">const</span><span class="o">&amp;</span><span class="w"> </span><span class="n">InSharedReference</span><span class="w"> </span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">     </span><span class="n">AssignReferenceController</span><span class="p">(</span><span class="w"> </span><span class="n">InSharedReference</span><span class="p">.</span><span class="n">ReferenceController</span><span class="w"> </span><span class="p">);</span>
+<span class="w">     </span><span class="k">return</span><span class="w"> </span><span class="o">*</span><span class="k">this</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ol>
+<li>都结束后，临时的TSharePtr析构，此时share与weak计数器为1，2</li>
+<li>最后MyClass-&gt;AsShared()，产生TSharedRef，此时share与weak计数器为2，2，增加了一次计数，就算异步调用，也保证了有效性。</li>
+</ol>
+<h3>四、 结语</h3>
+<p>到此我们已经全部分析完毕，详细的介绍UE的四种智能指针实现原理，尤其是第二章节，第三章节算是各种指针的特性略作介绍。可能有纰漏，欢迎指证！</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "UE4和C++ STL智能指针对比分析.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

@@ -1,0 +1,1176 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>C++ folly库解读01 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="C++ folly库解读01,C/C++,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="C++ folly库解读（一） Fbstring —— 一个完美替代std::string的库(上)<br/>C++ folly库解读（一） Fbstring —— 一个完美替代std::string的库(下)" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>C++ folly库解读01</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2023-12-25 20:00
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://mp.weixin.qq.com/s/tR9G_mpZTBlas_-ZL03nHA' target='blank'>C++ folly库解读（一） Fbstring —— 一个完美替代std::string的库(上)</a></p></h4>
+<ul>
+<li><p>string 常见的三种实现方式</p>
+<ul>
+<li>eager copy</li>
+<li>COW</li>
+<li>SSO</li>
+<li></li>
+</ul>
+</li>
+<li><p>Fbstring 介绍</p>
+<ul>
+<li>Storage strategies</li>
+<li>Implementation highlights</li>
+<li>Benchmark</li>
+</ul>
+</li>
+<li><p>主要类</p>
+</li>
+<li><p>字符串存储数据结构</p>
+<ul>
+<li>small strings</li>
+<li>medium strings</li>
+<li>large strings</li>
+</ul>
+</li>
+<li><p>如何区分字符串类型 category</p>
+<ul>
+<li>小端</li>
+<li>大端</li>
+<li>small strings</li>
+<li>medium strings</li>
+<li>large strings</li>
+<li>category()</li>
+<li>capacity()</li>
+<li>size()</li>
+</ul>
+</li>
+<li><p>字符串初始化</p>
+<ul>
+<li>initSmall</li>
+<li>initMedium</li>
+<li>initLarge</li>
+<li>特殊的构造函数 —— 不拷贝用户传入的字符串</li>
+</ul>
+</li>
+</ul>
+<p>在引入fbstring[1]之前，我们首先再回顾一下 string 常见的三种实现方式。</p>
+<h2>string 常见的三种实现方式</h2>
+<p>string 中比较重要的 3 个字段：</p>
+<ul>
+<li><code>char *data</code>. 指向存放字符串的首地址（在 SSO 的某些实现方案中可能没有此字段）。</li>
+<li><code>size_t size</code>. 字符串长度。</li>
+<li><code>size_t capacity</code>. 字符串容量。capacity &gt;= size. 在字符串相加、reserve 等场景下会用到此字段。</li>
+</ul>
+<h3>eager copy</h3>
+<p>这个是最简单、最好理解的一种，在每次拷贝时将原 string 对应的内存以及所持有的动态资源完整地复制一份，即没有任何特殊处理。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2000-1.png" alt="图片"></p>
+<p>优点：</p>
+<ul>
+<li>实现简单。</li>
+<li>每个对象互相独立，不用考虑那么多乱七八糟的场景。</li>
+</ul>
+<p>缺点：</p>
+<ul>
+<li>字符串较大时，拷贝浪费空间。</li>
+</ul>
+<h3>COW</h3>
+<p>这个也算是计算机里的基本思想了。不同于 eager copy 的每次拷贝都会复制，此种实现方式为写时复制，即 copy-on-write。只有在某个 string 要对共享对象进行修改时，才会真正执行拷贝。</p>
+<p>由于存在共享机制，所以需要一个<code>std::atomic&lt;size_t&gt;</code>，代表被多少对象共享。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2000-2.png" alt="图片"></p>
+<p>写时复制：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2000-3.png" alt="图片"></p>
+<p>优点：</p>
+<ul>
+<li>字符串空间较大时，减少了分配、复制字符串的时间。</li>
+</ul>
+<p>缺点：</p>
+<ul>
+<li>refcount 需要原子操作，性能有损耗。</li>
+<li>某些情况下会带来意外的开销。比如非 const 成员使用<code>[]</code>，这会触发 COW，因为无法知晓应用程序是否会对返回的字符做修改。典型的如Legality of COW std::string implementation in C++11[2]中举的例子：</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">s</span><span class="p">(</span><span class="s">&quot;str&quot;</span><span class="p">);</span><span class="w">  </span>
+<span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">data</span><span class="p">();</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="nf">s2</span><span class="p">(</span><span class="n">s</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="n">s</span><span class="p">[</span><span class="mi">0</span><span class="p">];</span><span class="w">         </span><span class="c1">// 触发COW  </span>
+<span class="p">}</span><span class="w">  </span>
+<span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="o">*</span><span class="n">p</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="sc">&#39;\n&#39;</span><span class="p">;</span><span class="w">      </span><span class="c1">// p指向的原有空间已经无效</span>
+</code></pre></div>
+<ul>
+<li>其他更细节的缺点可以参考：std::string 的 Copy-on-Write：不如想象中美好[3]</li>
+</ul>
+<h3>SSO</h3>
+<p>Small String Optimization. <strong>基于字符串大多数比较短的特点</strong>，利用 string 对象本身的栈空间来存储短字符串。而当字符串长度大于某个临界值时，则使用 eager copy 的方式。</p>
+<p>SSO 下，string 的数据结构会稍微复杂点，使用 union 来区分短字符串和长字符串的场景：</p>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">string</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">start</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">kLocalSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">15</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="k">union</span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="n">buffer</span><span class="p">[</span><span class="n">kLocalSize</span><span class="o">+</span><span class="mi">1</span><span class="p">];</span><span class="w">      </span><span class="c1">// 满足条件时，用来存放短字符串  </span>
+<span class="w">    </span><span class="kt">size_t</span><span class="w"> </span><span class="n">capacity</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="n">data</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>短字符串，SSO：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2000-4.png" alt="图片"></p>
+<p>长字符串，eager copy：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2000-5.png" alt="图片"></p>
+<p>这种数据结构的实现下，SSO 的阈值一般是 15 字节。folly 的 fbstring 在 SSO 场景下，数据结构做了一些优化，可以存储 23 个字节，后面会提到。</p>
+<p>优点：</p>
+<ul>
+<li>短字符串时，无动态内存分配。</li>
+</ul>
+<p>缺点：</p>
+<ul>
+<li>string 对象占用空间比 eager copy 和 cow 要大。</li>
+</ul>
+<h2>Fbstring 介绍</h2>
+<p>fbstring 可以 100%兼容 std::string。配合三种存储策略和jemalloc[4]，可以显著的提高 string 的性能。</p>
+<p>fbstring 支持 32-bit、64-bit、little-endian、big-endian.</p>
+<h3>Storage strategies</h3>
+<ul>
+<li>Small Strings (&lt;= 23 chars) ，使用 SSO.</li>
+<li>Medium strings (24 - 255 chars)，使用 eager copy.</li>
+<li>Large strings (&gt; 255 chars)，使用 COW.</li>
+</ul>
+<h3>Implementation highlights</h3>
+<ul>
+<li>与 std::string 100%兼容。</li>
+<li>COW 存储时对于引用计数线程安全。</li>
+<li>对 Jemalloc 友好。如果检测到使用 jemalloc，那么将使用 jemalloc 的一些非标准扩展接口来提高性能。</li>
+<li><code>find()</code>使用简化版的Boyer-Moore algorithm[5]。在查找成功的情况下，相对于<code>string::find()</code>有 30 倍的性能提升。在查找失败的情况下也有 1.5 倍的性能提升。</li>
+<li>可以与 std::string 互相转换。</li>
+</ul>
+<h3>Benchmark</h3>
+<p>在FBStringBenchmark.cpp[6]中。</p>
+<h2>主要类</h2>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2000-6.png" alt="图片"></p>
+<ul>
+<li><code>::folly::fbstring str("abc")</code>中的 fbstring 为 basic_fbstring的别名 ：<code>typedef basic_fbstring&lt;char&gt; fbstring;</code></li>
+<li><code>basic_fbstring</code> 在 <code>fbstring_core</code> 提供的接口之上，实现了 std::string 定义的所有接口。里面有一个私有变量 <code>store_</code>，默认值即为 <code>fbstring_core``。basic_fbstring</code> 的定义如下，比 <code>std::basic_string</code> 只多了一个默认的模板参数 Storage：</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">typename</span><span class="w"> </span><span class="nc">E</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="k">class</span><span class="w"> </span><span class="nc">T</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">char_traits</span><span class="o">&lt;</span><span class="n">E</span><span class="o">&gt;</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="k">class</span><span class="w"> </span><span class="nc">A</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">allocator</span><span class="o">&lt;</span><span class="n">E</span><span class="o">&gt;</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="k">class</span><span class="w"> </span><span class="nc">Storage</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fbstring_core</span><span class="o">&lt;</span><span class="n">E</span><span class="o">&gt;&gt;</span><span class="w">  </span>
+<span class="k">class</span><span class="w"> </span><span class="nc">basic_fbstring</span><span class="p">;</span>
+</code></pre></div>
+<ul>
+<li><code>fbstring_core</code> 负责字符串的存储及字符串相关的操作，例如 init、copy、reserve、shrink 等等。</li>
+</ul>
+<h2>字符串存储数据结构</h2>
+<p>最重要的 3 个数据结构 <code>union{Char small*, MediumLarge ml*}</code>、MediumLarge、RefCounted，定义在<code>fbstring_core</code> 中，基本上所有的字符串操作都离不开这三个数据结构。</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">RefCounted</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">atomic</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">refCount_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">Char</span><span class="w"> </span><span class="n">data_</span><span class="p">[</span><span class="mi">1</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="n">RefCounted</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nf">create</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">size</span><span class="p">);</span><span class="w">       </span><span class="c1">// 创建一个RefCounted  </span>
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="n">RefCounted</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nf">create</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">Char</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">size</span><span class="p">);</span><span class="w">     </span><span class="c1">// ditto  </span>
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">incrementRefs</span><span class="p">(</span><span class="n">Char</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="p">);</span><span class="w">     </span><span class="c1">// 增加一个引用  </span>
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">decrementRefs</span><span class="p">(</span><span class="n">Char</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="p">);</span><span class="w">    </span><span class="c1">// 减少一个引用  </span>
+<span class="w">    </span><span class="c1">// 其他函数定义  </span>
+<span class="p">}</span>
+<span class="p">;</span><span class="w">  </span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">MediumLarge</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">Char</span><span class="o">*</span><span class="w"> </span><span class="n">data_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">capacity_</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="nf">capacity</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">kIsLittleEndian</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">capacity_</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">capacityExtractMask</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">capacity_</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span>
+
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">setCapacity</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">cap</span><span class="p">,</span><span class="w"> </span><span class="n">Category</span><span class="w"> </span><span class="n">cat</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">capacity_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kIsLittleEndian</span><span class="w">  </span>
+<span class="w">        </span><span class="o">?</span><span class="w"> </span><span class="n">cap</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="p">(</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">cat</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">kCategoryShift</span><span class="p">)</span><span class="w">  </span>
+<span class="w">        </span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="n">cap</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">cat</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="p">};</span><span class="w">  </span>
+
+<span class="k">union</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">bytes_</span><span class="p">[</span><span class="k">sizeof</span><span class="p">(</span><span class="n">MediumLarge</span><span class="p">)];</span><span class="w">          </span><span class="c1">// For accessing the last byte.  </span>
+<span class="w">    </span><span class="n">Char</span><span class="w"> </span><span class="n">small_</span><span class="p">[</span><span class="k">sizeof</span><span class="p">(</span><span class="n">MediumLarge</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">Char</span><span class="p">)];</span><span class="w">  </span>
+<span class="w">    </span><span class="n">MediumLarge</span><span class="w"> </span><span class="n">ml_</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<ul>
+<li>small strings（SSO）时，使用 union 中的 <code>Char small_</code>存储字符串，即对象本身的栈空间。</li>
+<li>medium strings（eager copy）时，使用 union 中的<code>MediumLarge ml_</code><ul>
+<li><code>Char* data_</code> ：指向分配在堆上的字符串。</li>
+<li><code>size_t size_</code>：字符串长度。</li>
+<li><code>size_t capacity_</code> ：字符串容量。</li>
+</ul>
+</li>
+<li>large strings（cow）时， 使用<code>MediumLarge ml_</code>和 <code>RefCounted</code>：<ul>
+<li><code>RefCounted.refCount_</code>：共享字符串的引用计数。</li>
+<li><code>RefCounted.data_[1]</code> : <strong>flexible array.</strong> 存放字符串。</li>
+<li><code>ml*.data_</code>指向 <code>RefCounted.data_</code>，<code>ml*.size_</code>与 ml_.capacity_的含义不变。</li>
+</ul>
+</li>
+</ul>
+<p>但是这里有一个问题是：SSO 情况下的 size 和 capacity 存在哪里了？</p>
+<ul>
+<li>capacity : 首先 SSO 的场景并不需要 capacity，因为此时利用的是栈空间，或者理解此种情况下的 capacity=maxSmallSize.</li>
+<li>size : 利用 small_的一个字节来存储 size，<strong>而且具体存储的不是 size，而是<code>maxSmallSize - s</code></strong>（maxSmallSize=23，再转成 char 类型），因为这样可以 SSO 多存储一个字节，具体原因后面详细讲。</li>
+</ul>
+<h3>small strings :</h3>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2000-7.png" alt="图片"></p>
+<h3>medium strings :</h3>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2000-8.png" alt="图片"></p>
+<h3>large strings :</h3>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2000-9.png" alt="图片"></p>
+<h2>如何区分字符串类型 category</h2>
+<p>字符串的 small/medium/large 类型对外部透明，而且针对字符串的各种操作例如 copy、shrink、reserve、赋值等等，三种类型的处理方式都不一样，<strong>所以，我们需要在上面的数据结构中做些“手脚”，来区分不同的字符串类型。</strong></p>
+<p>因为只有三种类型，所以只需要 2 个 bit 就能够区分。相关的数据结构为：</p>
+<div class="highlight"><pre><code><span></span><span class="k">typedef</span><span class="w"> </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">category_type</span><span class="p">;</span><span class="w">  </span>
+<span class="k">enum</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">Category</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">category_type</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">isSmall</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="n">isMedium</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kIsLittleEndian</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mh">0x80</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mh">0x2</span><span class="p">,</span><span class="w">       </span><span class="c1">//  10000000 , 00000010  </span>
+<span class="w">    </span><span class="n">isLarge</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kIsLittleEndian</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mh">0x40</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mh">0x1</span><span class="p">,</span><span class="w">        </span><span class="c1">//  01000000 , 00000001  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>kIsLittleEndian 为判断当前平台的大小端，大端和小端的存储方式不同。</p>
+<h3>small strings</h3>
+<p>category 与 size 共同存放在 small_的最后一个字节中（size 最大为 23，所以可以存下），考虑到大小端，所以有移位操作，这主要是为了让 category()的判断更简单，后面再详细分析。具体代码在 setSmallSize 中：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">setSmallSize</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">s</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="p">......</span><span class="w">  </span>
+<span class="w">  </span><span class="k">constexpr</span><span class="w"> </span><span class="k">auto</span><span class="w"> </span><span class="n">shift</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kIsLittleEndian</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">small_</span><span class="p">[</span><span class="n">maxSmallSize</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">char</span><span class="p">((</span><span class="n">maxSmallSize</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">s</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">shift</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="p">......</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2000-10.png" alt="图片"></p>
+<h3>medium strings</h3>
+<p>可能有人注意到了，在 MediumLarge 结构体中定义了两个方法，<code>capacity()</code>和<code>setCapacity(size_t cap,
+Category cat)</code>，其中 setCapacity 即同时设置 capacity 和 category :</p>
+<div class="highlight"><pre><code><span></span><span class="k">constexpr</span><span class="w"> </span><span class="k">static</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">kCategoryShift</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="kt">size_t</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">8</span><span class="p">;</span><span class="w">  </span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">setCapacity</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">cap</span><span class="p">,</span><span class="w"> </span><span class="n">Category</span><span class="w"> </span><span class="n">cat</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">capacity_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kIsLittleEndian</span><span class="w">  </span>
+<span class="w">        </span><span class="o">?</span><span class="w"> </span><span class="n">cap</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="p">(</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">cat</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">kCategoryShift</span><span class="p">)</span><span class="w">  </span>
+<span class="w">        </span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="n">cap</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">cat</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>小端时，将 category = isMedium = 0x80 向左移动<code>(sizeof(size_t) - 1) * 8</code>位，即移到最高位的字节中，再与 capacity 做或运算。</li>
+<li>大端时，将 category = isMedium = 0x2 与 cap &lt;&lt; 2 做或运算即可，左移 2 位的目的是给 category 留空间。</li>
+</ul>
+<p>举个例子，假设 64 位机器，capacity = 100 :</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2000-11.png" alt="图片"></p>
+<h3>large strings</h3>
+<p>同样使用 MediumLarge 的 setCapacity，算法相同，只是 category 的值不同。</p>
+<p>假设 64 位机器，capacity = 1000 ：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2000-12.png" alt="图片"></p>
+<h3>category()</h3>
+<p><code>category()</code>为最重要的函数之一，作用是获取字符串的类型：</p>
+<div class="highlight"><pre><code><span></span><span class="k">constexpr</span><span class="w"> </span><span class="k">static</span><span class="w"> </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">categoryExtractMask</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kIsLittleEndian</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mh">0xC0</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mh">0x3</span><span class="p">;</span><span class="w">    </span><span class="c1">// 11000000 , 00000011  </span>
+<span class="k">constexpr</span><span class="w"> </span><span class="k">static</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">lastChar</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">MediumLarge</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w">  </span>
+
+<span class="k">union</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">bytes_</span><span class="p">[</span><span class="k">sizeof</span><span class="p">(</span><span class="n">MediumLarge</span><span class="p">)];</span><span class="w">          </span><span class="c1">// For accessing the last byte.  </span>
+<span class="w">    </span><span class="n">Char</span><span class="w"> </span><span class="n">small_</span><span class="p">[</span><span class="k">sizeof</span><span class="p">(</span><span class="n">MediumLarge</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">Char</span><span class="p">)];</span><span class="w">  </span>
+<span class="w">    </span><span class="n">MediumLarge</span><span class="w"> </span><span class="n">ml_</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span><span class="w">  </span>
+
+<span class="n">Category</span><span class="w"> </span><span class="nf">category</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// works for both big-endian and little-endian  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">Category</span><span class="o">&gt;</span><span class="p">(</span><span class="n">bytes_</span><span class="p">[</span><span class="n">lastChar</span><span class="p">]</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">categoryExtractMask</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>bytes_定义在 union 中，从注释可以看出来，是为了配合 lastChar 更加方便的取该结构最后一个字节。</p>
+<p>配合上面三种类型字符串的存储，可以很容易理解这一行代码。</p>
+<h4>小端</h4>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2000-13.png" alt="图片"></p>
+<h4>大端</h4>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2000-14.png" alt="图片"></p>
+<h3>capacity()</h3>
+<p>获取字符串的 capaticy，因为 capacity 与 category 存储都在一起，所以一起看比较好。</p>
+<p>同样分三种情况。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">size_t</span><span class="w"> </span><span class="nf">capacity</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">category</span><span class="p">())</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">Category</span><span class="o">::</span><span class="no">isSmall</span><span class="p">:</span><span class="w">  </span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">maxSmallSize</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">Category</span><span class="o">::</span><span class="no">isLarge</span><span class="p">:</span><span class="w">  </span>
+<span class="w">      </span><span class="c1">// For large-sized strings, a multi-referenced chunk has no  </span>
+<span class="w">      </span><span class="c1">// available capacity. This is because any attempt to append  </span>
+<span class="w">      </span><span class="c1">// data would trigger a new allocation.  </span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">RefCounted</span><span class="o">::</span><span class="n">refs</span><span class="p">(</span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">ml_</span><span class="p">.</span><span class="n">size_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">      </span><span class="p">}</span><span class="w">  </span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">Category</span><span class="o">::</span><span class="no">isMedium</span><span class="p">:</span><span class="w">  </span>
+<span class="w">    </span><span class="k">default</span><span class="o">:</span><span class="w">  </span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">ml_</span><span class="p">.</span><span class="n">capacity</span><span class="p">();</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>small strings : 直接返回 maxSmallSize，前面有分析过。</li>
+<li>medium strings : 返回 <code>ml_.capacity()</code>。</li>
+<li>large strings :<ul>
+<li>当字符串引用大于 1 时，直接返回 size。因为此时的 capacity 是没有意义的，任何 append data 操作都会触发一次 cow</li>
+<li>否则，返回 <code>ml_.capacity()</code>。</li>
+</ul>
+</li>
+</ul>
+<p>看下 ml.capacity() :</p>
+<div class="highlight"><pre><code><span></span><span class="k">constexpr</span><span class="w"> </span><span class="k">static</span><span class="w"> </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">categoryExtractMask</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kIsLittleEndian</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mh">0xC0</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mh">0x3</span><span class="p">;</span><span class="w">  </span>
+<span class="k">constexpr</span><span class="w"> </span><span class="k">static</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">kCategoryShift</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="kt">size_t</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">8</span><span class="p">;</span><span class="w"> </span>
+
+<span class="k">constexpr</span><span class="w"> </span><span class="k">static</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">capacityExtractMask</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kIsLittleEndian</span><span class="w">  </span>
+<span class="w">      </span><span class="o">?</span><span class="w"> </span><span class="o">~</span><span class="p">(</span><span class="kt">size_t</span><span class="p">(</span><span class="n">categoryExtractMask</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">kCategoryShift</span><span class="p">)</span><span class="w">  </span>
+<span class="w">      </span><span class="o">:</span><span class="w"> </span><span class="mh">0x0</span><span class="w"> </span><span class="cm">/* unused */</span><span class="p">;</span><span class="w">  </span>
+
+<span class="kt">size_t</span><span class="w"> </span><span class="nf">capacity</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">kIsLittleEndian</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">capacity_</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">capacityExtractMask</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">capacity_</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>categoryExtractMask 和 kCategoryShift 之前遇到过，分别用来计算 category 和小端情况下将 category 左移
+kCategoryShift 位。capacityExtractMask 的目的就是消掉 category，让 <code>capacity_</code>中只有 capacity。</p>
+<p>对着上面的每种情况下字符串的存储的图，应该很好理解，这里不细说了。</p>
+<h3>size()</h3>
+<div class="highlight"><pre><code><span></span><span class="kt">size_t</span><span class="w"> </span><span class="nf">size</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ml_</span><span class="p">.</span><span class="n">size_</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="cm">/* constexpr */</span><span class="w"> </span><span class="p">(</span><span class="n">kIsLittleEndian</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// We can save a couple instructions, because the category is  </span>
+<span class="w">    </span><span class="c1">// small iff the last char, as unsigned, is &lt;= maxSmallSize.  </span>
+<span class="w">    </span><span class="k">typedef</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">std</span><span class="o">::</span><span class="n">make_unsigned</span><span class="o">&lt;</span><span class="n">Char</span><span class="o">&gt;::</span><span class="n">type</span><span class="w"> </span><span class="n">UChar</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">maybeSmallSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">size_t</span><span class="p">(</span><span class="n">maxSmallSize</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">size_t</span><span class="p">(</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">UChar</span><span class="o">&gt;</span><span class="p">(</span><span class="n">small_</span><span class="p">[</span><span class="n">maxSmallSize</span><span class="p">]));</span><span class="w">  </span>
+
+<span class="w">    </span><span class="c1">// With this syntax, GCC and Clang generate a CMOV instead of a branch.  </span>
+<span class="w">    </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">ssize_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">maybeSmallSize</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">maybeSmallSize</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">ret</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">category</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">Category</span><span class="o">::</span><span class="n">isSmall</span><span class="p">)</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">smallSize</span><span class="p">()</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">ret</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">ret</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>小端的情况下，medium strings 和 large strings 对应的 ml_的高字节存储的是 category（0x80、0x40），而 small strings 存储的是 size，所以正如注释说的，可以先判断 kIsLittleEndian &amp;&amp; maybeSmall，会快一些，不需要调用 smallSize()。而且现在绝大多数平台都是小端。</p>
+<p>如果是大端，那么如果是 small，调用 smallSize()，否则返回 <code>ml.size_</code>;</p>
+<div class="highlight"><pre><code><span></span><span class="kt">size_t</span><span class="w"> </span><span class="nf">smallSize</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">assert</span><span class="p">(</span><span class="n">category</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">Category</span><span class="o">::</span><span class="n">isSmall</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="k">constexpr</span><span class="w"> </span><span class="k">auto</span><span class="w"> </span><span class="n">shift</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kIsLittleEndian</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">smallShifted</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">small_</span><span class="p">[</span><span class="n">maxSmallSize</span><span class="p">])</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">shift</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">assert</span><span class="p">(</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">maxSmallSize</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">smallShifted</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">maxSmallSize</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">smallShifted</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>比较简单，不说了。</p>
+<h2>字符串初始化</h2>
+<p>首先 <code>fbstring_core</code> 的构造函数中，根据字符串的长度，调用 3 种不同类型的初始化函数：</p>
+<div class="highlight"><pre><code><span></span><span class="n">fbstring_core</span><span class="p">(</span><span class="w">  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">Char</span><span class="o">*</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">data</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">disableSSO</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FBSTRING_DISABLE_SSO</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">disableSSO</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">size</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">maxSmallSize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">initSmall</span><span class="p">(</span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">size</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">maxMediumSize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">initMedium</span><span class="p">(</span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">initLarge</span><span class="p">(</span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>initSmall</h3>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Char</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">fbstring_core</span><span class="o">&lt;</span><span class="n">Char</span><span class="o">&gt;::</span><span class="n">initSmall</span><span class="p">(</span><span class="w">  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">Char</span><span class="o">*</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">data</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span>
+
+<span class="c1">// If data is aligned, use fast word-wise copying. Otherwise,  </span>
+<span class="c1">// use conservative memcpy.  </span>
+<span class="c1">// The word-wise path reads bytes which are outside the range of  </span>
+<span class="c1">// the string, and makes ASan unhappy, so we disable it when  </span>
+<span class="c1">// compiling with ASan.  </span>
+<span class="cp">#ifndef FOLLY_SANITIZE_ADDRESS  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">data</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="kt">size_t</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">))</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">byteSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">size</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">Char</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">constexpr</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">wordWidth</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="kt">size_t</span><span class="p">);</span><span class="w">  </span>
+
+<span class="w">    </span><span class="k">switch</span><span class="w"> </span><span class="p">((</span><span class="n">byteSize</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">wordWidth</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">wordWidth</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">// Number of words.  </span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="mi">3</span><span class="p">:</span><span class="w">  </span>
+<span class="w">        </span><span class="n">ml_</span><span class="p">.</span><span class="n">capacity_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">data</span><span class="p">)[</span><span class="mi">2</span><span class="p">];</span><span class="w">  </span>
+<span class="w">        </span><span class="n">FOLLY_FALLTHROUGH</span><span class="p">;</span><span class="w">  </span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="mi">2</span><span class="p">:</span><span class="w">  </span>
+<span class="w">        </span><span class="n">ml_</span><span class="p">.</span><span class="n">size_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">data</span><span class="p">)[</span><span class="mi">1</span><span class="p">];</span><span class="w">  </span>
+<span class="w">        </span><span class="n">FOLLY_FALLTHROUGH</span><span class="p">;</span><span class="w">  </span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="mi">1</span><span class="p">:</span><span class="w">  </span>
+<span class="w">        </span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="n">Char</span><span class="o">**&gt;</span><span class="p">(</span><span class="k">const_cast</span><span class="o">&lt;</span><span class="n">Char</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">data</span><span class="p">));</span><span class="w">  </span>
+<span class="w">        </span><span class="n">FOLLY_FALLTHROUGH</span><span class="p">;</span><span class="w">  </span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="mi">0</span><span class="p">:</span><span class="w">  </span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w">  </span>
+<span class="cp">#endif  </span>
+<span class="w">  </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">size</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="n">fbstring_detail</span><span class="o">::</span><span class="n">podCopy</span><span class="p">(</span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">size</span><span class="p">,</span><span class="w"> </span><span class="n">small_</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="n">setSmallSize</span><span class="p">(</span><span class="n">size</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>首先，如果传入的字符串地址是内存对齐的，<strong>则配合 reinterpret_cast 进行 word-wise copy，提高效率。</strong></li>
+<li>否则，调用 podCopy 进行 memcpy。</li>
+<li>最后，通过 setSmallSize 设置 small string 的 size。</li>
+</ul>
+<p>setSmallSize :</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">setSmallSize</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">s</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// Warning: this should work with uninitialized strings too,  </span>
+<span class="w">  </span><span class="c1">// so don&#39;t assume anything about the previous value of  </span>
+<span class="w">  </span><span class="c1">// small_[maxSmallSize].  </span>
+<span class="w">  </span><span class="n">assert</span><span class="p">(</span><span class="n">s</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">maxSmallSize</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="k">constexpr</span><span class="w"> </span><span class="k">auto</span><span class="w"> </span><span class="n">shift</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kIsLittleEndian</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">small_</span><span class="p">[</span><span class="n">maxSmallSize</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">char</span><span class="p">((</span><span class="n">maxSmallSize</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">s</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">shift</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="n">small_</span><span class="p">[</span><span class="n">s</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sc">&#39;\0&#39;</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">assert</span><span class="p">(</span><span class="n">category</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">Category</span><span class="o">::</span><span class="n">isSmall</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">s</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>之前提到过，small strings 存放的 size 不是真正的 size，是<code>maxSmallSize - size</code>，这样做的原因是可以 small strings 可以多存储一个字节 。<strong>因为假如存储 size 的话，<code>small_</code>中最后两个字节就得是<code>\0</code> 和 <code>size</code>，但是存储<code>maxSmallSize - size</code>，当 <code>size == maxSmallSize</code> 时，<code>small_</code>的最后一个字节恰好也是<code>\0</code>。</strong></p>
+<h3>initMedium</h3>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Char</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="n">FOLLY_NOINLINE</span><span class="w"> </span><span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">fbstring_core</span><span class="o">&lt;</span><span class="n">Char</span><span class="o">&gt;::</span><span class="n">initMedium</span><span class="p">(</span><span class="w">  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">Char</span><span class="o">*</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">data</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// Medium strings are allocated normally. Don&#39;t forget to  </span>
+<span class="w">  </span><span class="c1">// allocate one extra Char for the terminating null.  </span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">allocSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">goodMallocSize</span><span class="p">((</span><span class="mi">1</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">size</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">Char</span><span class="p">));</span><span class="w">  </span>
+
+<span class="w">  </span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">Char</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">checkedMalloc</span><span class="p">(</span><span class="n">allocSize</span><span class="p">));</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">FOLLY_LIKELY</span><span class="p">(</span><span class="n">size</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">fbstring_detail</span><span class="o">::</span><span class="n">podCopy</span><span class="p">(</span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">size</span><span class="p">,</span><span class="w"> </span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">  </span><span class="n">ml_</span><span class="p">.</span><span class="n">size_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">size</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">ml_</span><span class="p">.</span><span class="n">setCapacity</span><span class="p">(</span><span class="n">allocSize</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">Char</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">Category</span><span class="o">::</span><span class="n">isMedium</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="p">[</span><span class="n">size</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sc">&#39;\0&#39;</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>folly 会通过 canNallocx 函数检测是否使用 jemalloc，如果是，会使用 jemalloc 来提高内存分配的性能。关于 jemalloc 我也不是很熟悉，感兴趣的可以查查，有很多资料。</p>
+<ul>
+<li>所有的动态内存分配都会调用 goodMallocSize，获取一个对 jemalloc 友好的值。</li>
+<li>再通过 checkedMalloc 真正申请内存，存放字符串。</li>
+<li>调用 podCopy 进行 memcpy，与 initSmall 的 podCopy 一样。</li>
+<li>最后再设置 size、capacity、category 和\0。</li>
+</ul>
+<h3>initLarge</h3>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Char</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="n">FOLLY_NOINLINE</span><span class="w"> </span><span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">fbstring_core</span><span class="o">&lt;</span><span class="n">Char</span><span class="o">&gt;::</span><span class="n">initLarge</span><span class="p">(</span><span class="w">  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">Char</span><span class="o">*</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">data</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// Large strings are allocated differently  </span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">effectiveCapacity</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">size</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">newRC</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">RefCounted</span><span class="o">::</span><span class="n">create</span><span class="p">(</span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">effectiveCapacity</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">newRC</span><span class="o">-&gt;</span><span class="n">data_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">ml_</span><span class="p">.</span><span class="n">size_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">size</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">ml_</span><span class="p">.</span><span class="n">setCapacity</span><span class="p">(</span><span class="n">effectiveCapacity</span><span class="p">,</span><span class="w"> </span><span class="n">Category</span><span class="o">::</span><span class="n">isLarge</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="p">[</span><span class="n">size</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sc">&#39;\0&#39;</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>与 medium strings 最大的不同是会通过 RefCounted::create 创建 RefCounted 用于共享字符串：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">RefCounted</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">atomic</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">refCount_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">Char</span><span class="w"> </span><span class="n">data_</span><span class="p">[</span><span class="mi">1</span><span class="p">];</span><span class="w">  </span>
+
+<span class="w">    </span><span class="k">constexpr</span><span class="w"> </span><span class="k">static</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="nf">getDataOffset</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">offsetof</span><span class="p">(</span><span class="n">RefCounted</span><span class="p">,</span><span class="w"> </span><span class="n">data_</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="n">RefCounted</span><span class="o">*</span><span class="w"> </span><span class="nf">create</span><span class="p">(</span><span class="kt">size_t</span><span class="o">*</span><span class="w"> </span><span class="n">size</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">allocSize</span><span class="w"> </span><span class="o">=</span><span class="w">  </span>
+<span class="w">          </span><span class="n">goodMallocSize</span><span class="p">(</span><span class="n">getDataOffset</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">size</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">Char</span><span class="p">));</span><span class="w">  </span>
+<span class="w">      </span><span class="k">auto</span><span class="w"> </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">RefCounted</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">checkedMalloc</span><span class="p">(</span><span class="n">allocSize</span><span class="p">));</span><span class="w">  </span>
+<span class="w">      </span><span class="n">result</span><span class="o">-&gt;</span><span class="n">refCount_</span><span class="p">.</span><span class="n">store</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">memory_order_release</span><span class="p">);</span><span class="w">  </span>
+<span class="w">      </span><span class="o">*</span><span class="n">size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">allocSize</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">getDataOffset</span><span class="p">())</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">Char</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">result</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span>
+
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="n">RefCounted</span><span class="o">*</span><span class="w"> </span><span class="nf">create</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">Char</span><span class="o">*</span><span class="w"> </span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="o">*</span><span class="w"> </span><span class="n">size</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">effectiveSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">size</span><span class="p">;</span><span class="w">  </span>
+<span class="w">      </span><span class="k">auto</span><span class="w"> </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">create</span><span class="p">(</span><span class="n">size</span><span class="p">);</span><span class="w">  </span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">FOLLY_LIKELY</span><span class="p">(</span><span class="n">effectiveSize</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="n">fbstring_detail</span><span class="o">::</span><span class="n">podCopy</span><span class="p">(</span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">effectiveSize</span><span class="p">,</span><span class="w"> </span><span class="n">result</span><span class="o">-&gt;</span><span class="n">data_</span><span class="p">);</span><span class="w">  </span>
+<span class="w">      </span><span class="p">}</span><span class="w">  </span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">result</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>需要注意的是：</p>
+<ul>
+<li><code>ml*.data*</code>指向的是 <code>RefCounted.data_</code>.</li>
+<li>getDataOffset()用 offsetof 函数获取 <code>data*</code> 在 RefCounted 结构体内的偏移，<code>Char data*[1]</code>为 flexible array，存放字符串。</li>
+<li>注意对<code>std::atomic&lt;size_t&gt; refCount_</code>进行原子操作的 c++ memory model :<ul>
+<li>store，设置引用数为 1 : <code>std::memory_order_release</code></li>
+<li>load，获取当前共享字符串的引用数: <code>std::memory_order_acquire</code></li>
+<li>add/sub。增加/减少一个引用 : <code>std::memory_order_acq_rel</code></li>
+</ul>
+</li>
+</ul>
+<p>c++ memory model 是另外一个比较大的话题，可以参考：</p>
+<ul>
+<li>Memory model synchronization modes[7]</li>
+<li><a href="https://mp.weixin.qq.com/s?__biz=MzAxNDI5NzEzNg==&mid=2651159677&idx=1&sn=f246d11601ed006b592f813e27f6a4fc&scene=21#wechat_redirect">一文带你看懂 C++11 的内存模型</a></li>
+<li>C++11 中的内存模型下篇 - C++11 支持的几种内存模型[8]</li>
+</ul>
+<h3>特殊的构造函数 —— 不拷贝用户传入的字符串</h3>
+<p>上面的三种构造，都是将应用程序传入的字符串，不管使用 word-wise copy 还是 memcpy，拷贝到 <code>fbstring_core</code> 中，且在 medium 和 large 的情况下，需要动态分配内存。</p>
+<p>fbstring 提供了一个特殊的构造函数，让 <code>fbstring_core</code> 接管应用程序自己分配的内存。</p>
+<p><code>basic_fbstring</code> 的构造函数，并调用 <code>fbstring_core</code> 相应的构造函数。<strong>注意这里 AcquireMallocatedString 为 enum class，比使用 int 和 bool 更可读。</strong></p>
+<div class="highlight"><pre><code><span></span><span class="cm">/**  </span>
+<span class="cm">  * Defines a special acquisition method for constructing fbstring  </span>
+<span class="cm">  * objects. AcquireMallocatedString means that the user passes a  </span>
+<span class="cm">  * pointer to a malloc-allocated string that the fbstring object will  </span>
+<span class="cm">  * take into custody.  </span>
+<span class="cm">  */</span><span class="w">  </span>
+<span class="k">enum</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">AcquireMallocatedString</span><span class="w"> </span><span class="p">{};</span><span class="w">  </span>
+
+<span class="c1">// Nonstandard constructor  </span>
+<span class="n">basic_fbstring</span><span class="p">(</span><span class="n">value_type</span><span class="w"> </span><span class="o">*</span><span class="n">s</span><span class="p">,</span><span class="w"> </span><span class="n">size_type</span><span class="w"> </span><span class="n">n</span><span class="p">,</span><span class="w"> </span><span class="n">size_type</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w">  </span>
+<span class="w">                  </span><span class="n">AcquireMallocatedString</span><span class="w"> </span><span class="n">a</span><span class="p">)</span><span class="w">  </span>
+<span class="w">      </span><span class="o">:</span><span class="w"> </span><span class="n">store_</span><span class="p">(</span><span class="n">s</span><span class="p">,</span><span class="w"> </span><span class="n">n</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="n">a</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>basic_fbstring</code> 调用相应的 <code>fbstring_core</code> 构造函数：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// Snatches a previously mallocated string. The parameter &quot;size&quot;  </span>
+<span class="c1">// is the size of the string, and the parameter &quot;allocatedSize&quot;  </span>
+<span class="c1">// is the size of the mallocated block.  The string must be  </span>
+<span class="c1">// \0-terminated, so allocatedSize &gt;= size + 1 and data[size] == &#39;\0&#39;.  </span>
+<span class="c1">//  </span>
+<span class="c1">// So if you want a 2-character string, pass malloc(3) as &quot;data&quot;,  </span>
+<span class="c1">// pass 2 as &quot;size&quot;, and pass 3 as &quot;allocatedSize&quot;.  </span>
+<span class="n">fbstring_core</span><span class="p">(</span><span class="n">Char</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">data</span><span class="p">,</span><span class="w">  </span>
+<span class="w">              </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">,</span><span class="w">  </span>
+<span class="w">              </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">allocatedSize</span><span class="p">,</span><span class="w">  </span>
+<span class="w">              </span><span class="n">AcquireMallocatedString</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">size</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">FBSTRING_ASSERT</span><span class="p">(</span><span class="n">allocatedSize</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">size</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="n">FBSTRING_ASSERT</span><span class="p">(</span><span class="n">data</span><span class="p">[</span><span class="n">size</span><span class="p">]</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;\0&#39;</span><span class="p">);</span><span class="w">  </span>
+
+<span class="w">    </span><span class="c1">// Use the medium string storage  </span>
+<span class="w">    </span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">data</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">ml_</span><span class="p">.</span><span class="n">size_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">size</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">    </span><span class="c1">// Don&#39;t forget about null terminator  </span>
+<span class="w">    </span><span class="n">ml_</span><span class="p">.</span><span class="n">setCapacity</span><span class="p">(</span><span class="n">allocatedSize</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">Category</span><span class="o">::</span><span class="n">isMedium</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// No need for the memory  </span>
+<span class="w">    </span><span class="n">free</span><span class="p">(</span><span class="n">data</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="n">reset</span><span class="p">();</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>可以看出这里没有拷贝字符串的过程，而是直接接管了上游传递过来的指针指向的内存。但是，正如注释说的，这里直接使用了 medium strings 的存储方式。</p>
+<p>比如 folly/io/IOBuf.cpp 中的调用：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// Ensure NUL terminated  </span>
+<span class="o">*</span><span class="n">writableTail</span><span class="p">()</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w">  </span>
+<span class="n">fbstring</span><span class="w"> </span><span class="nf">str</span><span class="p">(</span><span class="w">  </span>
+<span class="w">      </span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="kt">char</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">writableData</span><span class="p">()),</span><span class="w">  </span>
+<span class="w">      </span><span class="n">length</span><span class="p">(),</span><span class="w">  </span>
+<span class="w">      </span><span class="n">capacity</span><span class="p">(),</span><span class="w">  </span>
+<span class="w">      </span><span class="n">AcquireMallocatedString</span><span class="p">());</span>
+</code></pre></div>
+<h2>参考资料</h2>
+<ul>
+<li>[1] <a href="https://github.com/facebook/folly/blob/master/folly/docs/FBString.md">fbstring</a></li>
+<li>[2] <a href="https://stackoverflow.com/questions/12199710/legality-of-cow-stdstring-implementation-in-c11">Legality of COW std::string implementation in C++11</a></li>
+<li>[3] <a href="https://www.cnblogs.com/promise6522/archive/2012/03/22/2412686.html">std::string 的 Copy-on-Write：不如想象中美好</a></li>
+<li>[4] <a href="http://jemalloc.net/">jemalloc</a></li>
+<li>[5] <a href="https://en.wikipedia.org/wiki/Boyer%E2%80%93Moore_string-search_algorithm">Boyer-Moore algorithm</a></li>
+<li>[6] <a href="https://github.com/facebook/folly/blob/master/folly/test/FBStringBenchmark.cpp">FBStringBenchmark.cpp</a></li>
+<li>[7] <a href="https://gcc.gnu.org/wiki/Atomic/GCCMM/AtomicSync">Memory model synchronization modes</a></li>
+<li>[8] <a href="https://www.codedump.info/post/20191214-cxx11-memory-model-2/">C++11 中的内存模型下篇 - C++11 支持的几种内存模型</a></li>
+</ul>
+<hr>
+
+
+<!--BEGIN_DATA
+{
+    "create_date": "2023-12-25 21:00", 
+    "modify_date": "2023-12-25 21:00", 
+    "is_top": "0", 
+    "summary": "", 
+    "tags": "", 
+    "file_name": ""
+}
+END_DATA-->
+
+<h4><p>原文出处：<a href='https://mp.weixin.qq.com/s/4eZC9ArwSe6T4aSv0lXdjg' target='blank'>C++ folly库解读（一） Fbstring —— 一个完美替代std::string的库(下)</a></p></h4>
+<ul>
+<li>字符串拷贝<ul>
+<li>copySmall</li>
+<li>copyMedium</li>
+<li>copyLarge</li>
+</ul>
+</li>
+<li>析构</li>
+<li>COW<ul>
+<li>non-const operator</li>
+<li>non-const 与 const</li>
+</ul>
+</li>
+<li>Realloc</li>
+<li>其他<ul>
+<li>__builtin_expect</li>
+<li>CMOV 指令</li>
+<li>builtin_unreachable &amp;&amp; assume(0)</li>
+<li>jemalloc</li>
+<li>find 算法</li>
+<li>判断大小端</li>
+</ul>
+</li>
+</ul>
+<h2>字符串拷贝</h2>
+<p>同初始化，也是根据不同的字符串类型，调用不同的函数：</p>
+<div class="highlight"><pre><code><span></span><span class="n">fbstring_core</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">fbstring_core</span><span class="o">&amp;</span><span class="w"> </span><span class="n">rhs</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">assert</span><span class="p">(</span><span class="o">&amp;</span><span class="n">rhs</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="k">this</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">rhs</span><span class="p">.</span><span class="n">category</span><span class="p">())</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">Category</span><span class="o">::</span><span class="no">isSmall</span><span class="p">:</span><span class="w">  </span>
+<span class="w">      </span><span class="n">copySmall</span><span class="p">(</span><span class="n">rhs</span><span class="p">);</span><span class="w">  </span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">Category</span><span class="o">::</span><span class="no">isMedium</span><span class="p">:</span><span class="w">  </span>
+<span class="w">      </span><span class="n">copyMedium</span><span class="p">(</span><span class="n">rhs</span><span class="p">);</span><span class="w">  </span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">Category</span><span class="o">::</span><span class="no">isLarge</span><span class="p">:</span><span class="w">  </span>
+<span class="w">      </span><span class="n">copyLarge</span><span class="p">(</span><span class="n">rhs</span><span class="p">);</span><span class="w">  </span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">default</span><span class="o">:</span><span class="w">  </span>
+<span class="w">      </span><span class="n">folly</span><span class="o">::</span><span class="n">assume_unreachable</span><span class="p">();</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>copySmall</h3>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Char</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">fbstring_core</span><span class="o">&lt;</span><span class="n">Char</span><span class="o">&gt;::</span><span class="n">copySmall</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">fbstring_core</span><span class="o">&amp;</span><span class="w"> </span><span class="n">rhs</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// Just write the whole thing, don&#39;t look at details. In  </span>
+<span class="w">  </span><span class="c1">// particular we need to copy capacity anyway because we want  </span>
+<span class="w">  </span><span class="c1">// to set the size (don&#39;t forget that the last character,  </span>
+<span class="w">  </span><span class="c1">// which stores a short string&#39;s length, is shared with the  </span>
+<span class="w">  </span><span class="c1">// ml_.capacity field).  </span>
+<span class="w">  </span><span class="n">ml_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rhs</span><span class="p">.</span><span class="n">ml_</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>正如注释中所说，虽然 small strings 的情况下，字符串存储在 <code>small_</code> 中，但是我们只需要把 <code>ml_</code> 直接赋值即可，因为在一个 union 中。</p>
+<h3>copyMedium</h3>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Char</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="n">FOLLY_NOINLINE</span><span class="w"> </span><span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">fbstring_core</span><span class="o">&lt;</span><span class="n">Char</span><span class="o">&gt;::</span><span class="n">copyMedium</span><span class="p">(</span><span class="w">  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">fbstring_core</span><span class="o">&amp;</span><span class="w"> </span><span class="n">rhs</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// Medium strings are copied eagerly. Don&#39;t forget to allocate  </span>
+<span class="w">  </span><span class="c1">// one extra Char for the null terminator.  </span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">allocSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">goodMallocSize</span><span class="p">((</span><span class="mi">1</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">rhs</span><span class="p">.</span><span class="n">ml_</span><span class="p">.</span><span class="n">size_</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">Char</span><span class="p">));</span><span class="w">  </span>
+<span class="w">  </span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">Char</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">checkedMalloc</span><span class="p">(</span><span class="n">allocSize</span><span class="p">));</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// Also copies terminator.  </span>
+<span class="w">  </span><span class="n">fbstring_detail</span><span class="o">::</span><span class="n">podCopy</span><span class="p">(</span><span class="w">  </span>
+<span class="w">      </span><span class="n">rhs</span><span class="p">.</span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="p">,</span><span class="w"> </span><span class="n">rhs</span><span class="p">.</span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">rhs</span><span class="p">.</span><span class="n">ml_</span><span class="p">.</span><span class="n">size_</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="n">ml_</span><span class="p">.</span><span class="n">size_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rhs</span><span class="p">.</span><span class="n">ml_</span><span class="p">.</span><span class="n">size_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">ml_</span><span class="p">.</span><span class="n">setCapacity</span><span class="p">(</span><span class="n">allocSize</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">Char</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">Category</span><span class="o">::</span><span class="n">isMedium</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>medium strings 是 eager copy，所以就是"深拷贝"：</p>
+<ul>
+<li>为字符串分配空间、拷贝</li>
+<li>赋值 size、capacity、category.</li>
+</ul>
+<h3>copyLarge</h3>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Char</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="n">FOLLY_NOINLINE</span><span class="w"> </span><span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">fbstring_core</span><span class="o">&lt;</span><span class="n">Char</span><span class="o">&gt;::</span><span class="n">copyLarge</span><span class="p">(</span><span class="w">  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">fbstring_core</span><span class="o">&amp;</span><span class="w"> </span><span class="n">rhs</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// Large strings are just refcounted  </span>
+<span class="w">  </span><span class="n">ml_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rhs</span><span class="p">.</span><span class="n">ml_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">RefCounted</span><span class="o">::</span><span class="n">incrementRefs</span><span class="p">(</span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>large strings 的 copy 过程很直观，因为是 COW 方式：</p>
+<ul>
+<li>直接赋值 ml，内含指向共享字符串的指针。</li>
+<li>共享字符串的引用计数加 1。</li>
+</ul>
+<p>incrementRefs 和内部调用 fromData 这两个个函数值得看一下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="n">RefCounted</span><span class="o">*</span><span class="w"> </span><span class="nf">fromData</span><span class="p">(</span><span class="n">Char</span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">RefCounted</span><span class="o">*&gt;</span><span class="p">(</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">void</span><span class="o">*&gt;</span><span class="p">(</span><span class="w">  </span>
+<span class="w">          </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">char</span><span class="o">*&gt;</span><span class="p">(</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">void</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">p</span><span class="p">))</span><span class="w"> </span><span class="o">-</span><span class="w">  </span>
+<span class="w">          </span><span class="n">getDataOffset</span><span class="p">()));</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">incrementRefs</span><span class="p">(</span><span class="n">Char</span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">fromData</span><span class="p">(</span><span class="n">p</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">refCount_</span><span class="p">.</span><span class="n">fetch_add</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">memory_order_acq_rel</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>因为 <code>ml_</code>中指向的是 RefCounted 的 <code>data_[1]</code>，所以我们需要通过 fromData 来找到 <code>data_</code> 所属的 RefCounted 的地址。我把 fromData 函数内的运算拆开：</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="n">RefCounted</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nf">fromData</span><span class="p">(</span><span class="n">Char</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="c1">// 转换data_[1]的地址  </span>
+<span class="w">      </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">voidDataAddr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">void</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">p</span><span class="p">);</span><span class="w">  </span>
+<span class="w">      </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">unsignedDataAddr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">char</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">voidDataAddr</span><span class="p">);</span><span class="w">  </span>
+<span class="w">      </span><span class="c1">// 获取data_[1]在结构体的偏移量再相减，得到的就是所属RefCounted的地址  </span>
+<span class="w">      </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">unsignedRefAddr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">unsignedDataAddr</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">getDataOffset</span><span class="p">();</span><span class="w">  </span>
+<span class="w">      </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">voidRefAddr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">void</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">unsignedRefAddr</span><span class="p">);</span><span class="w">  </span>
+<span class="w">      </span><span class="n">RefCounted</span><span class="o">*</span><span class="w"> </span><span class="n">refCountAddr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">RefCounted</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">voidRefAddr</span><span class="p">);</span><span class="w">  </span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">refCountAddr</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231225-2000-15.png" alt=""></p>
+<p><strong>值得关注的是如何转换不同类型结构体的指针并做运算，这里的做法是</strong> ：<code>Char* -&gt; void* -&gt; unsigned char* -&gt; 与size_t做减法 -&gt; void * -&gt; RefCounted*</code></p>
+<h2>析构</h2>
+<div class="highlight"><pre><code><span></span><span class="o">~</span><span class="n">fbstring_core</span><span class="p">()</span><span class="w"> </span><span class="k">noexcept</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">category</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">Category</span><span class="o">::</span><span class="n">isSmall</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="k">return</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="n">destroyMediumLarge</span><span class="p">();</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>如果是 small 类型，直接返回，因为利用的是栈空间。</li>
+<li>否则，针对 medium 和 large，调用 destroyMediumLarge。</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">FOLLY_MALLOC_NOINLINE</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">destroyMediumLarge</span><span class="p">()</span><span class="w"> </span><span class="k">noexcept</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">c</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">category</span><span class="p">();</span><span class="w">  </span>
+<span class="w">  </span><span class="n">FBSTRING_ASSERT</span><span class="p">(</span><span class="n">c</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">Category</span><span class="o">::</span><span class="n">isSmall</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">c</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">Category</span><span class="o">::</span><span class="n">isMedium</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">free</span><span class="p">(</span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">RefCounted</span><span class="o">::</span><span class="n">decrementRefs</span><span class="p">(</span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>medium ：free 动态分配的字符串内存即可。</li>
+<li>large : 调用 decrementRefs，针对共享字符串进行操作。</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">decrementRefs</span><span class="p">(</span><span class="n">Char</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">dis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fromData</span><span class="p">(</span><span class="n">p</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">oldcnt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">dis</span><span class="o">-&gt;</span><span class="n">refCount_</span><span class="p">.</span><span class="n">fetch_sub</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">memory_order_acq_rel</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="n">FBSTRING_ASSERT</span><span class="p">(</span><span class="n">oldcnt</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">oldcnt</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">free</span><span class="p">(</span><span class="n">dis</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>逻辑也很清晰：先对引用计数减 1，如果本身就只有 1 个引用，那么直接 free 掉整个 RefCounted。</p>
+<h2>COW</h2>
+<p>最重要的一点，也是 large strings 独有的，就是 COW. 任何针对字符串写的操作，都会触发 COW，包括前面举过的[]操作，例如：</p>
+<ul>
+<li><strong>non-const</strong> at(size_n)</li>
+<li><strong>non-const</strong> operator<a href="size_type pos"></a></li>
+<li>operator+</li>
+<li>append</li>
+<li>......</li>
+</ul>
+<p>我们举个例子，比如<strong>non-const</strong> operator<a href="size_type pos"></a></p>
+<h3>non-const operator<a href="size_type pos"></a></h3>
+<div class="highlight"><pre><code><span></span><span class="n">reference</span><span class="w"> </span><span class="k">operator</span><span class="p">[](</span><span class="n">size_type</span><span class="w"> </span><span class="n">pos</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="o">*</span><span class="p">(</span><span class="n">begin</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">pos</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="n">iterator</span><span class="w"> </span><span class="n">begin</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">store_</span><span class="p">.</span><span class="n">mutableData</span><span class="p">();</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>来重点看下 mutableData() :</p>
+<div class="highlight"><pre><code><span></span><span class="n">Char</span><span class="o">*</span><span class="w"> </span><span class="nf">mutableData</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">category</span><span class="p">())</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">case</span><span class="w"> </span><span class="no">Category</span><span class="o">::</span><span class="no">isSmall</span><span class="p">:</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">small_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="k">case</span><span class="w"> </span><span class="no">Category</span><span class="o">::</span><span class="no">isMedium</span><span class="p">:</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="k">case</span><span class="w"> </span><span class="no">Category</span><span class="o">::</span><span class="no">isLarge</span><span class="p">:</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">mutableDataLarge</span><span class="p">();</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="n">fbstring_detail</span><span class="o">::</span><span class="n">assume_unreachable</span><span class="p">();</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Char</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="kr">inline</span><span class="w"> </span><span class="n">Char</span><span class="o">*</span><span class="w"> </span><span class="n">fbstring_core</span><span class="o">&lt;</span><span class="n">Char</span><span class="o">&gt;::</span><span class="n">mutableDataLarge</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">FBSTRING_ASSERT</span><span class="p">(</span><span class="n">category</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">Category</span><span class="o">::</span><span class="n">isLarge</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">RefCounted</span><span class="o">::</span><span class="n">refs</span><span class="p">(</span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">// Ensure unique.  </span>
+<span class="w">    </span><span class="n">unshare</span><span class="p">();</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>同样是分三种情况。small 和 medium 直接返回字符串的地址，large 会调用 mutableDataLarge()，<strong>可以看出，如果引用数大于 1，会进行 unshare 操作 ：</strong></p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">unshare</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">minCapacity</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w">  </span>
+
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Char</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="n">FOLLY_MALLOC_NOINLINE</span><span class="w"> </span><span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">fbstring_core</span><span class="o">&lt;</span><span class="n">Char</span><span class="o">&gt;::</span><span class="n">unshare</span><span class="p">(</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">size_t</span><span class="w"> </span><span class="n">minCapacity</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">FBSTRING_ASSERT</span><span class="p">(</span><span class="n">category</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">Category</span><span class="o">::</span><span class="n">isLarge</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">effectiveCapacity</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">(</span><span class="n">minCapacity</span><span class="p">,</span><span class="w"> </span><span class="n">ml_</span><span class="p">.</span><span class="n">capacity</span><span class="p">());</span><span class="w">  </span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">newRC</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">RefCounted</span><span class="o">::</span><span class="n">create</span><span class="p">(</span><span class="o">&amp;</span><span class="n">effectiveCapacity</span><span class="p">);</span><span class="w">  </span>
+
+<span class="w">  </span><span class="c1">// If this fails, someone placed the wrong capacity in an  </span>
+<span class="w">  </span><span class="c1">// fbstring.  </span>
+<span class="w">  </span><span class="n">FBSTRING_ASSERT</span><span class="p">(</span><span class="n">effectiveCapacity</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">ml_</span><span class="p">.</span><span class="n">capacity</span><span class="p">());</span><span class="w">  </span>
+
+<span class="w">  </span><span class="c1">// Also copies terminator.  </span>
+<span class="w">  </span><span class="n">fbstring_detail</span><span class="o">::</span><span class="n">podCopy</span><span class="p">(</span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="p">,</span><span class="w"> </span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">ml_</span><span class="p">.</span><span class="n">size_</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">newRC</span><span class="o">-&gt;</span><span class="n">data_</span><span class="p">);</span><span class="w">  </span>
+
+<span class="w">  </span><span class="n">RefCounted</span><span class="o">::</span><span class="n">decrementRefs</span><span class="p">(</span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">newRC</span><span class="o">-&gt;</span><span class="n">data_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">ml_</span><span class="p">.</span><span class="n">setCapacity</span><span class="p">(</span><span class="n">effectiveCapacity</span><span class="p">,</span><span class="w"> </span><span class="n">Category</span><span class="o">::</span><span class="n">isLarge</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// size_ remains unchanged.  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>基本思路：</p>
+<ul>
+<li>创建新的 RefCounted。</li>
+<li>拷贝字符串。</li>
+<li>对原有的共享字符串减少一个引用 decrementRefs，这个函数在上面的析构小节里分析过。</li>
+<li>设置 <code>ml_</code> 的 data、capacity、category.</li>
+<li><strong>注意此时还不会设置 size，因为还不知道应用程序对字符串进行什么修改。</strong></li>
+</ul>
+<h3>non-const 与 const</h3>
+<p>大家可能注意到了，上面的 at 和[]强调了 non-const，这是因为 const-qualifer 针对这两个调用不会触发 COW ，还以[]为例：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// C++11 21.4.5 element access:  </span>
+<span class="n">const_reference</span><span class="w"> </span><span class="k">operator</span><span class="p">[](</span><span class="n">size_type</span><span class="w"> </span><span class="n">pos</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="o">*</span><span class="p">(</span><span class="n">begin</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">pos</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="n">const_iterator</span><span class="w"> </span><span class="n">begin</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">store_</span><span class="p">.</span><span class="n">data</span><span class="p">();</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="c1">// In C++11 data() and c_str() are 100% equivalent.  </span>
+<span class="k">const</span><span class="w"> </span><span class="n">Char</span><span class="o">*</span><span class="w"> </span><span class="n">data</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">c_str</span><span class="p">();</span><span class="w"> </span><span class="p">}</span><span class="w">  </span>
+
+<span class="k">const</span><span class="w"> </span><span class="n">Char</span><span class="o">*</span><span class="w"> </span><span class="n">c_str</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">Char</span><span class="o">*</span><span class="w"> </span><span class="n">ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// With this syntax, GCC and Clang generate a CMOV instead of a branch.  </span>
+<span class="w">    </span><span class="n">ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">category</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">Category</span><span class="o">::</span><span class="n">isSmall</span><span class="p">)</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">small_</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">ptr</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">ptr</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>可以看出区别，non-const 版本的 begin()中调用的是 mutableData()，而 const-qualifer 版本调用的是 <code>data()-&gt; c_str()</code>，而 <code>c_str()</code> 直接返回的字符串地址。</p>
+<p>所以，当字符串用到[]、at 且不需要写操作时，最好用 const-qualifer.</p>
+<p>我们拿 folly 自带的benchmark 工具[1]测试一下：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;folly/Benchmark.h&quot;</span><span class="c1">  </span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;folly/FBString.h&quot;</span><span class="c1">  </span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;folly/container/Foreach.h&quot;</span><span class="c1">  </span>
+
+<span class="k">using</span><span class="w"> </span><span class="k">namespace</span><span class="w"> </span><span class="nn">std</span><span class="p">;</span><span class="w">  </span>
+<span class="k">using</span><span class="w"> </span><span class="k">namespace</span><span class="w"> </span><span class="nn">folly</span><span class="p">;</span><span class="w">  </span>
+
+<span class="n">BENCHMARK</span><span class="p">(</span><span class="n">nonConstFbstringAt</span><span class="p">,</span><span class="w"> </span><span class="n">n</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="o">::</span><span class="n">folly</span><span class="o">::</span><span class="n">fbstring</span><span class="w"> </span><span class="n">str</span><span class="p">(</span><span class="w">  </span>
+<span class="w">      </span><span class="s">&quot;fbstring is a drop-in replacement for std::string. The main benefit of fbstring is significantly increased &quot;</span><span class="w">  </span>
+<span class="w">      </span><span class="s">&quot;performance on virtually all important primitives. This is achieved by using a three-tiered storage strategy &quot;</span><span class="w">  </span>
+<span class="w">      </span><span class="s">&quot;and by cooperating with the memory allocator. In particular, fbstring is designed to detect use of jemalloc and &quot;</span><span class="w">  </span>
+<span class="w">      </span><span class="s">&quot;cooperate with it to achieve significant improvements in speed and memory usage.&quot;</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="n">FOR_EACH_RANGE</span><span class="p">(</span><span class="n">i</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">n</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="o">&amp;</span><span class="n">s</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">str</span><span class="p">[</span><span class="mi">2</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="n">doNotOptimizeAway</span><span class="p">(</span><span class="n">s</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="n">BENCHMARK_DRAW_LINE</span><span class="p">();</span><span class="w">  </span>
+
+<span class="n">BENCHMARK_RELATIVE</span><span class="p">(</span><span class="n">constFbstringAt</span><span class="p">,</span><span class="w"> </span><span class="n">n</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="o">::</span><span class="n">folly</span><span class="o">::</span><span class="n">fbstring</span><span class="w"> </span><span class="n">str</span><span class="p">(</span><span class="w">  </span>
+<span class="w">      </span><span class="s">&quot;fbstring is a drop-in replacement for std::string. The main benefit of fbstring is significantly increased &quot;</span><span class="w">  </span>
+<span class="w">      </span><span class="s">&quot;performance on virtually all important primitives. This is achieved by using a three-tiered storage strategy &quot;</span><span class="w">  </span>
+<span class="w">      </span><span class="s">&quot;and by cooperating with the memory allocator. In particular, fbstring is designed to detect use of jemalloc and &quot;</span><span class="w">  </span>
+<span class="w">      </span><span class="s">&quot;cooperate with it to achieve significant improvements in speed and memory usage.&quot;</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="n">FOR_EACH_RANGE</span><span class="p">(</span><span class="n">i</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">n</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">&amp;</span><span class="n">s</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">str</span><span class="p">[</span><span class="mi">2</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="n">doNotOptimizeAway</span><span class="p">(</span><span class="n">s</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="kt">int</span><span class="w"> </span><span class="n">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">runBenchmarks</span><span class="p">();</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p>结果是 constFbstringAt 比 nonConstFbstringAt 快了 175%</p>
+<div class="highlight"><pre><code><span></span><span class="o">============================================================================</span><span class="w">  </span>
+<span class="n">delve_folly</span><span class="o">/</span><span class="n">main</span><span class="p">.</span><span class="n">cc</span><span class="w">                             </span><span class="n">relative</span><span class="w">  </span><span class="n">time</span><span class="o">/</span><span class="n">iter</span><span class="w">  </span><span class="n">iters</span><span class="o">/</span><span class="n">s</span><span class="w">  </span>
+<span class="o">============================================================================</span><span class="w">  </span>
+<span class="n">nonConstFbstringAt</span><span class="w">                                          </span><span class="mf">39.85</span><span class="n">ns</span><span class="w">   </span><span class="mf">25.10</span><span class="n">M</span><span class="w">  </span>
+<span class="o">----------------------------------------------------------------------------</span><span class="w">  </span>
+<span class="n">constFbstringAt</span><span class="w">                                  </span><span class="mf">175.57</span><span class="o">%</span><span class="w">    </span><span class="mf">22.70</span><span class="n">ns</span><span class="w">   </span><span class="mf">44.06</span><span class="n">M</span><span class="w">  </span>
+<span class="o">============================================================================</span>
+</code></pre></div>
+<h2>Realloc</h2>
+<p>reserve、operator+等操作，可能会涉及到内存重新分配，最终调用的都是 memory/Malloc.h 中的 smartRealloc：</p>
+<div class="highlight"><pre><code><span></span><span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="nf">checkedRealloc</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">ptr</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">realloc</span><span class="p">(</span><span class="n">ptr</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">p</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">throw_exception</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">bad_alloc</span><span class="o">&gt;</span><span class="p">();</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">p</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="cm">/**  </span>
+<span class="cm">  * This function tries to reallocate a buffer of which only the first  </span>
+<span class="cm">  * currentSize bytes are used. The problem with using realloc is that  </span>
+<span class="cm">  * if currentSize is relatively small _and_ if realloc decides it  </span>
+<span class="cm">  * needs to move the memory chunk to a new buffer, then realloc ends  </span>
+<span class="cm">  * up copying data that is not used. It&#39;s generally not a win to try  </span>
+<span class="cm">  * to hook in to realloc() behavior to avoid copies - at least in  </span>
+<span class="cm">  * jemalloc, realloc() almost always ends up doing a copy, because  </span>
+<span class="cm">  * there is little fragmentation / slack space to take advantage of.  </span>
+<span class="cm">  */</span><span class="w">  </span>
+<span class="n">FOLLY_MALLOC_CHECKED_MALLOC</span><span class="w"> </span><span class="n">FOLLY_NOINLINE</span><span class="w"> </span><span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">smartRealloc</span><span class="p">(</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">currentSize</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">currentCapacity</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">newCapacity</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">assert</span><span class="p">(</span><span class="n">p</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="n">assert</span><span class="p">(</span><span class="n">currentSize</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">currentCapacity</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w">  </span>
+<span class="w">          </span><span class="n">currentCapacity</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">newCapacity</span><span class="p">);</span><span class="w">  </span>
+
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">slack</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">currentCapacity</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">currentSize</span><span class="p">;</span><span class="w"> </span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">slack</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">currentSize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// Too much slack, malloc-copy-free cycle:  </span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">checkedMalloc</span><span class="p">(</span><span class="n">newCapacity</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">memcpy</span><span class="p">(</span><span class="n">result</span><span class="p">,</span><span class="w"> </span><span class="n">p</span><span class="p">,</span><span class="w"> </span><span class="n">currentSize</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="n">free</span><span class="p">(</span><span class="n">p</span><span class="p">);</span><span class="w">  </span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">result</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">  </span><span class="c1">// If there&#39;s not too much slack, we realloc in hope of coalescing  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">checkedRealloc</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="w"> </span><span class="n">newCapacity</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>从注释和代码看为什么函数起名叫<strong>smart</strong>Realloc :</p>
+<ul>
+<li>如果<code>(the currentCapacity - currentSize) _ 2 &gt; currentSize</code>，即 <code>currentSize &lt; 2/3 _ capacity</code>，说明当前分配的内存利用率较低，此时认为如果使用 realloc 并且 realloc 决定拷贝当前内存到新内存，成本会高于直接 <code>malloc(newCapacity) + memcpy + free(old_memory)</code>。</li>
+<li>否则直接 <code>realloc</code>.</li>
+</ul>
+<h2>其他</h2>
+<h3>__builtin_expect</h3>
+<p>给编译器提供分支预测信息。原型为：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">long</span><span class="w"> </span><span class="n">__builtin_expect</span><span class="w"> </span><span class="p">(</span><span class="kt">long</span><span class="w"> </span><span class="n">exp</span><span class="p">,</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">c</span><span class="p">)</span>
+</code></pre></div>
+<p><strong>表达式的返回值为 exp 的值，跟 c 无关。</strong> 我们预期 exp 的值是 c。例如下面的例子，我们预期 x 的值是 0，所以这里提示编译器，只有很小的几率会调用到 foo()</p>
+<div class="highlight"><pre><code><span></span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">__builtin_expect</span><span class="w"> </span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">))</span><span class="w">  </span>
+<span class="w">  </span><span class="n">foo</span><span class="w"> </span><span class="p">();</span>
+</code></pre></div>
+<p>再比如判断指针是否为空：</p>
+<div class="highlight"><pre><code><span></span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">__builtin_expect</span><span class="w"> </span><span class="p">(</span><span class="n">ptr</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">))</span><span class="w">  </span>
+<span class="w">  </span><span class="n">foo</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">ptr</span><span class="p">);</span>
+</code></pre></div>
+<p>在 fbstring 中也用到了<code>builtin_expect</code>，例如创建 RefCounted 的函数 (<code>FOLLY_LIKELY</code> 包装了一下<code>builtin_expect</code>)：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#if __GNUC__  </span>
+<span class="cp">#define FOLLY_DETAIL_BUILTIN_EXPECT(b, t) (__builtin_expect(b, t))  </span>
+<span class="cp">#else  </span>
+<span class="cp">#define FOLLY_DETAIL_BUILTIN_EXPECT(b, t) b  </span>
+<span class="cp">#endif  </span>
+
+<span class="c1">//  Likeliness annotations  </span>
+<span class="c1">//  </span>
+<span class="c1">//  Useful when the author has better knowledge than the compiler of whether  </span>
+<span class="c1">//  the branch condition is overwhelmingly likely to take a specific value.  </span>
+<span class="c1">//  </span>
+<span class="c1">//  Useful when the author has better knowledge than the compiler of which code  </span>
+<span class="c1">//  paths are designed as the fast path and which are designed as the slow path,  </span>
+<span class="c1">//  and to force the compiler to optimize for the fast path, even when it is not  </span>
+<span class="c1">//  overwhelmingly likely.  </span>
+<span class="cp">#define FOLLY_LIKELY(x) FOLLY_DETAIL_BUILTIN_EXPECT((x), 1)  </span>
+<span class="cp">#define FOLLY_UNLIKELY(x) FOLLY_DETAIL_BUILTIN_EXPECT((x), 0)  </span>
+
+<span class="k">static</span><span class="w"> </span><span class="n">RefCounted</span><span class="o">*</span><span class="w"> </span><span class="nf">create</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">Char</span><span class="o">*</span><span class="w"> </span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="o">*</span><span class="w"> </span><span class="n">size</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">effectiveSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">size</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">create</span><span class="p">(</span><span class="n">size</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">FOLLY_LIKELY</span><span class="p">(</span><span class="n">effectiveSize</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w">       </span><span class="c1">// __builtin_expect  </span>
+<span class="w">    </span><span class="n">fbstring_detail</span><span class="o">::</span><span class="n">podCopy</span><span class="p">(</span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">effectiveSize</span><span class="p">,</span><span class="w"> </span><span class="n">result</span><span class="o">-&gt;</span><span class="n">data_</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">result</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>从汇编角度来说，会将可能性更大的汇编紧跟着前面的汇编，防止无效指令的加载。可以参考：</p>
+<ul>
+<li>likely() and unlikely()[2]</li>
+<li>What is the advantage of GCC's \_\_builtin_expect in if else statements?[3]</li>
+</ul>
+<h3>CMOV 指令</h3>
+<p>conditional move，条件传送。类似于 MOV 指令，但是依赖于 RFLAGS 寄存器内的状态。如果条件没有满足，该指令不会有任何效果。</p>
+<p><strong>CMOV 的优点是可以避免分支预测，避免分支预测错误对 CPU 流水线的影响</strong>。详细可以看这篇文档：amd-cmovcc.pdf[4]</p>
+<p>fbstring 在一些场景会提示编译器生成 CMOV 指令，例如：</p>
+<div class="highlight"><pre><code><span></span><span class="k">const</span><span class="w"> </span><span class="n">Char</span><span class="o">*</span><span class="w"> </span><span class="nf">c_str</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">Char</span><span class="o">*</span><span class="w"> </span><span class="n">ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// With this syntax, GCC and Clang generate a CMOV instead of a branch.  </span>
+<span class="w">  </span><span class="n">ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">category</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">Category</span><span class="o">::</span><span class="n">isSmall</span><span class="p">)</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">small_</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">ptr</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">ptr</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>builtin_unreachable &amp;&amp; assume(0)</h3>
+<p>如果程序执行到了<code>builtin_unreachable</code> 和<code>assume(0)</code>，那么会出现未定义的行为。例如<code>builtin_unreachable</code>出现在一个不会返回的函数后面，而且这个函数没有声明为<code>attribute\\_\\_((noreturn))</code>。例如6.59 Other Built-in Functions Provided by GCC给出的例子 :</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">function_that_never_returns</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">);</span><span class="w">  </span>
+<span class="kt">int</span><span class="w"> </span><span class="nf">g</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">c</span><span class="p">)</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">c</span><span class="p">)</span><span class="w">  </span>
+<span class="w">    </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="k">else</span><span class="w">  </span>
+<span class="w">    </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="n">function_that_never_returns</span><span class="w"> </span><span class="p">();</span><span class="w">  </span>
+<span class="w">      </span><span class="n">__builtin_unreachable</span><span class="w"> </span><span class="p">();</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>如果不加<code>__builtin_unreachable ();</code>，会报<code>error: control reaches end of non-void function [-Werror=return-type]</code></p>
+<p>folly 将 <strong>builtin_unreachable 和</strong>assume(0) 封装成了<code>assume_unreachable</code>：</p>
+<div class="highlight"><pre><code><span></span><span class="p">[[</span><span class="n">noreturn</span><span class="p">]]</span><span class="w"> </span><span class="n">FOLLY_ALWAYS_INLINE</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">assume_unreachable</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">assume</span><span class="p">(</span><span class="nb">false</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// Do a bit more to get the compiler to understand  </span>
+<span class="w">  </span><span class="c1">// that this function really will never return.  </span>
+<span class="cp">#if defined(__GNUC__)  </span>
+<span class="w">  </span><span class="n">__builtin_unreachable</span><span class="p">();</span><span class="w">  </span>
+<span class="cp">#elif defined(_MSC_VER)  </span>
+<span class="w">  </span><span class="kr">__assume</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span><span class="w">  </span>
+<span class="cp">#else  </span>
+<span class="w">  </span><span class="c1">// Well, it&#39;s better than nothing.  </span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">abort</span><span class="p">();</span><span class="w">  </span>
+<span class="cp">#endif  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在 fbstring 的一些特性场景，比如 switch 判断 category 中用到。这是上面提到过的 mutableData() :</p>
+<div class="highlight"><pre><code><span></span><span class="n">Char</span><span class="o">*</span><span class="w"> </span><span class="nf">mutableData</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">category</span><span class="p">())</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">Category</span><span class="o">::</span><span class="no">isSmall</span><span class="p">:</span><span class="w">  </span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">small_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">Category</span><span class="o">::</span><span class="no">isMedium</span><span class="p">:</span><span class="w">  </span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">ml_</span><span class="p">.</span><span class="n">data_</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">Category</span><span class="o">::</span><span class="no">isLarge</span><span class="p">:</span><span class="w">  </span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">mutableDataLarge</span><span class="p">();</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="n">folly</span><span class="o">::</span><span class="n">assume_unreachable</span><span class="p">();</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>jemalloc</h3>
+<ul>
+<li>官网 [5]</li>
+<li>API 文档[6]</li>
+<li>大致的算法和原理可以参考 facebook 的这篇博客 ：Scalable memory allocation using jemalloc[7]</li>
+</ul>
+<h3>find 算法</h3>
+<p>使用的简化的 Boyer-Moore 算法，文档说明是在查找成功的情况下比 std::string 的 find 快 30 倍。benchmark代码在FBStringBenchmark.cpp[8]</p>
+<p>我自己测试的情况貌似是搜索长字符串的情况会更好些。</p>
+<h3>判断大小端</h3>
+<div class="highlight"><pre><code><span></span><span class="c1">// It&#39;s MSVC, so we just have to guess ... and allow an override  </span>
+<span class="cp">#ifdef _MSC_VER  </span>
+<span class="cp"># ifdef FOLLY_ENDIAN_BE  </span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="k">constexpr</span><span class="w"> </span><span class="k">auto</span><span class="w"> </span><span class="n">kIsLittleEndian</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span><span class="w">  </span>
+<span class="cp"># else  </span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="k">constexpr</span><span class="w"> </span><span class="k">auto</span><span class="w"> </span><span class="n">kIsLittleEndian</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span><span class="w">  </span>
+<span class="cp"># endif  </span>
+<span class="cp">#else  </span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="k">constexpr</span><span class="w"> </span><span class="k">auto</span><span class="w"> </span><span class="n">kIsLittleEndian</span><span class="w"> </span><span class="o">=</span><span class="w">  </span>
+<span class="w">  </span><span class="n">__BYTE_ORDER__</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">__ORDER_LITTLE_ENDIAN__</span><span class="p">;</span><span class="w">  </span>
+<span class="cp">#endif</span>
+</code></pre></div>
+<p><code>__BYTE_ORDER__</code> 为预定义宏：[9]，值是<strong><code>ORDER_LITTLE_ENDIAN</code></strong>、<strong><code>ORDER_BIG_ENDIAN</code></strong>、<strong><code>ORDER_PDP_ENDIAN</code></strong>中的一个。</p>
+<p>一般会这么使用：</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/* Test for a little-endian machine */</span><span class="w">  </span>
+<span class="cp">#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__</span>
+</code></pre></div>
+<p><strong>c++20 引入了std::endian[10]，判断会更加方便。</strong></p>
+<p>（完）</p>
+<h2>参考资料</h2>
+<ul>
+<li>[1] <a href="https://github.com/facebook/folly/blob/master/folly/docs/Benchmark.md">benchmark 工具</a></li>
+<li>[2] <a href="https://kernelnewbies.org/FAQ/LikelyUnlikely">likely() and unlikely()</a></li>
+<li>[3] <a href="https://stackoverflow.com/questions/7346929what-is-the-advantage-of-gccs-builtin-expect-in-if-else-statements">What is the advantage of GCC's __builtin_expect in if else statements?</a></li>
+<li>[4] <a href="https://www.cs.tufts.edu/comp/40-2011f/readings/amd-cmovcc.pdf">amd-cmovcc.pdf</a></li>
+<li>[5] <a href="http://jemalloc.net/">Jemalloc官网</a></li>
+<li>[6] <a href="http://jemalloc.net/jemalloc.3.html">API 文档</a></li>
+<li>[7] <a href="https://engineering.fb.com/2011/01/03/core-data/scalable-memory-allocation-using-jemalloc/">Scalable memory allocation using jemalloc</a></li>
+<li>[8] <a href="https://github.com/facebook/folly/blob/master/folly/test/FBStringTestBenchmarks.cpp.h#L120">FBStringBenchmark.cpp</a></li>
+<li>[9] <a href="https://gcc.gnu.org/onlinedocs/cpp/Common-Predefined-Macros.html">BYTE_ORDER为预定义宏</a></li>
+<li>[10] <a href="https://en.cppreference.com/w/cpp/types/endian">std::endian</a></li>
+</ul>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "C++ folly库解读01.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

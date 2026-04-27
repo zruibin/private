@@ -1,0 +1,1341 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>深入了解iOS中的OOM(低内存崩溃) - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="深入了解iOS中的OOM(低内存崩溃),iOS,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="深入了解iOS中的OOM(低内存崩溃)" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>深入了解iOS中的OOM(低内存崩溃)</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2023-03-06 21:25
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_ios.html' class='article_tag'>iOS</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://blog.csdn.net/killer1989/article/details/107003287/' target='blank'>深入了解iOS中的OOM(低内存崩溃)</a></p></h4>
+<p>英文原文：<a href="https://programmer.ink/think/learn-more-about-oom-low-memory-crash-in-ios.html">https://programmer.ink/think/learn-more-about-oom-low-memory-crash-in-ios.html</a></p>
+<p>中文翻译：<a href="https://www.taodudu.cc/news/show-5381.html">https://www.taodudu.cc/news/show-5381.html</a></p>
+<p>在iOS开发过程或者用户反馈中，可能会经常看到这样的情况，用着用着就崩溃了，而在后台查看崩溃栈的时候，找不到崩溃日志。其实这大多数的可能是系统产生了低内存崩溃，也就是OOM(还有一种可能是主线程卡死，导致watchdog杀掉了应用)，而低内存崩溃的日志，往往都是以<code>JetsamEvent</code>开头的，日志中有内存页大小(pageSize)，CPU时间(cpuTime)等字段。</p>
+<h3>什么是<code>OOM</code>？</h3>
+<p>什么是<code>OOM</code>呢，它是<code>out-of-memory</code>的缩写，字面意思就是内存超过了限制。它是由于 iOS 的 <code>Jetsam</code>机制造成的一种“另类”Crash，它不同于常规的<code>Crash</code>，通过<code>Signal</code>捕获等Crash监控方案无法捕获到<code>OOM</code>事件。</p>
+<p>当然还会有<code>FOOM</code>这样的词，代表的是<code>Foreground-out-of-memory</code>，是指App在前台因消耗内存过多引起系统强杀。这也就是本文要讨论的。后台出现OOM不一定都是app本身造成的，大多数是因为当前在前台的App占用内存过大，系统为了保证前台应用正常运行，把后台应用清理掉了。</p>
+<h3>什么是<code>Jetsam</code>机制</h3>
+<p><code>Jetsam</code>机制可以理解为操作系统为了控制内存资源过度使用而采用的一种管理机制。<code>Jetsam</code>是一个独立运行的进程，每一个进程都有一个内存阈值，一旦超过这个阈值<code>Jetsam</code>就会立刻杀掉这个进程。</p>
+<h4>为什么要设计<code>Jetsam</code>机制</h4>
+<p>首先设备的内存是有限制的，并不是无限大的，所以内存资源非常重要。系统进程及用户使用的其他app的进程都会争抢这个资源。由于iOS不支持交换空间，一旦触发低内存事件，<code>Jetsam</code>就会尽可能多的释放应用占用的内存，这样在iOS系统上出现系统内存不足时，应用就会被系统终止。</p>
+<p><strong>交换空间</strong></p>
+<p>物理内存不够使用该怎么办呢？像一些桌面操作系统，会有内存<code>交换空间</code>，在window上称为<code>虚拟内存</code>。它的机制是，在需要时能将物理内存中的一部分交换到硬盘上去，利用硬盘空间扩展内存空间。</p>
+<p><strong>iOS不支持交换空间</strong></p>
+<p>但iOS并不支持<code>交换空间</code>，大多数移动设备都不支持<code>交换空间</code>。移动设备的大容量存储器通常是闪存，它的读写速度远远小于电脑所使用的硬盘，这就导致在移动设备上就算使用了<code>交换空间</code>，也并不能提升性能。其次，移动设备的容量本身就经常短缺、内存的读写寿命也有限，所以在这种情况下还拿闪存来做内存交换，就有点奢侈了。</p>
+<p>需要注意的是，网上有少出文章说iOS没有虚拟内存机制，实际上指的是iOS没有<strong>交换空间</strong>机制。</p>
+<p><strong>典型app内存类型</strong></p>
+<p>当内存不足的时候，系统会按照一定策略来腾出更多空间供使用，比较常见的做法是将一部分低优先级的数据挪到磁盘上，这个操作称为<code>Page Out</code>。之后当再次访问到这块数据的时候，系统会负责将它重新搬回内存空间中，这个操作称为<code>Page In</code>。</p>
+<p><strong>Clean Memory</strong></p>
+<p>Clean Memory是指那些可以用以<code>Page Out</code>的内存，只读的内存映射文件，或者是App所用到的frameworks。每个frameworks都有<code>_DATA_CONST</code>段，通常他们都是<code>Clean</code>的，但如果用runtime进行swizzling，那么他们就会变<code>Dirty</code>。</p>
+<p><strong>Dirty Memory</strong></p>
+<p>Dirty Memory是指那些被App写入过数据的内存，包括所有堆区的对象、图像解码缓冲区，同时，类似<code>Clean memory</code>，也包括App所用到的frameworks。每个framework都会有<code>_DATA</code>段和<code>_DATA_DIRTY</code>段，它们的内存是<code>Dirty</code>的。</p>
+<p>值得注意的是，在使用framework的过程中会产生<code>Dirty Memory</code>，使用单例或者全局初始化方法是减少<code>Dirty Memory</code>不错的方法，因为单例一旦创建就不会销毁，全局初始化方法会在类加载时执行。</p>
+<p><strong>Compressed Memory</strong></p>
+<p>由于闪存容量和读写寿命的限制，iOS 上没有<code>交换空间</code>机制，取而代之使用Compressed memory。</p>
+<p><code>Compressed memory</code>是在内存紧张时能够将最近使用过的内存占用压缩至原有大小的一半以下，并且能够在需要时解压复用。它在节省内存的同时提高了系统的响应速度，特点总结起来如下：</p>
+<ul>
+<li>Shrinks memory usage 减少了不活跃内存占用</li>
+<li>Improves power efficiency 改善电源效率，通过压缩减少磁盘IO带来的损耗</li>
+<li>Minimizes CPU usage 压缩/解压十分迅速，能够尽可能减少 CPU 的时间开销</li>
+<li>Is multicore aware 支持多核操作</li>
+</ul>
+<p>例如，当我们使用<code>Dictionary</code>去缓存数据的时候，假设现在已经使用了3页内存，当不访问的时候可能会被压缩为1页，再次使用到时候又会解压成3页。</p>
+<blockquote><p>本质上，<code>Compressed memory</code>也是<code>Dirty memory</code>。<br>
+因此， <code>memory footprint = dirty size + compressed size</code> ，这也就是我们需要并且能够尝试去减少的内存占用。</p>
+</blockquote>
+<p><strong>Memory Warning</strong></p>
+<p>相信对于MemoryWarning并不陌生，每一个<code>UIViewController</code>都会有一个<code>didReceivedMemoryWarning</code>的方法。</p>
+<p>当使用的内存是一点点上涨时，而不是一下子直接把内存撑爆。在达到内存临界点之前，系统会给各个正在运行的应用发出内存警告，告知app去清理自己的内存。而内存警告，并不总是由于自身app导致的。</p>
+<p>内存压缩技术使得释放内存变得复杂。内存压缩技术在操作系统层面实现，对进程无感知。有趣的是如果当前进程收到了内存警告，进程这时候准备释放大量的误用内存，如果访问到过多的压缩内存，再解压缩内存的时候反而会导致内存压力更大，然后出现OOM，被系统杀掉。</p>
+<blockquote><p>我们对数据进行缓存的目的是想减少 CPU 的压力，但是过多的缓存又会占用过大的内存。在一些需要缓存数据的场景下，可以考虑使用<code>NSCache</code>代替<code>NSDictionary</code>，<code>NSCache</code>分配的内存实际上是<code>Purgeable Memory</code>，可以由系统自动释放。这点在Effective Objective 2.0一书中也有推荐<code>NSCache</code>与<code>NSPureableData</code>的结合使用既能让系统根据情况回收内存，也可以在内存清理的同时移除相关对象。</p>
+</blockquote>
+<p><strong>出现OOM前一定会出现Memory Warning么？</strong> 答案是不一定，有可能瞬间申请了大量内存，而恰好此时主线程在忙于其他事情，导致可能没有经历过Memory Warning就发生了OOM。当然即便出现了多次Memory Warning后，也不见得会在最后一次Memory Warning的几秒钟后出现OOM。之前做extension开发的时候，就经常会出现Memory Warnning，但是不会出现OOM，再操作一两分钟后，才出现OOM，而在这一两分钟内，没有再出现过Memory Warning。</p>
+<p>当然在内存警告时，处理内存，可以在一定程度上避免出现OOM。</p>
+<h3>如何确定OOM的阈值</h3>
+<p>有经验的同学，肯定知道不同设备OOM的阈值是不同的。那我们该如何知道OOM的阈值呢？</p>
+<p><strong>方法1</strong></p>
+<p>当我们的App被<code>Jetsam</code>机制杀死的时候，在手机中会生成系统日志，在手机系统设置-隐私-分析中，可以得到JetSamEvent开头的日志。这些日志中就可以获取到一些关于App的内存信息，例如我当前用的iPhone8(iOS11.4.1)，在日志中的前部分看到了pageSize，而查找<code>per-process-limit</code>一项(并不是所有日志都有，可以找有的)，用该项的rpages * pageSize即可得到OOM的阈值。</p>
+<div class="highlight"><pre><code><span></span><span class="p">{</span><span class="s">&quot;bug_type&quot;</span><span class="o">:</span><span class="s">&quot;298&quot;</span><span class="p">,</span><span class="s">&quot;timestamp&quot;</span><span class="o">:</span><span class="s">&quot;2020-01-03 04:11:13.65 +0800&quot;</span><span class="p">,</span><span class="s">&quot;os_version&quot;</span><span class="o">:</span><span class="s">&quot;iPhone OS 11.4.1 (15G77)&quot;</span><span class="p">,</span><span class="s">&quot;incident_id&quot;</span><span class="o">:</span><span class="s">&quot;2723B2EA-7FB8-49A6-B2FC-49F10C748D8A&quot;</span><span class="p">}</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="s">&quot;crashReporterKey&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;a6ad027ba01b1e66d0b3d8446aaef5dbd75dd732&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s">&quot;kernel&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;Darwin Kernel Version 17.7.0: Mon Jun 11 19:06:27 PDT 2018; root:xnu-4570.70.24~3\/RELEASE_ARM64_T8015&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s">&quot;product&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;iPhone10,1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s">&quot;incident&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;2723B2EA-7FB8-49A6-B2FC-49F10C748D8A&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s">&quot;date&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;2020-01-03 04:11:13.65 +0800&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s">&quot;build&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;iPhone OS 11.4.1 (15G77)&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s">&quot;timeDelta&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span>
+<span class="w">  </span><span class="s">&quot;memoryStatus&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="s">&quot;compressorSize&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">39010</span><span class="p">,</span>
+<span class="w">  </span><span class="s">&quot;compressions&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">2282594</span><span class="p">,</span>
+<span class="w">  </span><span class="s">&quot;decompressions&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">1071238</span><span class="p">,</span>
+<span class="w">  </span><span class="s">&quot;zoneMapCap&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">402653184</span><span class="p">,</span>
+<span class="w">  </span><span class="s">&quot;largestZone&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;APFS_4K_OBJS&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="s">&quot;largestZoneSize&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">35962880</span><span class="p">,</span>
+<span class="w">  </span><span class="s">&quot;pageSize&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">16384</span><span class="p">,</span>
+<span class="w">  </span><span class="s">&quot;uncompressed&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">105360</span><span class="p">,</span>
+<span class="w">  </span><span class="s">&quot;zoneMapSize&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">118865920</span><span class="p">,</span>
+<span class="w">  </span><span class="s">&quot;memoryPages&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="s">&quot;active&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">39800</span><span class="p">,</span>
+<span class="w">    </span><span class="s">&quot;throttled&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="s">&quot;fileBacked&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">28778</span><span class="p">,</span>
+<span class="w">    </span><span class="s">&quot;wired&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">19947</span><span class="p">,</span>
+<span class="w">    </span><span class="s">&quot;anonymous&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">32084</span><span class="p">,</span>
+<span class="w">    </span><span class="s">&quot;purgeable&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">543</span><span class="p">,</span>
+<span class="w">    </span><span class="s">&quot;inactive&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">19877</span><span class="p">,</span>
+<span class="w">    </span><span class="s">&quot;free&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">2935</span><span class="p">,</span>
+<span class="w">    </span><span class="s">&quot;speculative&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">1185</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">},</span>
+<span class="p">...</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="s">&quot;uuid&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;a2f9f2db-a110-3896-a0ec-d82c156055ed&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="s">&quot;states&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="s">&quot;frontmost&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="s">&quot;resume&quot;</span>
+<span class="w">    </span><span class="p">],</span>
+<span class="w">    </span><span class="s">&quot;killDelta&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">11351</span><span class="p">,</span>
+<span class="w">    </span><span class="s">&quot;genCount&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="s">&quot;age&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">361742447</span><span class="p">,</span>
+<span class="w">    </span><span class="s">&quot;purgeable&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="s">&quot;fds&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">50</span><span class="p">,</span>
+<span class="w">    </span><span class="s">&quot;coalition&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">2694</span><span class="p">,</span>
+<span class="w">    </span><span class="s">&quot;rpages&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">89600</span><span class="p">,</span>
+<span class="w">    </span><span class="s">&quot;reason&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;per-process-limit&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="s">&quot;pid&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">2541</span><span class="p">,</span>
+<span class="w">    </span><span class="s">&quot;cpuTime&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mf">1.65848</span><span class="p">,</span>
+<span class="w">    </span><span class="s">&quot;name&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;MemoryTest&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="s">&quot;lifetimeMax&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">24126</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="p">...</span>
+</code></pre></div>
+<p>那么当前这个MemoryTest的内存阈值就是<code>16384 * 89600 / 1024 / 1024 = 1400MB</code>。</p>
+<p><strong>方法2</strong></p>
+<p>当前网络上已经有人很多人整理的OOM内存对应表，我这边根据实际情况比较倾向于该版本。</p>
+<div class="highlight"><pre><code><span></span><span class="n">I</span><span class="w"> </span><span class="n">created</span><span class="w"> </span><span class="n">one</span><span class="w"> </span><span class="n">more</span><span class="w"> </span><span class="n">list</span><span class="w"> </span><span class="n">by</span><span class="w"> </span><span class="n">sorting</span><span class="w"> </span><span class="n">Jaspers</span><span class="w"> </span><span class="n">list</span><span class="w"> </span><span class="n">by</span><span class="w"> </span><span class="n">device</span><span class="w"> </span><span class="n">RAM</span><span class="w"> </span><span class="p">(</span><span class="n">I</span><span class="w"> </span><span class="n">made</span><span class="w"> </span><span class="n">my</span><span class="w"> </span><span class="n">own</span><span class="w"> </span><span class="n">tests</span><span class="w"> </span><span class="n">with</span><span class="w"> </span><span class="n">Split</span><span class="err">&#39;</span><span class="n">s</span><span class="w"> </span><span class="n">tool</span><span class="w"> </span><span class="n">and</span><span class="w"> </span><span class="n">fixed</span><span class="w"> </span><span class="n">some</span><span class="w"> </span><span class="n">results</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">check</span><span class="w"> </span><span class="n">my</span><span class="w"> </span><span class="n">comments</span><span class="w"> </span><span class="n">in</span><span class="w"> </span><span class="n">Jaspers</span><span class="w"> </span><span class="kr">thread</span><span class="p">).</span>
+<span class="n">device</span><span class="w"> </span><span class="n">RAM</span><span class="o">:</span><span class="w"> </span><span class="n">percent</span><span class="w"> </span><span class="n">range</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">crash</span>
+<span class="mi">256</span><span class="n">MB</span><span class="o">:</span><span class="w"> </span><span class="mi">49</span><span class="o">%</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">51</span><span class="o">%</span>
+<span class="mi">512</span><span class="n">MB</span><span class="o">:</span><span class="w"> </span><span class="mi">53</span><span class="o">%</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">63</span><span class="o">%</span>
+<span class="mi">1024</span><span class="n">MB</span><span class="o">:</span><span class="w"> </span><span class="mi">57</span><span class="o">%</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">68</span><span class="o">%</span>
+<span class="mi">2048</span><span class="n">MB</span><span class="o">:</span><span class="w"> </span><span class="mi">68</span><span class="o">%</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">69</span><span class="o">%</span>
+<span class="mi">3072</span><span class="n">MB</span><span class="o">:</span><span class="w"> </span><span class="mi">63</span><span class="o">%</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">66</span><span class="o">%</span>
+<span class="mi">4096</span><span class="n">MB</span><span class="o">:</span><span class="w"> </span><span class="mi">77</span><span class="o">%</span>
+<span class="mi">6144</span><span class="n">MB</span><span class="o">:</span><span class="w"> </span><span class="mi">81</span><span class="o">%</span>
+<span class="n">Special</span><span class="w"> </span><span class="n">cases</span><span class="o">:</span>
+<span class="n">iPhone</span><span class="w"> </span><span class="n">X</span><span class="w"> </span><span class="p">(</span><span class="mi">3072</span><span class="n">MB</span><span class="p">)</span><span class="o">:</span><span class="w"> </span><span class="mi">50</span><span class="o">%</span>
+<span class="n">iPhone</span><span class="w"> </span><span class="n">XS</span><span class="o">/</span><span class="n">XS</span><span class="w"> </span><span class="n">Max</span><span class="w"> </span><span class="p">(</span><span class="mi">4096</span><span class="n">MB</span><span class="p">)</span><span class="o">:</span><span class="w"> </span><span class="mi">55</span><span class="o">%</span>
+<span class="n">iPhone</span><span class="w"> </span><span class="n">XR</span><span class="w"> </span><span class="p">(</span><span class="mi">3072</span><span class="n">MB</span><span class="p">)</span><span class="o">:</span><span class="w"> </span><span class="mi">63</span><span class="o">%</span>
+<span class="n">iPhone</span><span class="w"> </span><span class="mi">11</span><span class="o">/</span><span class="mi">11</span><span class="w"> </span><span class="n">Pro</span><span class="w"> </span><span class="n">Max</span><span class="w"> </span><span class="p">(</span><span class="mi">4096</span><span class="n">MB</span><span class="p">)</span><span class="o">:</span><span class="w"> </span><span class="mi">54</span><span class="o">%</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">55</span><span class="o">%</span>
+<span class="n">Device</span><span class="w"> </span><span class="n">RAM</span><span class="w"> </span><span class="n">can</span><span class="w"> </span><span class="n">be</span><span class="w"> </span><span class="n">read</span><span class="w"> </span><span class="n">easily</span><span class="o">:</span>
+<span class="p">[</span><span class="n">NSProcessInfo</span><span class="w"> </span><span class="n">processInfo</span><span class="p">].</span><span class="n">physicalMemory</span>
+<span class="n">From</span><span class="w"> </span><span class="n">my</span><span class="w"> </span><span class="n">experience</span><span class="w"> </span><span class="n">it</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">safe</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">use</span><span class="w"> </span><span class="mi">45</span><span class="o">%</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="mi">1</span><span class="n">GB</span><span class="w"> </span><span class="n">devices</span><span class="p">,</span><span class="w"> </span><span class="mi">50</span><span class="o">%</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="mi">2</span><span class="o">/</span><span class="mi">3</span><span class="n">GB</span><span class="w"> </span><span class="n">devices</span><span class="w"> </span><span class="n">and</span><span class="w"> </span><span class="mi">55</span><span class="o">%</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="mi">4</span><span class="n">GB</span><span class="w"> </span><span class="n">devices</span><span class="p">.</span><span class="w"> </span><span class="n">Percent</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">macOS</span><span class="w"> </span><span class="n">can</span><span class="w"> </span><span class="n">be</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="n">bit</span><span class="w"> </span><span class="n">bigger</span><span class="p">.</span>
+</code></pre></div>
+<p><strong>方法3</strong></p>
+<p>首先，我们可以通过方法得到当前应用程序占用的内存。代码如下</p>
+<div class="highlight"><pre><code><span></span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="p">)</span><span class="n">usedSizeOfMemory</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">task_vm_info_data_t</span><span class="w"> </span><span class="n">taskInfo</span><span class="p">;</span>
+<span class="w">    </span><span class="n">mach_msg_type_number_t</span><span class="w"> </span><span class="n">infoCount</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TASK_VM_INFO_COUNT</span><span class="p">;</span>
+<span class="w">    </span><span class="n">kern_return_t</span><span class="w"> </span><span class="n">kernReturn</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">task_info</span><span class="p">(</span><span class="n">mach_task_self</span><span class="p">(),</span><span class="w"> </span><span class="n">TASK_VM_INFO</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="n">task_info_t</span><span class="p">)</span><span class="o">&amp;</span><span class="n">taskInfo</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">infoCount</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">kernReturn</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">KERN_SUCCESS</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="p">)(</span><span class="n">taskInfo</span><span class="p">.</span><span class="n">phys_footprint</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">1024</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">1024</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>也有其他一些代码使用过的是taskInfo.resident_size，但该值并不准确。我对比Xcode Debug，发现taskInfo.phys_footprint值基本上与Xcode Debug的值一致。而在XNU的<code>task.c</code>中，也找到了该值是如何计算的。</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/*</span>
+<span class="cm"> * phys_footprint</span>
+<span class="cm"> *   Physical footprint: This is the sum of:</span>
+<span class="cm"> *     + (internal - alternate_accounting)</span>
+<span class="cm"> *     + (internal_compressed - alternate_accounting_compressed)</span>
+<span class="cm"> *     + iokit_mapped</span>
+<span class="cm"> *     + purgeable_nonvolatile</span>
+<span class="cm"> *     + purgeable_nonvolatile_compressed</span>
+<span class="cm"> *     + page_table</span>
+<span class="cm"> */</span>
+<span class="w"> </span><span class="n">本地测试了一下</span><span class="err">：</span>
+<span class="w"> </span><span class="n">iOS11上</span><span class="err">，</span><span class="n">phys_footprint值与Xcode</span><span class="w"> </span><span class="n">DEBUG的值相差不到1M</span><span class="err">，</span>
+<span class="w"> </span><span class="n">而在iOS13上</span><span class="err">，</span><span class="n">phys_footprint值与Xcode</span><span class="w"> </span><span class="n">DEBUG值完全一致</span><span class="err">。</span>
+<span class="w"> </span><span class="n">有强迫症的同学可以在iOS11上使用</span>
+<span class="w"> </span><span class="err">（</span><span class="p">(</span><span class="n">taskInfo</span><span class="p">.</span><span class="n">internal</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">taskInfo</span><span class="p">.</span><span class="n">compressed</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">taskInfo</span><span class="p">.</span><span class="n">purgeable_volatile_pmap</span><span class="p">)</span><span class="err">）</span><span class="n">来代替phys_footprint</span><span class="err">。</span>
+</code></pre></div>
+<p>那么我们可以得到这个值之后，就可以开一个线程，循环申请1MB的内存，直至到达第一次内存警告，以及OOM。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#import &quot;ViewController.h&quot;</span>
+<span class="cp">#import &lt;mach/mach.h&gt;</span>
+
+<span class="cp">#define kOneMB  1048576</span>
+
+<span class="err">@</span><span class="n">interface</span><span class="w"> </span><span class="n">ViewController</span><span class="w"> </span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">NSTimer</span><span class="w"> </span><span class="o">*</span><span class="n">timer</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">allocatedMB</span><span class="p">;</span>
+<span class="w">    </span><span class="n">Byte</span><span class="w"> </span><span class="o">*</span><span class="n">p</span><span class="p">[</span><span class="mi">10000</span><span class="p">];</span>
+
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">physicalMemorySizeMB</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">memoryWarningSizeMB</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">memoryLimitSizeMB</span><span class="p">;</span>
+<span class="w">    </span><span class="n">BOOL</span><span class="w"> </span><span class="n">firstMemoryWarningReceived</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="err">@</span><span class="n">end</span>
+
+<span class="err">@</span><span class="n">implementation</span><span class="w"> </span><span class="n">ViewController</span>
+
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">viewDidLoad</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">[</span><span class="n">super</span><span class="w"> </span><span class="n">viewDidLoad</span><span class="p">];</span>
+<span class="w">    </span><span class="c1">// Do any additional setup after loading the view.</span>
+<span class="w">    </span><span class="n">physicalMemorySizeMB</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="p">)([[</span><span class="n">NSProcessInfo</span><span class="w"> </span><span class="n">processInfo</span><span class="p">]</span><span class="w"> </span><span class="n">physicalMemory</span><span class="p">]</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">kOneMB</span><span class="p">);</span>
+<span class="w">    </span><span class="n">firstMemoryWarningReceived</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">YES</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">didReceiveMemoryWarning</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">[</span><span class="n">super</span><span class="w"> </span><span class="n">didReceiveMemoryWarning</span><span class="p">];</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">firstMemoryWarningReceived</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">NO</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">memoryWarningSizeMB</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">self</span><span class="w"> </span><span class="n">usedSizeOfMemory</span><span class="p">];</span>
+<span class="w">    </span><span class="n">firstMemoryWarningReceived</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NO</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="n">IBAction</span><span class="p">)</span><span class="n">startTest</span><span class="o">:</span><span class="p">(</span><span class="n">UIButton</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">button</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">[</span><span class="n">timer</span><span class="w"> </span><span class="n">invalidate</span><span class="p">];</span>
+<span class="w">    </span><span class="n">timer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">NSTimer</span><span class="w"> </span><span class="n">scheduledTimerWithTimeInterval</span><span class="o">:</span><span class="mf">0.01</span><span class="w"> </span><span class="n">target</span><span class="o">:</span><span class="n">self</span><span class="w"> </span><span class="n">selector</span><span class="o">:</span><span class="err">@</span><span class="n">selector</span><span class="p">(</span><span class="n">allocateMemory</span><span class="p">)</span><span class="w"> </span><span class="n">userInfo</span><span class="o">:</span><span class="n">nil</span><span class="w"> </span><span class="n">repeats</span><span class="o">:</span><span class="n">YES</span><span class="p">];</span>
+<span class="p">}</span>
+
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">allocateMemory</span><span class="w"> </span><span class="p">{</span>
+
+<span class="w">    </span><span class="n">p</span><span class="p">[</span><span class="n">allocatedMB</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">malloc</span><span class="p">(</span><span class="mi">1048576</span><span class="p">);</span>
+<span class="w">    </span><span class="n">memset</span><span class="p">(</span><span class="n">p</span><span class="p">[</span><span class="n">allocatedMB</span><span class="p">],</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">1048576</span><span class="p">);</span>
+<span class="w">    </span><span class="n">allocatedMB</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+
+<span class="w">    </span><span class="n">memoryLimitSizeMB</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">self</span><span class="w"> </span><span class="n">usedSizeOfMemory</span><span class="p">];</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">memoryWarningSizeMB</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">memoryLimitSizeMB</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">NSLog</span><span class="p">(</span><span class="err">@</span><span class="s">&quot;----- memory warnning:%dMB, memory limit:%dMB&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">memoryWarningSizeMB</span><span class="p">,</span><span class="w"> </span><span class="n">memoryLimitSizeMB</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="p">)</span><span class="n">usedSizeOfMemory</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">task_vm_info_data_t</span><span class="w"> </span><span class="n">taskInfo</span><span class="p">;</span>
+<span class="w">    </span><span class="n">mach_msg_type_number_t</span><span class="w"> </span><span class="n">infoCount</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TASK_VM_INFO_COUNT</span><span class="p">;</span>
+<span class="w">    </span><span class="n">kern_return_t</span><span class="w"> </span><span class="n">kernReturn</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">task_info</span><span class="p">(</span><span class="n">mach_task_self</span><span class="p">(),</span><span class="w"> </span><span class="n">TASK_VM_INFO</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="n">task_info_t</span><span class="p">)</span><span class="o">&amp;</span><span class="n">taskInfo</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">infoCount</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">kernReturn</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">KERN_SUCCESS</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="p">)(</span><span class="n">taskInfo</span><span class="p">.</span><span class="n">phys_footprint</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">kOneMB</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="err">@</span><span class="n">end</span>
+</code></pre></div>
+<p>这样我们debug，查看控制台最后一条log即可。</p>
+<div class="highlight"><pre><code><span></span><span class="mi">2020</span><span class="mo">-01-03</span><span class="w"> </span><span class="mi">11</span><span class="o">:</span><span class="mi">52</span><span class="o">:</span><span class="mf">26.353765</span><span class="o">+</span><span class="mi">0800</span><span class="w"> </span><span class="n">MemoryTest</span><span class="p">[</span><span class="mi">2561</span><span class="o">:</span><span class="mi">599014</span><span class="p">]</span><span class="w"> </span><span class="o">-----</span><span class="w"> </span><span class="n">memory</span><span class="w"> </span><span class="n">warnning</span><span class="o">:</span><span class="mi">1289</span><span class="n">MB</span><span class="p">,</span><span class="w"> </span><span class="n">memory</span><span class="w"> </span><span class="n">limit</span><span class="o">:</span><span class="mi">1397</span><span class="n">MB</span>
+<span class="mi">2020</span><span class="mo">-01-03</span><span class="w"> </span><span class="mi">11</span><span class="o">:</span><span class="mi">52</span><span class="o">:</span><span class="mf">26.363799</span><span class="o">+</span><span class="mi">0800</span><span class="w"> </span><span class="n">MemoryTest</span><span class="p">[</span><span class="mi">2561</span><span class="o">:</span><span class="mi">599014</span><span class="p">]</span><span class="w"> </span><span class="o">-----</span><span class="w"> </span><span class="n">memory</span><span class="w"> </span><span class="n">warnning</span><span class="o">:</span><span class="mi">1289</span><span class="n">MB</span><span class="p">,</span><span class="w"> </span><span class="n">memory</span><span class="w"> </span><span class="n">limit</span><span class="o">:</span><span class="mi">1398</span><span class="n">MB</span>
+<span class="mi">2020</span><span class="mo">-01-03</span><span class="w"> </span><span class="mi">11</span><span class="o">:</span><span class="mi">52</span><span class="o">:</span><span class="mf">26.373895</span><span class="o">+</span><span class="mi">0800</span><span class="w"> </span><span class="n">MemoryTest</span><span class="p">[</span><span class="mi">2561</span><span class="o">:</span><span class="mi">599014</span><span class="p">]</span><span class="w"> </span><span class="o">-----</span><span class="w"> </span><span class="n">memory</span><span class="w"> </span><span class="n">warnning</span><span class="o">:</span><span class="mi">1289</span><span class="n">MB</span><span class="p">,</span><span class="w"> </span><span class="n">memory</span><span class="w"> </span><span class="n">limit</span><span class="o">:</span><span class="mi">1399</span><span class="n">MB</span>
+</code></pre></div>
+<p>我们发现，内存警告是1289MB，我们有记录的OOM的log到1399MB，那么也说明OOM值为1400MB。</p>
+<p><strong>方法4（适用于iOS13系统）</strong></p>
+<p>iOS13系统<code>os/proc.h</code>中提供了新的API，可以查看当前可用内存</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#import &lt;os/proc.h&gt;</span>
+
+<span class="k">extern</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="nf">os_proc_available_memory</span><span class="p">(</span><span class="kt">void</span><span class="p">);</span>
+<span class="o">+</span><span class="w"> </span><span class="p">(</span><span class="n">CGFloat</span><span class="p">)</span><span class="n">availableSizeOfMemory</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="err">@</span><span class="n">available</span><span class="p">(</span><span class="n">iOS</span><span class="w"> </span><span class="mf">13.0</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">os_proc_available_memory</span><span class="p">()</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">1024.0</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">1024.0</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// ...</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>有了这个值，我们就可以计算出当前应用的内存限制。用了一个iPhone Xs Max测试了一下。通过方法1获取到的内存限制值为134278 * 16384 / 1024 / 1024 = 2098M。通过方法3获取到的内存值为2098M。</p>
+<div class="highlight"><pre><code><span></span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="p">)</span><span class="n">limitSizeOfMemory</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="err">@</span><span class="n">available</span><span class="p">(</span><span class="n">iOS</span><span class="w"> </span><span class="mf">13.0</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">task_vm_info_data_t</span><span class="w"> </span><span class="n">taskInfo</span><span class="p">;</span>
+<span class="w">        </span><span class="n">mach_msg_type_number_t</span><span class="w"> </span><span class="n">infoCount</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TASK_VM_INFO_COUNT</span><span class="p">;</span>
+<span class="w">        </span><span class="n">kern_return_t</span><span class="w"> </span><span class="n">kernReturn</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">task_info</span><span class="p">(</span><span class="n">mach_task_self</span><span class="p">(),</span><span class="w"> </span><span class="n">TASK_VM_INFO</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="n">task_info_t</span><span class="p">)</span><span class="o">&amp;</span><span class="n">taskInfo</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">infoCount</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">kernReturn</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">KERN_SUCCESS</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="p">)((</span><span class="n">taskInfo</span><span class="p">.</span><span class="n">phys_footprint</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">os_proc_available_memory</span><span class="p">())</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">1024.0</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">1024.0</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>通过这个方法，得到的值也为2098M。</p>
+<p>以上就是几种可以获取到不同应用OOM值的方法。无论是应用还是应用扩展，都可以通过以上几个方法测试。但应用扩展的内存限制十分严格，要远低于普通的应用程序。例如，iPhone XS Max的应用内存限制为2098M，而同设备的自定义键盘，内存限制为66M（少的太可怜了）。</p>
+<h3>源码探究</h3>
+<p>我们知道，iOS/MacOS的内核都是XNU，同时XNU是开源的。我们可以在开源的XNU内核源码中，窥探苹果Jetsam的具体实现。</p>
+<p>XNU的内核内层为Mach层，Mach作为微内核，是仅提供基础服务的一个薄层，如处理器管理和调度及IPC(进程间通信)。XNU的第二个主要部分是BSD层。我们可以将其看成围绕mach层的一个外环，BSD为最终用户的应用程序提供变成接口，其职责包括进程管理，文件系统和网络。</p>
+<p>内存管理中各种常见的<strong>JetSam时间也是由BSD产生的</strong>，所以，我们从<code>bsd_init</code>这个函数作为入口，来探究一下原理。</p>
+<p><code>bsd_init</code>中基本都是在初始化各种子系统，比如虚拟内存管理等等。</p>
+<p>BSD初始化<code>bsd_init</code></p>
+<p>跟内存相关的包括如下几步：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">//1. 初始化BSD内存Zone，这个Zone是基于Mach内核的zone</span>
+<span class="n">kmeminit</span><span class="p">();</span>
+
+<span class="c1">//2.iOS上独有的特性，内存和进程的休眠的常驻监控线程</span>
+<span class="cp">#if CONFIG_FREEZE</span>
+<span class="cp">#ifndef CONFIG_MEMORYSTATUS</span>
+<span class="w">    </span><span class="cp">#error &quot;CONFIG_FREEZE defined without matching CONFIG_MEMORYSTATUS&quot;</span>
+<span class="cp">#endif</span>
+<span class="w">    </span><span class="cm">/* Initialise background freezing */</span>
+<span class="w">    </span><span class="n">bsd_init_kprintf</span><span class="p">(</span><span class="s">&quot;calling memorystatus_freeze_init</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="n">memorystatus_freeze_init</span><span class="p">();</span>
+<span class="cp">#endif</span>
+
+<span class="c1">//3.iOS独有，JetSAM（即低内存事件的常驻监控线程）</span>
+<span class="cp">#if CONFIG_MEMORYSTATUS</span>
+<span class="w">    </span><span class="cm">/* Initialize kernel memory status notifications */</span>
+<span class="w">    </span><span class="n">bsd_init_kprintf</span><span class="p">(</span><span class="s">&quot;calling memorystatus_init</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="n">memorystatus_init</span><span class="p">();</span>
+<span class="cp">#endif </span><span class="cm">/* CONFIG_MEMORYSTATUS */</span>
+</code></pre></div>
+<p>这里面的<code>memorystatus_freeze_init()</code>和<code>memorystatus_init()</code>两个方法都是调用<code>kern_memorystatus.c</code>里面暴露的接口，主要的作用就是从内核中开启两个优先级最高的线程，来监控整个系统的内存情况。</p>
+<p><code>CONFIG_FREEZE</code>涉及到的功能，当启用这个宏时，内核会对进程进行冷冻而不是Kill。涉及到进程休眠相关的代码，暂时不在本文讨论范围内。</p>
+<p>回到iOS的OOM崩溃话题上，我们只需要关注<code>memorystatus_init()</code>方法即可。</p>
+<p><strong>知识点介绍</strong></p>
+<ul>
+<li>内核里面对于所有的进程都有一个优先级的分布，通过一个数组维护，数组的每一项是一个进程的列表。这个数组的大小则是<code>JETSAM_PRIORITY_MAX + 1</code>。</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="cp">#define MEMSTAT_BUCKET_COUNT (JETSAM_PRIORITY_MAX + 1)</span>
+
+<span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">memstat_bucket</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">TAILQ_HEAD</span><span class="p">(,</span><span class="w"> </span><span class="n">proc</span><span class="p">)</span><span class="w"> </span><span class="n">list</span><span class="p">;</span><span class="w">    </span><span class="c1">//  一个TAILQ_HEAD的双向链表，用来存放这个优先级下面的进程</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">count</span><span class="p">;</span><span class="w">  </span><span class="c1">//  进程的个数</span>
+<span class="p">}</span><span class="w"> </span><span class="n">memstat_bucket_t</span><span class="p">;</span>
+
+<span class="n">memstat_bucket_t</span><span class="w"> </span><span class="n">memstat_bucket</span><span class="p">[</span><span class="n">MEMSTAT_BUCKET_COUNT</span><span class="p">];</span><span class="c1">//优先级队列(里面包含不同优先级的结构)</span>
+</code></pre></div>
+<ul>
+<li>在<code>kern_memorystatus.h</code>中，我们可以找到<code>JETSAM_PRIORITY_MAX</code>值以及进程优先级相关的定义：</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="cp">#define JETSAM_PRIORITY_REVISION                  2</span>
+
+<span class="cp">#define JETSAM_PRIORITY_IDLE_HEAD                -2</span>
+<span class="cm">/* The value -1 is an alias to JETSAM_PRIORITY_DEFAULT */</span>
+<span class="cp">#define JETSAM_PRIORITY_IDLE                      0</span>
+<span class="cp">#define JETSAM_PRIORITY_IDLE_DEFERRED         1 </span><span class="cm">/* Keeping this around till all xnu_quick_tests can be moved away from it.*/</span>
+<span class="cp">#define JETSAM_PRIORITY_AGING_BAND1       JETSAM_PRIORITY_IDLE_DEFERRED</span>
+<span class="cp">#define JETSAM_PRIORITY_BACKGROUND_OPPORTUNISTIC  2</span>
+<span class="cp">#define JETSAM_PRIORITY_AGING_BAND2       JETSAM_PRIORITY_BACKGROUND_OPPORTUNISTIC</span>
+<span class="cp">#define JETSAM_PRIORITY_BACKGROUND                3</span>
+<span class="cp">#define JETSAM_PRIORITY_ELEVATED_INACTIVE     JETSAM_PRIORITY_BACKGROUND</span>
+<span class="cp">#define JETSAM_PRIORITY_MAIL                      4</span>
+<span class="cp">#define JETSAM_PRIORITY_PHONE                     5</span>
+<span class="cp">#define JETSAM_PRIORITY_UI_SUPPORT                8</span>
+<span class="cp">#define JETSAM_PRIORITY_FOREGROUND_SUPPORT        9</span>
+<span class="cp">#define JETSAM_PRIORITY_FOREGROUND               10</span>
+<span class="cp">#define JETSAM_PRIORITY_AUDIO_AND_ACCESSORY      12</span>
+<span class="cp">#define JETSAM_PRIORITY_CONDUCTOR                13</span>
+<span class="cp">#define JETSAM_PRIORITY_HOME                     16</span>
+<span class="cp">#define JETSAM_PRIORITY_EXECUTIVE                17</span>
+<span class="cp">#define JETSAM_PRIORITY_IMPORTANT                18</span>
+<span class="cp">#define JETSAM_PRIORITY_CRITICAL                 19</span>
+
+<span class="cp">#define JETSAM_PRIORITY_MAX                      21</span>
+
+<span class="cm">/* TODO - tune. This should probably be lower priority */</span>
+<span class="cp">#define JETSAM_PRIORITY_DEFAULT                  18</span>
+<span class="cp">#define JETSAM_PRIORITY_TELEPHONY                19</span>
+</code></pre></div>
+<p>其中数值越大，优先级越高。后台应用程序优先级<code>JETSAM_PRIORITY_BACKGROUND</code>是3，低于前台应用程序优先级<code>JETSAM_PRIORITY_FOREGROUND</code>10，而SpringBoard(桌面程序)位于<code>JETSAM_PRIORITY_HOME</code>16。</p>
+<ul>
+<li>JetSam出现的原因：</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="c1">//kern_memorystatus.h</span>
+<span class="cm">/*</span>
+<span class="cm"> * Jetsam exit reason definitions - related to memorystatus</span>
+<span class="cm"> *</span>
+<span class="cm"> * When adding new exit reasons also update:</span>
+<span class="cm"> *    JETSAM_REASON_MEMORYSTATUS_MAX</span>
+<span class="cm"> *    kMemorystatusKilled... Cause enum</span>
+<span class="cm"> *    memorystatus_kill_cause_name[]</span>
+<span class="cm"> */</span>
+<span class="cp">#define JETSAM_REASON_INVALID                                0</span>
+<span class="cp">#define JETSAM_REASON_GENERIC                                1</span>
+<span class="cp">#define JETSAM_REASON_MEMORY_HIGHWATER                        2</span>
+<span class="cp">#define JETSAM_REASON_VNODE                                    3</span>
+<span class="cp">#define JETSAM_REASON_MEMORY_VMPAGESHORTAGE                    4</span>
+<span class="cp">#define JETSAM_REASON_MEMORY_PROCTHRASHING                    5</span>
+<span class="cp">#define JETSAM_REASON_MEMORY_FCTHRASHING                    6</span>
+<span class="cp">#define JETSAM_REASON_MEMORY_PERPROCESSLIMIT                7</span>
+<span class="cp">#define JETSAM_REASON_MEMORY_DISK_SPACE_SHORTAGE            8</span>
+<span class="cp">#define JETSAM_REASON_MEMORY_IDLE_EXIT                        9</span>
+<span class="cp">#define JETSAM_REASON_ZONE_MAP_EXHAUSTION                    10</span>
+<span class="cp">#define JETSAM_REASON_MEMORY_VMCOMPRESSOR_THRASHING            11</span>
+<span class="cp">#define JETSAM_REASON_MEMORY_VMCOMPRESSOR_SPACE_SHORTAGE    12</span>
+<span class="cp">#define JETSAM_REASON_MEMORYSTATUS_MAX    JETSAM_REASON_MEMORY_VMCOMPRESSOR_SPACE_SHORTAGE</span>
+<span class="cm">/*</span>
+<span class="cm"> * Jetsam exit reason definitions - not related to memorystatus</span>
+<span class="cm"> */</span>
+<span class="cp">#define JETSAM_REASON_CPULIMIT            100</span>
+
+<span class="cm">/* Cause */</span>
+<span class="k">enum</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">kMemorystatusInvalid</span><span class="w">                            </span><span class="o">=</span><span class="w"> </span><span class="n">JETSAM_REASON_INVALID</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kMemorystatusKilled</span><span class="w">                                </span><span class="o">=</span><span class="w"> </span><span class="n">JETSAM_REASON_GENERIC</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kMemorystatusKilledHiwat</span><span class="w">                        </span><span class="o">=</span><span class="w"> </span><span class="n">JETSAM_REASON_MEMORY_HIGHWATER</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kMemorystatusKilledVnodes</span><span class="w">                        </span><span class="o">=</span><span class="w"> </span><span class="n">JETSAM_REASON_VNODE</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kMemorystatusKilledVMPageShortage</span><span class="w">                </span><span class="o">=</span><span class="w"> </span><span class="n">JETSAM_REASON_MEMORY_VMPAGESHORTAGE</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kMemorystatusKilledProcThrashing</span><span class="w">                </span><span class="o">=</span><span class="w"> </span><span class="n">JETSAM_REASON_MEMORY_PROCTHRASHING</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kMemorystatusKilledFCThrashing</span><span class="w">                    </span><span class="o">=</span><span class="w"> </span><span class="n">JETSAM_REASON_MEMORY_FCTHRASHING</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kMemorystatusKilledPerProcessLimit</span><span class="w">                </span><span class="o">=</span><span class="w"> </span><span class="n">JETSAM_REASON_MEMORY_PERPROCESSLIMIT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kMemorystatusKilledDiskSpaceShortage</span><span class="w">            </span><span class="o">=</span><span class="w"> </span><span class="n">JETSAM_REASON_MEMORY_DISK_SPACE_SHORTAGE</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kMemorystatusKilledIdleExit</span><span class="w">                        </span><span class="o">=</span><span class="w"> </span><span class="n">JETSAM_REASON_MEMORY_IDLE_EXIT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kMemorystatusKilledZoneMapExhaustion</span><span class="w">            </span><span class="o">=</span><span class="w"> </span><span class="n">JETSAM_REASON_ZONE_MAP_EXHAUSTION</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kMemorystatusKilledVMCompressorThrashing</span><span class="w">        </span><span class="o">=</span><span class="w"> </span><span class="n">JETSAM_REASON_MEMORY_VMCOMPRESSOR_THRASHING</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kMemorystatusKilledVMCompressorSpaceShortage</span><span class="w">    </span><span class="o">=</span><span class="w"> </span><span class="n">JETSAM_REASON_MEMORY_VMCOMPRESSOR_SPACE_SHORTAGE</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="c1">//kern_memorystatus.m</span>
+<span class="cm">/* For logging clarity */</span>
+<span class="k">static</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">memorystatus_kill_cause_name</span><span class="p">[]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="s">&quot;&quot;</span><span class="w">                                </span><span class="p">,</span><span class="w">        </span><span class="cm">/* kMemorystatusInvalid                            */</span>
+<span class="w">    </span><span class="s">&quot;jettisoned&quot;</span><span class="w">                    </span><span class="p">,</span><span class="w">        </span><span class="cm">/* kMemorystatusKilled                            */</span>
+<span class="w">    </span><span class="s">&quot;highwater&quot;</span><span class="w">                        </span><span class="p">,</span><span class="w">        </span><span class="cm">/* kMemorystatusKilledHiwat                        */</span>
+<span class="w">    </span><span class="s">&quot;vnode-limit&quot;</span><span class="w">                    </span><span class="p">,</span><span class="w">        </span><span class="cm">/* kMemorystatusKilledVnodes                    */</span>
+<span class="w">    </span><span class="s">&quot;vm-pageshortage&quot;</span><span class="w">                </span><span class="p">,</span><span class="w">        </span><span class="cm">/* kMemorystatusKilledVMPageShortage            */</span>
+<span class="w">    </span><span class="s">&quot;proc-thrashing&quot;</span><span class="w">                </span><span class="p">,</span><span class="w">        </span><span class="cm">/* kMemorystatusKilledProcThrashing                */</span>
+<span class="w">    </span><span class="s">&quot;fc-thrashing&quot;</span><span class="w">                    </span><span class="p">,</span><span class="w">        </span><span class="cm">/* kMemorystatusKilledFCThrashing                */</span>
+<span class="w">    </span><span class="s">&quot;per-process-limit&quot;</span><span class="w">                </span><span class="p">,</span><span class="w">        </span><span class="cm">/* kMemorystatusKilledPerProcessLimit            */</span>
+<span class="w">    </span><span class="s">&quot;disk-space-shortage&quot;</span><span class="w">            </span><span class="p">,</span><span class="w">        </span><span class="cm">/* kMemorystatusKilledDiskSpaceShortage            */</span>
+<span class="w">    </span><span class="s">&quot;idle-exit&quot;</span><span class="w">                        </span><span class="p">,</span><span class="w">        </span><span class="cm">/* kMemorystatusKilledIdleExit                    */</span>
+<span class="w">    </span><span class="s">&quot;zone-map-exhaustion&quot;</span><span class="w">            </span><span class="p">,</span><span class="w">        </span><span class="cm">/* kMemorystatusKilledZoneMapExhaustion            */</span>
+<span class="w">    </span><span class="s">&quot;vm-compressor-thrashing&quot;</span><span class="w">        </span><span class="p">,</span><span class="w">        </span><span class="cm">/* kMemorystatusKilledVMCompressorThrashing        */</span>
+<span class="w">    </span><span class="s">&quot;vm-compressor-space-shortage&quot;</span><span class="w">    </span><span class="p">,</span><span class="w">        </span><span class="cm">/* kMemorystatusKilledVMCompressorSpaceShortage    */</span>
+<span class="p">};</span>
+</code></pre></div>
+<p><code>memorystatus_init</code> 内存状态初始化</p>
+<p>接下里让我们看一下<code>memorystatus_init()</code>函数中，初始化JETSAM线程的关键部分代码。</p>
+<div class="highlight"><pre><code><span></span><span class="n">__private_extern__</span><span class="w"> </span><span class="kt">void</span>
+
+<span class="n">memorystatus_init</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="p">...</span><span class="w"> </span>
+<span class="w">    </span><span class="cm">/* Initialize the jetsam_threads state array */</span>
+<span class="w">    </span><span class="n">jetsam_threads</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kalloc</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">jetsam_thread_state</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">max_jetsam_threads</span><span class="p">);</span>
+
+<span class="w">    </span><span class="cm">/* Initialize all the jetsam threads */</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">max_jetsam_threads</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kernel_thread_start_priority</span><span class="p">(</span><span class="n">memorystatus_thread</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="mi">95</span><span class="w"> </span><span class="cm">/* MAXPRI_KERNEL */</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">jetsam_threads</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="kr">thread</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">result</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">KERN_SUCCESS</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">jetsam_threads</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">inited</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FALSE</span><span class="p">;</span>
+<span class="w">            </span><span class="n">jetsam_threads</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">i</span><span class="p">;</span>
+<span class="w">            </span><span class="n">thread_deallocate</span><span class="p">(</span><span class="n">jetsam_threads</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="kr">thread</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">panic</span><span class="p">(</span><span class="s">&quot;Could not create memorystatus_thread %d&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">i</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在这里会根据内核启动参数和设备性能，开启<code>max_jetsam_threads</code>个JetSam线程(性能差的设备为1个，其余为3个)，这些线程的优先级是内核所能分配的最高级(95, <code>MAXPRI_KERNEL</code>)。并且为每个线程增加了次序（注意:前文的<code>-2~19</code>是进程优先级区间，而这里的95是线程优先级，XNU的线程优先级范围是<code>0~127</code>）。</p>
+<p><code>memorystatus_thread</code> 内存状态管理线程</p>
+<p>系统中专门有一个线程用来管理内存状态，当内存状态出现问题或者内存压力过大时，将会通过一定的策略，干掉一些 App 回收内存。</p>
+<p>继续看<code>memorystatus_thread</code>内存状态管理线程的代码：</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="kt">void</span>
+<span class="nf">memorystatus_thread</span><span class="p">(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">param</span><span class="w"> </span><span class="n">__unused</span><span class="p">,</span><span class="w"> </span><span class="n">wait_result_t</span><span class="w"> </span><span class="n">wr</span><span class="w"> </span><span class="n">__unused</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">boolean_t</span><span class="w"> </span><span class="n">post_snapshot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FALSE</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">errors</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">hwm_kill</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="n">boolean_t</span><span class="w"> </span><span class="n">sort_flag</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">    </span><span class="n">boolean_t</span><span class="w"> </span><span class="n">corpse_list_purged</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FALSE</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">jld_idle_kills</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">jetsam_thread_state</span><span class="w"> </span><span class="o">*</span><span class="n">jetsam_thread</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">jetsam_current_thread</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">jetsam_thread</span><span class="o">-&gt;</span><span class="n">inited</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">FALSE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="cm">/* </span>
+<span class="cm">         * It&#39;s the first time the thread has run, so just mark the thread as privileged and block.</span>
+<span class="cm">         * This avoids a spurious pass with unset variables, as set out in &lt;rdar://problem/9609402&gt;.</span>
+<span class="cm">         */</span>
+<span class="w">        </span><span class="kt">char</span><span class="w"> </span><span class="n">name</span><span class="p">[</span><span class="mi">32</span><span class="p">];</span>
+<span class="w">        </span><span class="n">thread_wire</span><span class="p">(</span><span class="n">host_priv_self</span><span class="p">(),</span><span class="w"> </span><span class="n">current_thread</span><span class="p">(),</span><span class="w"> </span><span class="n">TRUE</span><span class="p">);</span>
+<span class="w">        </span><span class="n">snprintf</span><span class="p">(</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="mi">32</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;VM_memorystatus_%d&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">jetsam_thread</span><span class="o">-&gt;</span><span class="n">index</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">jetsam_thread</span><span class="o">-&gt;</span><span class="n">index</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">vm_pageout_state</span><span class="p">.</span><span class="n">vm_restricted_to_single_processor</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">TRUE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">thread_vm_bind_group_add</span><span class="p">();</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="n">thread_set_thread_name</span><span class="p">(</span><span class="n">current_thread</span><span class="p">(),</span><span class="w"> </span><span class="n">name</span><span class="p">);</span>
+<span class="w">        </span><span class="n">jetsam_thread</span><span class="o">-&gt;</span><span class="n">inited</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">        </span><span class="n">memorystatus_thread_block</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">memorystatus_thread</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="n">KERNEL_DEBUG_CONSTANT</span><span class="p">(</span><span class="n">BSDDBG_CODE</span><span class="p">(</span><span class="n">DBG_BSD_MEMSTAT</span><span class="p">,</span><span class="w"> </span><span class="n">BSD_MEMSTAT_SCAN</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">DBG_FUNC_START</span><span class="p">,</span>
+<span class="w">                  </span><span class="n">memorystatus_available_pages</span><span class="p">,</span><span class="w"> </span><span class="n">memorystatus_jld_enabled</span><span class="p">,</span><span class="w"> </span><span class="n">memorystatus_jld_eval_period_msecs</span><span class="p">,</span><span class="w"> </span><span class="n">memorystatus_jld_eval_aggressive_count</span><span class="p">,</span><span class="mi">0</span><span class="p">);</span>
+<span class="w">    </span><span class="cm">/*</span>
+<span class="cm">     * Jetsam aware version.</span>
+<span class="cm">     *</span>
+<span class="cm">     * The VM pressure notification thread is working it&#39;s way through clients in parallel.</span>
+<span class="cm">     *</span>
+<span class="cm">     * So, while the pressure notification thread is targeting processes in order of </span>
+<span class="cm">     * increasing jetsam priority, we can hopefully reduce / stop it&#39;s work by killing </span>
+<span class="cm">     * any processes that have exceeded their highwater mark.</span>
+<span class="cm">     *</span>
+<span class="cm">     * If we run out of HWM processes and our available pages drops below the critical threshold, then,</span>
+<span class="cm">     * we target the least recently used process in order of increasing jetsam priority (exception: the FG band).</span>
+<span class="cm">     */</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_action_needed</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">boolean_t</span><span class="w"> </span><span class="n">killed</span><span class="p">;</span>
+<span class="w">        </span><span class="kt">int32_t</span><span class="w"> </span><span class="n">priority</span><span class="p">;</span>
+<span class="w">        </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">cause</span><span class="p">;</span>
+<span class="w">        </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">jetsam_reason_code</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">JETSAM_REASON_INVALID</span><span class="p">;</span>
+<span class="w">        </span><span class="n">os_reason_t</span><span class="w"> </span><span class="n">jetsam_reason</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">OS_REASON_NULL</span><span class="p">;</span>
+<span class="w">        </span><span class="n">cause</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kill_under_pressure_cause</span><span class="p">;</span>
+<span class="w">        </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">cause</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">case</span><span class="w"> </span><span class="no">kMemorystatusKilledFCThrashing</span><span class="p">:</span>
+<span class="w">                </span><span class="n">jetsam_reason_code</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">JETSAM_REASON_MEMORY_FCTHRASHING</span><span class="p">;</span>
+<span class="w">                </span><span class="k">break</span><span class="p">;</span>
+<span class="w">            </span><span class="k">case</span><span class="w"> </span><span class="no">kMemorystatusKilledVMCompressorThrashing</span><span class="p">:</span>
+<span class="w">                </span><span class="n">jetsam_reason_code</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">JETSAM_REASON_MEMORY_VMCOMPRESSOR_THRASHING</span><span class="p">;</span>
+<span class="w">                </span><span class="k">break</span><span class="p">;</span>
+<span class="w">            </span><span class="k">case</span><span class="w"> </span><span class="no">kMemorystatusKilledVMCompressorSpaceShortage</span><span class="p">:</span>
+<span class="w">                </span><span class="n">jetsam_reason_code</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">JETSAM_REASON_MEMORY_VMCOMPRESSOR_SPACE_SHORTAGE</span><span class="p">;</span>
+<span class="w">                </span><span class="k">break</span><span class="p">;</span>
+<span class="w">            </span><span class="k">case</span><span class="w"> </span><span class="no">kMemorystatusKilledZoneMapExhaustion</span><span class="p">:</span>
+<span class="w">                </span><span class="n">jetsam_reason_code</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">JETSAM_REASON_ZONE_MAP_EXHAUSTION</span><span class="p">;</span>
+<span class="w">                </span><span class="k">break</span><span class="p">;</span>
+<span class="w">            </span><span class="k">case</span><span class="w"> </span><span class="no">kMemorystatusKilledVMPageShortage</span><span class="p">:</span>
+<span class="w">                </span><span class="cm">/* falls through */</span>
+<span class="w">            </span><span class="k">default</span><span class="o">:</span>
+<span class="w">                </span><span class="n">jetsam_reason_code</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">JETSAM_REASON_MEMORY_VMPAGESHORTAGE</span><span class="p">;</span>
+<span class="w">                </span><span class="n">cause</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kMemorystatusKilledVMPageShortage</span><span class="p">;</span>
+<span class="w">                </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="cm">/* Highwater */</span>
+<span class="w">        </span><span class="n">boolean_t</span><span class="w"> </span><span class="n">is_critical</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_act_on_hiwat_processes</span><span class="p">(</span><span class="o">&amp;</span><span class="n">errors</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">hwm_kill</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">post_snapshot</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">is_critical</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_critical</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">FALSE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="cm">/*</span>
+<span class="cm">                 * For now, don&#39;t kill any other processes.</span>
+<span class="cm">                 */</span>
+<span class="w">                </span><span class="k">break</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="k">goto</span><span class="w"> </span><span class="n">done</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">        </span><span class="n">jetsam_reason</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">os_reason_create</span><span class="p">(</span><span class="n">OS_REASON_JETSAM</span><span class="p">,</span><span class="w"> </span><span class="n">jetsam_reason_code</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">jetsam_reason</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">OS_REASON_NULL</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;memorystatus_thread: failed to allocate jetsam reason</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_act_aggressive</span><span class="p">(</span><span class="n">cause</span><span class="p">,</span><span class="w"> </span><span class="n">jetsam_reason</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">jld_idle_kills</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">corpse_list_purged</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">post_snapshot</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">goto</span><span class="w"> </span><span class="n">done</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">        </span><span class="cm">/*</span>
+<span class="cm">         * memorystatus_kill_top_process() drops a reference,</span>
+<span class="cm">         * so take another one so we can continue to use this exit reason</span>
+<span class="cm">         * even after it returns</span>
+<span class="cm">         */</span>
+<span class="w">        </span><span class="n">os_reason_ref</span><span class="p">(</span><span class="n">jetsam_reason</span><span class="p">);</span>
+
+<span class="w">        </span><span class="cm">/* LRU */</span>
+<span class="w">        </span><span class="n">killed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">memorystatus_kill_top_process</span><span class="p">(</span><span class="n">TRUE</span><span class="p">,</span><span class="w"> </span><span class="n">sort_flag</span><span class="p">,</span><span class="w"> </span><span class="n">cause</span><span class="p">,</span><span class="w"> </span><span class="n">jetsam_reason</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">priority</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">errors</span><span class="p">);</span>
+<span class="w">        </span><span class="n">sort_flag</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FALSE</span><span class="p">;</span>
+
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">killed</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_post_snapshot</span><span class="p">(</span><span class="n">priority</span><span class="p">,</span><span class="w"> </span><span class="n">cause</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">TRUE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+
+<span class="w">                    </span><span class="n">post_snapshot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+
+<span class="w">            </span><span class="cm">/* Jetsam Loop Detection */</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_jld_enabled</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">TRUE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">priority</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">JETSAM_PRIORITY_IDLE</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">(</span><span class="n">priority</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">system_procs_aging_band</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">(</span><span class="n">priority</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">applications_aging_band</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                    </span><span class="n">jld_idle_kills</span><span class="o">++</span><span class="p">;</span>
+<span class="w">                </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                    </span><span class="cm">/*</span>
+<span class="cm">                     * We&#39;ve reached into bands beyond idle deferred.</span>
+<span class="cm">                     * We make no attempt to monitor them</span>
+<span class="cm">                     */</span>
+<span class="w">                </span><span class="p">}</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">priority</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">JETSAM_PRIORITY_UI_SUPPORT</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">(</span><span class="n">total_corpses_count</span><span class="p">()</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">(</span><span class="n">corpse_list_purged</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">FALSE</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="cm">/*</span>
+<span class="cm">                 * If we have jetsammed a process in or above JETSAM_PRIORITY_UI_SUPPORT</span>
+<span class="cm">                 * then we attempt to relieve pressure by purging corpse memory.</span>
+<span class="cm">                 */</span>
+<span class="w">                </span><span class="n">task_purge_all_corpses</span><span class="p">();</span>
+<span class="w">                </span><span class="n">corpse_list_purged</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">            </span><span class="k">goto</span><span class="w"> </span><span class="n">done</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_avail_pages_below_critical</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="cm">/*</span>
+<span class="cm">             * Still under pressure and unable to kill a process - purge corpse memory</span>
+<span class="cm">             */</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">total_corpses_count</span><span class="p">()</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">task_purge_all_corpses</span><span class="p">();</span>
+<span class="w">                </span><span class="n">corpse_list_purged</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_avail_pages_below_critical</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="cm">/*</span>
+<span class="cm">                 * Still under pressure and unable to kill a process - panic</span>
+<span class="cm">                 */</span>
+<span class="w">                </span><span class="n">panic</span><span class="p">(</span><span class="s">&quot;memorystatus_jetsam_thread: no victim! available pages:%llu</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">uint64_t</span><span class="p">)</span><span class="n">memorystatus_available_pages</span><span class="p">);</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="nl">done</span><span class="p">:</span><span class="w">       </span>
+<span class="w">        </span><span class="cm">/*</span>
+<span class="cm">         * We do not want to over-kill when thrashing has been detected.</span>
+<span class="cm">         * To avoid that, we reset the flag here and notify the</span>
+<span class="cm">         * compressor.</span>
+<span class="cm">         */</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_reason_thrashing</span><span class="p">(</span><span class="n">kill_under_pressure_cause</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">kill_under_pressure_cause</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="cp">#if CONFIG_JETSAM</span>
+<span class="w">            </span><span class="n">vm_thrashing_jetsam_done</span><span class="p">();</span>
+<span class="cp">#endif </span><span class="cm">/* CONFIG_JETSAM */</span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_reason_zone_map_exhaustion</span><span class="p">(</span><span class="n">kill_under_pressure_cause</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">kill_under_pressure_cause</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="n">os_reason_free</span><span class="p">(</span><span class="n">jetsam_reason</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">kill_under_pressure_cause</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">errors</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">memorystatus_clear_errors</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">post_snapshot</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">proc_list_lock</span><span class="p">();</span>
+<span class="w">        </span><span class="kt">size_t</span><span class="w"> </span><span class="n">snapshot_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">memorystatus_jetsam_snapshot_t</span><span class="p">)</span><span class="w"> </span><span class="o">+</span>
+<span class="w">            </span><span class="k">sizeof</span><span class="p">(</span><span class="n">memorystatus_jetsam_snapshot_entry_t</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_jetsam_snapshot_count</span><span class="p">);</span>
+<span class="w">        </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">timestamp_now</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">mach_absolute_time</span><span class="p">();</span>
+<span class="w">        </span><span class="n">memorystatus_jetsam_snapshot</span><span class="o">-&gt;</span><span class="n">notification_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">timestamp_now</span><span class="p">;</span>
+<span class="w">        </span><span class="n">memorystatus_jetsam_snapshot</span><span class="o">-&gt;</span><span class="n">js_gencount</span><span class="o">++</span><span class="p">;</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_jetsam_snapshot_count</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_jetsam_snapshot_last_timestamp</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">||</span>
+<span class="w">                </span><span class="n">timestamp_now</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">memorystatus_jetsam_snapshot_last_timestamp</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">memorystatus_jetsam_snapshot_timeout</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">proc_list_unlock</span><span class="p">();</span>
+<span class="w">            </span><span class="kt">int</span><span class="w"> </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">memorystatus_send_note</span><span class="p">(</span><span class="n">kMemorystatusSnapshotNote</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">snapshot_size</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">snapshot_size</span><span class="p">));</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">ret</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">proc_list_lock</span><span class="p">();</span>
+<span class="w">                </span><span class="n">memorystatus_jetsam_snapshot_last_timestamp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">timestamp_now</span><span class="p">;</span>
+<span class="w">                </span><span class="n">proc_list_unlock</span><span class="p">();</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">proc_list_unlock</span><span class="p">();</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">KERNEL_DEBUG_CONSTANT</span><span class="p">(</span><span class="n">BSDDBG_CODE</span><span class="p">(</span><span class="n">DBG_BSD_MEMSTAT</span><span class="p">,</span><span class="w"> </span><span class="n">BSD_MEMSTAT_SCAN</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">DBG_FUNC_END</span><span class="p">,</span>
+<span class="w">        </span><span class="n">memorystatus_available_pages</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="w">    </span><span class="n">memorystatus_thread_block</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">memorystatus_thread</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>代码较多，我们来逐一分析。</p>
+<p><strong>判断条件</strong></p>
+<p>我们可以看到核心的代码在<code>while (memorystatus_action_needed())</code>循环里，<code>memorystatus_action_needed()</code>是触发OOM的核心判断条件。</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/* Does cause indicate vm or fc thrashing? */</span>
+<span class="k">static</span><span class="w"> </span><span class="n">boolean_t</span><span class="w"> </span>
+<span class="nf">is_reason_thrashing</span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="n">cause</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">cause</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">kMemorystatusKilledFCThrashing</span><span class="p">:</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">kMemorystatusKilledVMCompressorThrashing</span><span class="p">:</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">kMemorystatusKilledVMCompressorSpaceShortage</span><span class="p">:</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">    </span><span class="k">default</span><span class="o">:</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">FALSE</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="cm">/* Is the zone map almost full? */</span>
+<span class="k">static</span><span class="w"> </span><span class="n">boolean_t</span><span class="w"> </span>
+<span class="nf">is_reason_zone_map_exhaustion</span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="n">cause</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">cause</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">kMemorystatusKilledZoneMapExhaustion</span><span class="p">)</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">FALSE</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="k">static</span><span class="w"> </span><span class="n">boolean_t</span><span class="w"> </span><span class="nf">memorystatus_action_needed</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="n">is_reason_thrashing</span><span class="p">(</span><span class="n">kill_under_pressure_cause</span><span class="p">)</span><span class="w"> </span><span class="o">||</span>
+<span class="w">            </span><span class="n">is_reason_zone_map_exhaustion</span><span class="p">(</span><span class="n">kill_under_pressure_cause</span><span class="p">)</span><span class="w"> </span><span class="o">||</span>
+<span class="w">           </span><span class="n">memorystatus_available_pages</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">memorystatus_available_pages_pressure</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这里通过接受vm_pageout守护程序（实际上是一个线程）发送的内存压力来判断当前内存资源是否紧张。内存紧张的情况可能为：操作系统的抖动(Thrashing，频繁的内存页面(page)换进换出占用CPU过度)，虚拟内存耗尽（比如有人从硬盘向ZFS(动态文件系统)池中拷贝1TB的数据），或者内存可用页低于阈值<code>memorystatus_available_pages_pressure</code>。</p>
+<p><strong>high-water</strong></p>
+<p>判断条件通过之后，也就是当前内存紧张，首先走到<code>memorystatus_act_on_hiwat_processes</code>逻辑中。</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/* Highwater */</span>
+<span class="n">boolean_t</span><span class="w"> </span><span class="n">is_critical</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_act_on_hiwat_processes</span><span class="p">(</span><span class="o">&amp;</span><span class="n">errors</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">hwm_kill</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">post_snapshot</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">is_critical</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_critical</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">FALSE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="cm">/*</span>
+<span class="cm">         * For now, don&#39;t kill any other processes.</span>
+<span class="cm">         */</span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">goto</span><span class="w"> </span><span class="n">done</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这是触发high-water类型OOM的关键方法。</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="n">boolean_t</span>
+<span class="nf">memorystatus_act_on_hiwat_processes</span><span class="p">(</span><span class="kt">uint32_t</span><span class="w"> </span><span class="o">*</span><span class="n">errors</span><span class="p">,</span><span class="w"> </span><span class="kt">uint32_t</span><span class="w"> </span><span class="o">*</span><span class="n">hwm_kill</span><span class="p">,</span><span class="w"> </span><span class="n">boolean_t</span><span class="w"> </span><span class="o">*</span><span class="n">post_snapshot</span><span class="p">,</span><span class="w"> </span><span class="n">__unused</span><span class="w"> </span><span class="n">boolean_t</span><span class="w"> </span><span class="o">*</span><span class="n">is_critical</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">boolean_t</span><span class="w"> </span><span class="n">purged</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FALSE</span><span class="p">;</span>
+<span class="w">    </span><span class="n">boolean_t</span><span class="w"> </span><span class="n">killed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">memorystatus_kill_hiwat_proc</span><span class="p">(</span><span class="n">errors</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">purged</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">killed</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="o">*</span><span class="n">hwm_kill</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">hwm_kill</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">        </span><span class="o">*</span><span class="n">post_snapshot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">purged</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">FALSE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="cm">/* couldn&#39;t purge and couldn&#39;t kill */</span>
+<span class="w">            </span><span class="n">memorystatus_hwm_candidates</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FALSE</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="cp">#if CONFIG_JETSAM</span>
+<span class="w">    </span><span class="cm">/* No highwater processes to kill. Continue or stop for now? */</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">is_reason_thrashing</span><span class="p">(</span><span class="n">kill_under_pressure_cause</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">        </span><span class="o">!</span><span class="n">is_reason_zone_map_exhaustion</span><span class="p">(</span><span class="n">kill_under_pressure_cause</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">        </span><span class="p">(</span><span class="n">memorystatus_available_pages</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">memorystatus_available_pages_critical</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="cm">/*</span>
+<span class="cm">         * We are _not_ out of pressure but we are above the critical threshold and there&#39;s:</span>
+<span class="cm">         * - no compressor thrashing</span>
+<span class="cm">         * - enough zone memory</span>
+<span class="cm">         * - no more HWM processes left.</span>
+<span class="cm">         * For now, don&#39;t kill any other processes.</span>
+<span class="cm">         */</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">hwm_kill</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">memorystatus_thread_wasted_wakeup</span><span class="o">++</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="o">*</span><span class="n">is_critical</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FALSE</span><span class="p">;</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="cp">#endif </span><span class="cm">/* CONFIG_JETSAM */</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">FALSE</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>memorystatus_act_on_hiwat_processes</code>会直接调用<code>memorystatus_kill_hiwat_proc</code>。</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="n">boolean_t</span>
+<span class="nf">memorystatus_kill_hiwat_proc</span><span class="p">(</span><span class="kt">uint32_t</span><span class="w"> </span><span class="o">*</span><span class="n">errors</span><span class="p">,</span><span class="w"> </span><span class="n">boolean_t</span><span class="w"> </span><span class="o">*</span><span class="n">purged</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="kt">pid_t</span><span class="w"> </span><span class="n">aPid</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="n">proc_t</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">PROC_NULL</span><span class="p">,</span><span class="w"> </span><span class="n">next_p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">PROC_NULL</span><span class="p">;</span>
+<span class="w">    </span><span class="n">boolean_t</span><span class="w"> </span><span class="n">new_snapshot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FALSE</span><span class="p">,</span><span class="w"> </span><span class="n">killed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FALSE</span><span class="p">,</span><span class="w"> </span><span class="n">freed_mem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FALSE</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">aPid_ep</span><span class="p">;</span>
+<span class="w">    </span><span class="n">os_reason_t</span><span class="w"> </span><span class="n">jetsam_reason</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">OS_REASON_NULL</span><span class="p">;</span>
+<span class="w">    </span><span class="n">KERNEL_DEBUG_CONSTANT</span><span class="p">(</span><span class="n">BSDDBG_CODE</span><span class="p">(</span><span class="n">DBG_BSD_MEMSTAT</span><span class="p">,</span><span class="w"> </span><span class="n">BSD_MEMSTAT_JETSAM_HIWAT</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">DBG_FUNC_START</span><span class="p">,</span>
+<span class="w">        </span><span class="n">memorystatus_available_pages</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">jetsam_reason</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">os_reason_create</span><span class="p">(</span><span class="n">OS_REASON_JETSAM</span><span class="p">,</span><span class="w"> </span><span class="n">JETSAM_REASON_MEMORY_HIGHWATER</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">jetsam_reason</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">OS_REASON_NULL</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;memorystatus_kill_hiwat_proc: failed to allocate exit reason</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="n">proc_list_lock</span><span class="p">();</span>
+
+<span class="w">    </span><span class="n">next_p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">memorystatus_get_first_proc_locked</span><span class="p">(</span><span class="o">&amp;</span><span class="n">i</span><span class="p">,</span><span class="w"> </span><span class="n">TRUE</span><span class="p">);</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">next_p</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">footprint_in_bytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">        </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">memlimit_in_bytes</span><span class="w">  </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">        </span><span class="n">boolean_t</span><span class="w"> </span><span class="n">skip</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+
+<span class="w">        </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">next_p</span><span class="p">;</span>
+<span class="w">        </span><span class="n">next_p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">memorystatus_get_next_proc_locked</span><span class="p">(</span><span class="o">&amp;</span><span class="n">i</span><span class="p">,</span><span class="w"> </span><span class="n">p</span><span class="p">,</span><span class="w"> </span><span class="n">TRUE</span><span class="p">);</span>
+
+<span class="w">        </span><span class="n">aPid</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">p_pid</span><span class="p">;</span>
+<span class="w">        </span><span class="n">aPid_ep</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">p_memstat_effectivepriority</span><span class="p">;</span>
+
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="o">-&gt;</span><span class="n">p_memstat_state</span><span class="w">  </span><span class="o">&amp;</span><span class="w"> </span><span class="p">(</span><span class="n">P_MEMSTAT_ERROR</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">P_MEMSTAT_TERMINATED</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">        </span><span class="cm">/* skip if no limit set */</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="o">-&gt;</span><span class="n">p_memstat_memlimit</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">        </span><span class="n">footprint_in_bytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">get_task_phys_footprint</span><span class="p">(</span><span class="n">p</span><span class="o">-&gt;</span><span class="n">task</span><span class="p">);</span>
+<span class="w">        </span><span class="n">memlimit_in_bytes</span><span class="w">  </span><span class="o">=</span><span class="w"> </span><span class="p">(((</span><span class="kt">uint64_t</span><span class="p">)</span><span class="n">p</span><span class="o">-&gt;</span><span class="n">p_memstat_memlimit</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024ULL</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024ULL</span><span class="p">);</span><span class="w">   </span><span class="cm">/* convert MB to bytes */</span>
+<span class="w">        </span><span class="n">skip</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">footprint_in_bytes</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">memlimit_in_bytes</span><span class="p">);</span>
+
+<span class="cp">#if CONFIG_JETSAM &amp;&amp; (DEVELOPMENT || DEBUG)</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">skip</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_jetsam_policy</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">kPolicyDiagnoseActive</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="o">-&gt;</span><span class="n">p_memstat_state</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">P_MEMSTAT_DIAG_SUSPENDED</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="cp">#endif </span><span class="cm">/* CONFIG_JETSAM &amp;&amp; (DEVELOPMENT || DEBUG) */</span>
+
+<span class="cp">#if CONFIG_FREEZE</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">skip</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="o">-&gt;</span><span class="n">p_memstat_state</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">P_MEMSTAT_LOCKED</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">skip</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">skip</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FALSE</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span><span class="w">               </span>
+<span class="w">        </span><span class="p">}</span>
+<span class="cp">#endif</span>
+
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">skip</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_jetsam_snapshot_count</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">memorystatus_init_jetsam_snapshot_locked</span><span class="p">(</span><span class="nb">NULL</span><span class="p">,</span><span class="mi">0</span><span class="p">);</span>
+<span class="w">                </span><span class="n">new_snapshot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">proc_ref_locked</span><span class="p">(</span><span class="n">p</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">p</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="cm">/*</span>
+<span class="cm">                 * Mark as terminated so that if exit1() indicates success, but the process (for example)</span>
+<span class="cm">                 * is blocked in task_exception_notify(), it&#39;ll be skipped if encountered again - see</span>
+<span class="cm">                 * &lt;rdar://problem/13553476&gt;. This is cheaper than examining P_LEXIT, which requires the</span>
+<span class="cm">                 * acquisition of the proc lock.</span>
+<span class="cm">                 */</span>
+<span class="w">                </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">p_memstat_state</span><span class="w"> </span><span class="o">|=</span><span class="w"> </span><span class="n">P_MEMSTAT_TERMINATED</span><span class="p">;</span>
+<span class="w">                </span><span class="n">proc_list_unlock</span><span class="p">();</span>
+<span class="w">            </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="cm">/*</span>
+<span class="cm">                 * We need to restart the search again because</span>
+<span class="cm">                 * proc_ref_locked _can_ drop the proc_list lock</span>
+<span class="cm">                 * and we could have lost our stored next_p via</span>
+<span class="cm">                 * an exit() on another core.</span>
+<span class="cm">                 */</span>
+<span class="w">                </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">                </span><span class="n">next_p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">memorystatus_get_first_proc_locked</span><span class="p">(</span><span class="o">&amp;</span><span class="n">i</span><span class="p">,</span><span class="w"> </span><span class="n">TRUE</span><span class="p">);</span>
+<span class="w">                </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+
+<span class="w">            </span><span class="n">freed_mem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">memorystatus_kill_proc</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="w"> </span><span class="n">kMemorystatusKilledHiwat</span><span class="p">,</span><span class="w"> </span><span class="n">jetsam_reason</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">killed</span><span class="p">);</span><span class="w"> </span><span class="cm">/* purged and/or killed &#39;p&#39; */</span>
+<span class="w">            </span><span class="cm">/* Success? */</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">freed_mem</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">killed</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">FALSE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                    </span><span class="cm">/* purged &#39;p&#39;..don&#39;t reset HWM candidate count */</span>
+<span class="w">                    </span><span class="o">*</span><span class="n">purged</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+
+<span class="w">                    </span><span class="n">proc_list_lock</span><span class="p">();</span>
+<span class="w">                    </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">p_memstat_state</span><span class="w"> </span><span class="o">&amp;=</span><span class="w"> </span><span class="o">~</span><span class="n">P_MEMSTAT_TERMINATED</span><span class="p">;</span>
+<span class="w">                    </span><span class="n">proc_list_unlock</span><span class="p">();</span>
+<span class="w">                </span><span class="p">}</span>
+<span class="w">                </span><span class="n">proc_rele</span><span class="p">(</span><span class="n">p</span><span class="p">);</span>
+<span class="w">                </span><span class="k">goto</span><span class="w"> </span><span class="n">exit</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">            </span><span class="cm">/*</span>
+<span class="cm">             * Failure - first unwind the state,</span>
+<span class="cm">             * then fall through to restart the search.</span>
+<span class="cm">             */</span>
+<span class="w">            </span><span class="n">proc_list_lock</span><span class="p">();</span>
+<span class="w">            </span><span class="n">proc_rele_locked</span><span class="p">(</span><span class="n">p</span><span class="p">);</span>
+<span class="w">            </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">p_memstat_state</span><span class="w"> </span><span class="o">&amp;=</span><span class="w"> </span><span class="o">~</span><span class="n">P_MEMSTAT_TERMINATED</span><span class="p">;</span>
+<span class="w">            </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">p_memstat_state</span><span class="w"> </span><span class="o">|=</span><span class="w"> </span><span class="n">P_MEMSTAT_ERROR</span><span class="p">;</span>
+<span class="w">            </span><span class="o">*</span><span class="n">errors</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+
+<span class="w">            </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">            </span><span class="n">next_p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">memorystatus_get_first_proc_locked</span><span class="p">(</span><span class="o">&amp;</span><span class="n">i</span><span class="p">,</span><span class="w"> </span><span class="n">TRUE</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="n">proc_list_unlock</span><span class="p">();</span>
+
+<span class="nl">exit</span><span class="p">:</span>
+<span class="w">    </span><span class="n">os_reason_free</span><span class="p">(</span><span class="n">jetsam_reason</span><span class="p">);</span>
+
+<span class="w">    </span><span class="cm">/* Clear snapshot if freshly captured and no target was found */</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">new_snapshot</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="n">killed</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">proc_list_lock</span><span class="p">();</span>
+<span class="w">        </span><span class="n">memorystatus_jetsam_snapshot</span><span class="o">-&gt;</span><span class="n">entry_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">memorystatus_jetsam_snapshot_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">        </span><span class="n">proc_list_unlock</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="n">KERNEL_DEBUG_CONSTANT</span><span class="p">(</span><span class="n">BSDDBG_CODE</span><span class="p">(</span><span class="n">DBG_BSD_MEMSTAT</span><span class="p">,</span><span class="w"> </span><span class="n">BSD_MEMSTAT_JETSAM_HIWAT</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">DBG_FUNC_END</span><span class="p">,</span><span class="w"> </span>
+<span class="w">                  </span><span class="n">memorystatus_available_pages</span><span class="p">,</span><span class="w"> </span><span class="n">killed</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">aPid</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">killed</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>首先通过<code>memorystatus_get_first_proc_locked(&amp;i, TRUE)</code>去优先级队列里面取出优先级最低的进程。如果这个进程内存小于阈值<code>(footprint_in_bytes &lt;= memlimit_in_bytes)</code>，则继续寻找下一个优先级次低的进程<code>memorystatus_get_next_proc_locked</code>，直到找到内存超过阈值的进程，将通过<code>memorystatus_do_kill</code>杀掉这个进程，并结束循环。</p>
+<p><strong>normal kill</strong></p>
+<p>不过high-water的阈值较高，一般不容易触发。如果通过high-water相关代码不能结束任何进程，将走到<code>memorystatus_act_aggressive()</code>函数中，也就是大部分OOM发生的地方。</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="n">boolean_t</span>
+<span class="nf">memorystatus_act_aggressive</span><span class="p">(</span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">cause</span><span class="p">,</span><span class="w"> </span><span class="n">os_reason_t</span><span class="w"> </span><span class="n">jetsam_reason</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="o">*</span><span class="n">jld_idle_kills</span><span class="p">,</span><span class="w"> </span><span class="n">boolean_t</span><span class="w"> </span><span class="o">*</span><span class="n">corpse_list_purged</span><span class="p">,</span><span class="w"> </span><span class="n">boolean_t</span><span class="w"> </span><span class="o">*</span><span class="n">post_snapshot</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_jld_enabled</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">TRUE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+
+<span class="w">        </span><span class="n">boolean_t</span><span class="w"> </span><span class="n">killed</span><span class="p">;</span>
+<span class="w">        </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">errors</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+
+<span class="w">        </span><span class="cm">/* Jetsam Loop Detection - locals */</span>
+<span class="w">        </span><span class="n">memstat_bucket_t</span><span class="w"> </span><span class="o">*</span><span class="n">bucket</span><span class="p">;</span>
+<span class="w">        </span><span class="kt">int</span><span class="w">     </span><span class="n">jld_bucket_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">        </span><span class="k">struct</span><span class="w"> </span><span class="nc">timeval</span><span class="w">  </span><span class="n">jld_now_tstamp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="mi">0</span><span class="p">,</span><span class="mi">0</span><span class="p">};</span>
+<span class="w">        </span><span class="kt">uint64_t</span><span class="w">    </span><span class="n">jld_now_msecs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">        </span><span class="kt">int</span><span class="w">     </span><span class="n">elevated_bucket_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+
+<span class="w">        </span><span class="cm">/* Jetsam Loop Detection - statics */</span>
+<span class="w">        </span><span class="k">static</span><span class="w"> </span><span class="kt">uint64_t</span><span class="w">  </span><span class="n">jld_timestamp_msecs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">        </span><span class="k">static</span><span class="w"> </span><span class="kt">int</span><span class="w">   </span><span class="n">jld_idle_kill_candidates</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w">  </span><span class="cm">/* Number of available processes in band 0,1 at start */</span>
+<span class="w">        </span><span class="k">static</span><span class="w"> </span><span class="kt">int</span><span class="w">   </span><span class="n">jld_eval_aggressive_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w">     </span><span class="cm">/* Bumps the max priority in aggressive loop */</span>
+<span class="w">        </span><span class="k">static</span><span class="w"> </span><span class="kt">int32_t</span><span class="w">   </span><span class="n">jld_priority_band_max</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">JETSAM_PRIORITY_UI_SUPPORT</span><span class="p">;</span>
+<span class="w">        </span><span class="cm">/*</span>
+<span class="cm">         * Jetsam Loop Detection: attempt to detect</span>
+<span class="cm">         * rapid daemon relaunches in the lower bands.</span>
+<span class="cm">         */</span>
+
+<span class="w">        </span><span class="n">microuptime</span><span class="p">(</span><span class="o">&amp;</span><span class="n">jld_now_tstamp</span><span class="p">);</span>
+
+<span class="w">        </span><span class="cm">/*</span>
+<span class="cm">         * Ignore usecs in this calculation.</span>
+<span class="cm">         * msecs granularity is close enough.</span>
+<span class="cm">         */</span>
+<span class="w">        </span><span class="n">jld_now_msecs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">jld_now_tstamp</span><span class="p">.</span><span class="n">tv_sec</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1000</span><span class="p">);</span>
+
+<span class="w">        </span><span class="n">proc_list_lock</span><span class="p">();</span>
+<span class="w">        </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">jetsam_aging_policy</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">case</span><span class="w"> </span><span class="no">kJetsamAgingPolicyLegacy</span><span class="p">:</span>
+<span class="w">            </span><span class="n">bucket</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">memstat_bucket</span><span class="p">[</span><span class="n">JETSAM_PRIORITY_IDLE</span><span class="p">];</span>
+<span class="w">            </span><span class="n">jld_bucket_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">bucket</span><span class="o">-&gt;</span><span class="n">count</span><span class="p">;</span>
+<span class="w">            </span><span class="n">bucket</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">memstat_bucket</span><span class="p">[</span><span class="n">JETSAM_PRIORITY_AGING_BAND1</span><span class="p">];</span>
+<span class="w">            </span><span class="n">jld_bucket_count</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">bucket</span><span class="o">-&gt;</span><span class="n">count</span><span class="p">;</span>
+<span class="w">            </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span><span class="k">case</span><span class="w"> </span><span class="no">kJetsamAgingPolicySysProcsReclaimedFirst</span><span class="p">:</span>
+<span class="w">        </span><span class="k">case</span><span class="w"> </span><span class="no">kJetsamAgingPolicyAppsReclaimedFirst</span><span class="p">:</span>
+<span class="w">            </span><span class="n">bucket</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">memstat_bucket</span><span class="p">[</span><span class="n">JETSAM_PRIORITY_IDLE</span><span class="p">];</span>
+<span class="w">            </span><span class="n">jld_bucket_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">bucket</span><span class="o">-&gt;</span><span class="n">count</span><span class="p">;</span>
+<span class="w">            </span><span class="n">bucket</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">memstat_bucket</span><span class="p">[</span><span class="n">system_procs_aging_band</span><span class="p">];</span>
+<span class="w">            </span><span class="n">jld_bucket_count</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">bucket</span><span class="o">-&gt;</span><span class="n">count</span><span class="p">;</span>
+<span class="w">            </span><span class="n">bucket</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">memstat_bucket</span><span class="p">[</span><span class="n">applications_aging_band</span><span class="p">];</span>
+<span class="w">            </span><span class="n">jld_bucket_count</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">bucket</span><span class="o">-&gt;</span><span class="n">count</span><span class="p">;</span>
+<span class="w">            </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span><span class="k">case</span><span class="w"> </span><span class="no">kJetsamAgingPolicyNone</span><span class="p">:</span>
+<span class="w">        </span><span class="k">default</span><span class="o">:</span>
+<span class="w">            </span><span class="n">bucket</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">memstat_bucket</span><span class="p">[</span><span class="n">JETSAM_PRIORITY_IDLE</span><span class="p">];</span>
+<span class="w">            </span><span class="n">jld_bucket_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">bucket</span><span class="o">-&gt;</span><span class="n">count</span><span class="p">;</span>
+<span class="w">            </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">        </span><span class="n">bucket</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">memstat_bucket</span><span class="p">[</span><span class="n">JETSAM_PRIORITY_ELEVATED_INACTIVE</span><span class="p">];</span>
+<span class="w">        </span><span class="n">elevated_bucket_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">bucket</span><span class="o">-&gt;</span><span class="n">count</span><span class="p">;</span>
+
+<span class="w">        </span><span class="n">proc_list_unlock</span><span class="p">();</span>
+
+<span class="w">        </span><span class="cm">/*</span>
+<span class="cm">         * memorystatus_jld_eval_period_msecs is a tunable</span>
+<span class="cm">         * memorystatus_jld_eval_aggressive_count is a tunable</span>
+<span class="cm">         * memorystatus_jld_eval_aggressive_priority_band_max is a tunable</span>
+<span class="cm">         */</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="w"> </span><span class="p">(</span><span class="n">jld_bucket_count</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span>
+<span class="w">             </span><span class="p">(</span><span class="n">jld_now_msecs</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="p">(</span><span class="n">jld_timestamp_msecs</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">memorystatus_jld_eval_period_msecs</span><span class="p">)))</span><span class="w"> </span><span class="p">{</span>
+
+<span class="w">            </span><span class="cm">/* </span>
+<span class="cm">             * Refresh evaluation parameters </span>
+<span class="cm">             */</span>
+<span class="w">            </span><span class="n">jld_timestamp_msecs</span><span class="w">  </span><span class="o">=</span><span class="w"> </span><span class="n">jld_now_msecs</span><span class="p">;</span>
+<span class="w">            </span><span class="n">jld_idle_kill_candidates</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">jld_bucket_count</span><span class="p">;</span>
+<span class="w">            </span><span class="o">*</span><span class="n">jld_idle_kills</span><span class="w">      </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">            </span><span class="n">jld_eval_aggressive_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">            </span><span class="n">jld_priority_band_max</span><span class="w">   </span><span class="o">=</span><span class="w"> </span><span class="n">JETSAM_PRIORITY_UI_SUPPORT</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">jld_idle_kills</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">jld_idle_kill_candidates</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">jld_eval_aggressive_count</span><span class="o">++</span><span class="p">;</span>
+
+<span class="cp">#if DEVELOPMENT || DEBUG</span>
+<span class="w">            </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;memorystatus: aggressive%d: beginning of window: %lld ms, : timestamp now: %lld ms</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span>
+<span class="w">                    </span><span class="n">jld_eval_aggressive_count</span><span class="p">,</span>
+<span class="w">                    </span><span class="n">jld_timestamp_msecs</span><span class="p">,</span>
+<span class="w">                    </span><span class="n">jld_now_msecs</span><span class="p">);</span>
+<span class="w">            </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;memorystatus: aggressive%d: idle candidates: %d, idle kills: %d</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span>
+<span class="w">                    </span><span class="n">jld_eval_aggressive_count</span><span class="p">,</span>
+<span class="w">                    </span><span class="n">jld_idle_kill_candidates</span><span class="p">,</span>
+<span class="w">                    </span><span class="o">*</span><span class="n">jld_idle_kills</span><span class="p">);</span>
+<span class="cp">#endif </span><span class="cm">/* DEVELOPMENT || DEBUG */</span>
+
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">jld_eval_aggressive_count</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">memorystatus_jld_eval_aggressive_count</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">                </span><span class="p">(</span><span class="n">total_corpses_count</span><span class="p">()</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">corpse_list_purged</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">FALSE</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="cm">/*</span>
+<span class="cm">                 * If we reach this aggressive cycle, corpses might be causing memory pressure.</span>
+<span class="cm">                 * So, in an effort to avoid jetsams in the FG band, we will attempt to purge</span>
+<span class="cm">                 * corpse memory prior to this final march through JETSAM_PRIORITY_UI_SUPPORT.</span>
+<span class="cm">                 */</span>
+<span class="w">                </span><span class="n">task_purge_all_corpses</span><span class="p">();</span>
+<span class="w">                </span><span class="o">*</span><span class="n">corpse_list_purged</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">            </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">jld_eval_aggressive_count</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">memorystatus_jld_eval_aggressive_count</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="cm">/* </span>
+<span class="cm">                 * Bump up the jetsam priority limit (eg: the bucket index)</span>
+<span class="cm">                 * Enforce bucket index sanity.</span>
+<span class="cm">                 */</span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">memorystatus_jld_eval_aggressive_priority_band_max</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span>
+<span class="w">                    </span><span class="p">(</span><span class="n">memorystatus_jld_eval_aggressive_priority_band_max</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">MEMSTAT_BUCKET_COUNT</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                    </span><span class="cm">/*</span>
+<span class="cm">                     * Do nothing.  Stick with the default level.</span>
+<span class="cm">                     */</span>
+<span class="w">                </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                    </span><span class="n">jld_priority_band_max</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">memorystatus_jld_eval_aggressive_priority_band_max</span><span class="p">;</span>
+<span class="w">                </span><span class="p">}</span>
+<span class="w">            </span><span class="p">}</span>
+
+<span class="w">            </span><span class="cm">/* Visit elevated processes first */</span>
+<span class="w">            </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">elevated_bucket_count</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+
+<span class="w">                </span><span class="n">elevated_bucket_count</span><span class="o">--</span><span class="p">;</span>
+
+<span class="w">                </span><span class="cm">/*</span>
+<span class="cm">                 * memorystatus_kill_elevated_process() drops a reference,</span>
+<span class="cm">                 * so take another one so we can continue to use this exit reason</span>
+<span class="cm">                 * even after it returns.</span>
+<span class="cm">                 */</span>
+
+<span class="w">                </span><span class="n">os_reason_ref</span><span class="p">(</span><span class="n">jetsam_reason</span><span class="p">);</span>
+<span class="w">                </span><span class="n">killed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">memorystatus_kill_elevated_process</span><span class="p">(</span>
+<span class="w">                    </span><span class="n">cause</span><span class="p">,</span>
+<span class="w">                    </span><span class="n">jetsam_reason</span><span class="p">,</span>
+<span class="w">                    </span><span class="n">JETSAM_PRIORITY_ELEVATED_INACTIVE</span><span class="p">,</span>
+<span class="w">                    </span><span class="n">jld_eval_aggressive_count</span><span class="p">,</span>
+<span class="w">                    </span><span class="o">&amp;</span><span class="n">errors</span><span class="p">);</span>
+
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">killed</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                    </span><span class="o">*</span><span class="n">post_snapshot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">                    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_avail_pages_below_pressure</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                        </span><span class="cm">/*</span>
+<span class="cm">                         * Still under pressure.</span>
+<span class="cm">                         * Find another pinned processes.</span>
+<span class="cm">                         */</span>
+<span class="w">                        </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">                    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                        </span><span class="k">return</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">                    </span><span class="p">}</span>
+<span class="w">                </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                    </span><span class="cm">/*</span>
+<span class="cm">                     * No pinned processes left to kill.</span>
+<span class="cm">                     * Abandon elevated band.</span>
+<span class="cm">                     */</span>
+<span class="w">                    </span><span class="k">break</span><span class="p">;</span>
+<span class="w">                </span><span class="p">}</span>
+<span class="w">            </span><span class="p">}</span>
+
+<span class="w">            </span><span class="cm">/*</span>
+<span class="cm">             * memorystatus_kill_top_process_aggressive() allocates its own</span>
+<span class="cm">             * jetsam_reason so the kMemorystatusKilledProcThrashing cause</span>
+<span class="cm">             * is consistent throughout the aggressive march.</span>
+<span class="cm">             */</span>
+<span class="w">            </span><span class="n">killed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">memorystatus_kill_top_process_aggressive</span><span class="p">(</span>
+<span class="w">                </span><span class="n">kMemorystatusKilledProcThrashing</span><span class="p">,</span>
+<span class="w">                </span><span class="n">jld_eval_aggressive_count</span><span class="p">,</span><span class="w"> </span>
+<span class="w">                </span><span class="n">jld_priority_band_max</span><span class="p">,</span><span class="w"> </span>
+<span class="w">                </span><span class="o">&amp;</span><span class="n">errors</span><span class="p">);</span>
+
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">killed</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="cm">/* Always generate logs after aggressive kill */</span>
+<span class="w">                </span><span class="o">*</span><span class="n">post_snapshot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">                </span><span class="o">*</span><span class="n">jld_idle_kills</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">                </span><span class="k">return</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span><span class="w"> </span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">FALSE</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">FALSE</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>首先有一个<code>jld_bucket_count</code>,这里包含可以直接干掉的低优先级进程的数量。根据<code>jetsam_aging_policy</code>确定哪些优先级类型的进程需要被直接杀掉(正常情况下就是优先级极低的进程和一些正常情况下随时可回收的进程：<code>JETSAM_PRIORITY_IDLE</code>、<code>system_procs_aging_band</code>、<code>applications_aging_band</code>)。</p>
+<p>如果内存压力依然存在，则通过<code>memorystatus_kill_elevated_process</code>杀掉后台进程。每杀掉一个后台进程，通过<code>memorystatus_available_pages</code>检测一下内存压力。如果<code>memorystatus_available_pages</code>还是小于阈值，则继续杀掉下一个进程。</p>
+<p>如果杀掉了所有低优先级的进程，还有内存压力，再通过<code>memorystatus_kill_top_process_aggressive</code>杀掉优先级最低的进程。这里是触发FOOM的关键，如果当前前台进程已经是最低优先级的进程了，那就会发生FOOM。</p>
+<p><strong>LRU杀死top process</strong></p>
+<p>如果上面<code>memorystatus_act_aggressive</code>函数没有杀死任何进程，那么就需要通过LRU来杀死Jetsam队列中的第一个进程。</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/*</span>
+<span class="cm"> * memorystatus_kill_top_process() drops a reference,</span>
+<span class="cm"> * so take another one so we can continue to use this exit reason</span>
+<span class="cm"> * even after it returns</span>
+<span class="cm"> */</span>
+<span class="n">os_reason_ref</span><span class="p">(</span><span class="n">jetsam_reason</span><span class="p">);</span>
+
+<span class="cm">/* LRU */</span>
+<span class="n">killed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">memorystatus_kill_top_process</span><span class="p">(</span><span class="n">TRUE</span><span class="p">,</span><span class="w"> </span><span class="n">sort_flag</span><span class="p">,</span><span class="w"> </span><span class="n">cause</span><span class="p">,</span><span class="w"> </span><span class="n">jetsam_reason</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">priority</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">errors</span><span class="p">);</span>
+<span class="n">sort_flag</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FALSE</span><span class="p">;</span>
+
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">killed</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_post_snapshot</span><span class="p">(</span><span class="n">priority</span><span class="p">,</span><span class="w"> </span><span class="n">cause</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">TRUE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+
+<span class="w">            </span><span class="n">post_snapshot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="cm">/* Jetsam Loop Detection */</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_jld_enabled</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">TRUE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">priority</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">JETSAM_PRIORITY_IDLE</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">(</span><span class="n">priority</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">system_procs_aging_band</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">(</span><span class="n">priority</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">applications_aging_band</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">jld_idle_kills</span><span class="o">++</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="cm">/*</span>
+<span class="cm">             * We&#39;ve reached into bands beyond idle deferred.</span>
+<span class="cm">             * We make no attempt to monitor them</span>
+<span class="cm">             */</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">priority</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">JETSAM_PRIORITY_UI_SUPPORT</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">(</span><span class="n">total_corpses_count</span><span class="p">()</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">(</span><span class="n">corpse_list_purged</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">FALSE</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="cm">/*</span>
+<span class="cm">         * If we have jetsammed a process in or above JETSAM_PRIORITY_UI_SUPPORT</span>
+<span class="cm">         * then we attempt to relieve pressure by purging corpse memory.</span>
+<span class="cm">         */</span>
+<span class="w">        </span><span class="n">task_purge_all_corpses</span><span class="p">();</span>
+<span class="w">        </span><span class="n">corpse_list_purged</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">goto</span><span class="w"> </span><span class="n">done</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_avail_pages_below_critical</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="cm">/*</span>
+<span class="cm">     * Still under pressure and unable to kill a process - purge corpse memory</span>
+<span class="cm">     */</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">total_corpses_count</span><span class="p">()</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">task_purge_all_corpses</span><span class="p">();</span>
+<span class="w">        </span><span class="n">corpse_list_purged</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_avail_pages_below_critical</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="cm">/*</span>
+<span class="cm">         * Still under pressure and unable to kill a process - panic</span>
+<span class="cm">         */</span>
+<span class="w">        </span><span class="n">panic</span><span class="p">(</span><span class="s">&quot;memorystatus_jetsam_thread: no victim! available pages:%llu</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">uint64_t</span><span class="p">)</span><span class="n">memorystatus_available_pages</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>当所有流程执行完毕，则做一些收尾的工作。</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/*</span>
+<span class="cm">         * We do not want to over-kill when thrashing has been detected.</span>
+<span class="cm">         * To avoid that, we reset the flag here and notify the</span>
+<span class="cm">         * compressor.</span>
+<span class="cm">         */</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_reason_thrashing</span><span class="p">(</span><span class="n">kill_under_pressure_cause</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">kill_under_pressure_cause</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="cp">#if CONFIG_JETSAM</span>
+<span class="w">            </span><span class="n">vm_thrashing_jetsam_done</span><span class="p">();</span>
+<span class="cp">#endif </span><span class="cm">/* CONFIG_JETSAM */</span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_reason_zone_map_exhaustion</span><span class="p">(</span><span class="n">kill_under_pressure_cause</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">kill_under_pressure_cause</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">        </span><span class="n">os_reason_free</span><span class="p">(</span><span class="n">jetsam_reason</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="n">kill_under_pressure_cause</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">errors</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">memorystatus_clear_errors</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">post_snapshot</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">proc_list_lock</span><span class="p">();</span>
+<span class="w">        </span><span class="kt">size_t</span><span class="w"> </span><span class="n">snapshot_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">memorystatus_jetsam_snapshot_t</span><span class="p">)</span><span class="w"> </span><span class="o">+</span>
+<span class="w">            </span><span class="k">sizeof</span><span class="p">(</span><span class="n">memorystatus_jetsam_snapshot_entry_t</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_jetsam_snapshot_count</span><span class="p">);</span>
+<span class="w">        </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">timestamp_now</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">mach_absolute_time</span><span class="p">();</span>
+<span class="w">        </span><span class="n">memorystatus_jetsam_snapshot</span><span class="o">-&gt;</span><span class="n">notification_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">timestamp_now</span><span class="p">;</span>
+<span class="w">        </span><span class="n">memorystatus_jetsam_snapshot</span><span class="o">-&gt;</span><span class="n">js_gencount</span><span class="o">++</span><span class="p">;</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_jetsam_snapshot_count</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_jetsam_snapshot_last_timestamp</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">||</span>
+<span class="w">                </span><span class="n">timestamp_now</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">memorystatus_jetsam_snapshot_last_timestamp</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">memorystatus_jetsam_snapshot_timeout</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">proc_list_unlock</span><span class="p">();</span>
+<span class="w">            </span><span class="kt">int</span><span class="w"> </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">memorystatus_send_note</span><span class="p">(</span><span class="n">kMemorystatusSnapshotNote</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">snapshot_size</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">snapshot_size</span><span class="p">));</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">ret</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">proc_list_lock</span><span class="p">();</span>
+<span class="w">                </span><span class="n">memorystatus_jetsam_snapshot_last_timestamp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">timestamp_now</span><span class="p">;</span>
+<span class="w">                </span><span class="n">proc_list_unlock</span><span class="p">();</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">proc_list_unlock</span><span class="p">();</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="n">KERNEL_DEBUG_CONSTANT</span><span class="p">(</span><span class="n">BSDDBG_CODE</span><span class="p">(</span><span class="n">DBG_BSD_MEMSTAT</span><span class="p">,</span><span class="w"> </span><span class="n">BSD_MEMSTAT_SCAN</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">DBG_FUNC_END</span><span class="p">,</span>
+<span class="w">        </span><span class="n">memorystatus_available_pages</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">memorystatus_thread_block</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">memorystatus_thread</span><span class="p">);</span>
+</code></pre></div>
+<p>当检测到颠簸时，系统并不想过度杀戮。为避免这种情况，系统在此处重置标志并通知compressor。如果需要记录当前内存快照，记录后挂起当前线程，等待之后遇到OOM时再次唤醒。</p>
+<p><strong>如何触发OOM检测</strong></p>
+<p>当<code>memorystatus_thread</code>初始化后，会立刻检测一次OOM。</p>
+<p>在<code>task.c</code>中，当物理内存达到限制时，触发回调，会调用<code>memorystatus_on_ledger_footprint_exceeded</code>，来同步触发<code>per-process-limit</code>类型的OOM。</p>
+<p>与上一个类似的，如：<code>memorystatus_kill_on_vnode_limit</code>也是同步触发的。也就是最终调用了<code>memorystatus_kill_process_sync</code>方法，直接杀死对应的进程，如果pid为-1则杀死队列头部的进程。</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="n">boolean_t</span><span class="w"> </span>
+<span class="nf">memorystatus_kill_process_sync</span><span class="p">(</span><span class="kt">pid_t</span><span class="w"> </span><span class="n">victim_pid</span><span class="p">,</span><span class="w"> </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">cause</span><span class="p">,</span><span class="w"> </span><span class="n">os_reason_t</span><span class="w"> </span><span class="n">jetsam_reason</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">boolean_t</span><span class="w"> </span><span class="n">res</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">errors</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">victim_pid</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="cm">/* No pid, so kill first process */</span>
+<span class="w">        </span><span class="n">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">memorystatus_kill_top_process</span><span class="p">(</span><span class="n">TRUE</span><span class="p">,</span><span class="w"> </span><span class="n">TRUE</span><span class="p">,</span><span class="w"> </span><span class="n">cause</span><span class="p">,</span><span class="w"> </span><span class="n">jetsam_reason</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">errors</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">memorystatus_kill_specific_process</span><span class="p">(</span><span class="n">victim_pid</span><span class="p">,</span><span class="w"> </span><span class="n">cause</span><span class="p">,</span><span class="w"> </span><span class="n">jetsam_reason</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">errors</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">memorystatus_clear_errors</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">res</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">TRUE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="cm">/* Fire off snapshot notification */</span>
+<span class="w">        </span><span class="n">proc_list_lock</span><span class="p">();</span>
+<span class="w">        </span><span class="kt">size_t</span><span class="w"> </span><span class="n">snapshot_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">memorystatus_jetsam_snapshot_t</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span>
+<span class="w">            </span><span class="k">sizeof</span><span class="p">(</span><span class="n">memorystatus_jetsam_snapshot_entry_t</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">memorystatus_jetsam_snapshot_count</span><span class="p">;</span>
+<span class="w">        </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">timestamp_now</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">mach_absolute_time</span><span class="p">();</span>
+<span class="w">        </span><span class="n">memorystatus_jetsam_snapshot</span><span class="o">-&gt;</span><span class="n">notification_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">timestamp_now</span><span class="p">;</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_jetsam_snapshot_count</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">(</span><span class="n">memorystatus_jetsam_snapshot_last_timestamp</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">||</span>
+<span class="w">                </span><span class="n">timestamp_now</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">memorystatus_jetsam_snapshot_last_timestamp</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">memorystatus_jetsam_snapshot_timeout</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">proc_list_unlock</span><span class="p">();</span>
+<span class="w">            </span><span class="kt">int</span><span class="w"> </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">memorystatus_send_note</span><span class="p">(</span><span class="n">kMemorystatusSnapshotNote</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">snapshot_size</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">snapshot_size</span><span class="p">));</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">ret</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">proc_list_lock</span><span class="p">();</span>
+<span class="w">                </span><span class="n">memorystatus_jetsam_snapshot_last_timestamp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">timestamp_now</span><span class="p">;</span>
+<span class="w">                </span><span class="n">proc_list_unlock</span><span class="p">();</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">proc_list_unlock</span><span class="p">();</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">res</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>而<code>memorystatus_kill_on_VM_compressor_space_shortage</code>、<code>memorystatus_kill_on_VM_compressor_thrashing</code>、<code>memorystatus_kill_on_FC_thrashing</code>都是异步触发的，也就是说他们调用的是<code>memorystatus_kill_process_sync</code>方法。</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="n">boolean_t</span><span class="w"> </span>
+<span class="nf">memorystatus_kill_process_async</span><span class="p">(</span><span class="kt">pid_t</span><span class="w"> </span><span class="n">victim_pid</span><span class="p">,</span><span class="w"> </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">cause</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="cm">/*</span>
+<span class="cm">     * TODO: allow a general async path</span>
+<span class="cm">     *</span>
+<span class="cm">     * NOTE: If a new async kill cause is added, make sure to update memorystatus_thread() to</span>
+<span class="cm">     * add the appropriate exit reason code mapping.</span>
+<span class="cm">     */</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">victim_pid</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="o">||</span>
+<span class="w">            </span><span class="p">(</span><span class="n">cause</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">kMemorystatusKilledVMPageShortage</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">            </span><span class="n">cause</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">kMemorystatusKilledVMCompressorThrashing</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">            </span><span class="n">cause</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">kMemorystatusKilledVMCompressorSpaceShortage</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">            </span><span class="n">cause</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">kMemorystatusKilledFCThrashing</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">            </span><span class="n">cause</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">kMemorystatusKilledZoneMapExhaustion</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">FALSE</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">kill_under_pressure_cause</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cause</span><span class="p">;</span>
+<span class="w">    </span><span class="n">memorystatus_thread_wake</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>也就是最终唤醒了<code>memorystatus_thread</code>，来执行刚刚咱们查看源码的那套流程。</p>
+<p><code>memorystatus_kill_on_zone_map_exhaustion(pid_t pid)</code>中，如果pid为-1，则调用异步方法；否则调用同步方法。</p>
+<p>梳理源码逻辑流程</p>
+<ol>
+<li>JetSam线程初始化完毕，从外部接收到内存压力</li>
+<li>如果接收到的内存压力是当前物理内存达到限制时，同步触发<code>per-process-limit</code>类型的OOM，退出流程</li>
+<li>如果接受到的内存压力是其他类型时，则唤醒JetSam线程，判断<code>kill_under_pressure_cause</code>值为<code>kMemorystatusKilledVMThrashing</code>，<code>kMemorystatusKilledFCThrashing</code>，<code>kMemorystatusKilledZoneMapExhaustion</code>时，或者当前可用内存<code>memorystatus_available_pages</code>小于阈值<code>memorystatus_available_pages_pressure</code>时，进入OOM逻辑。</li>
+<li>遍历优先级最低的每个进程，根据<code>phys_footprint</code>，判断当前进程是否高于阈值，如果没有超过阈值的，则据需查找下一个次低优先级的进程，直到找到后，触发<code>high-water</code>类型OOM</li>
+<li>此时先回一个收优先级较低的进程或正常情况下随时可回收的进程，再次走到<code>4</code>的判断逻辑</li>
+<li>当所有低优先级进程或正常情况下课随时回收的进程都被杀掉后，如果<code>memorystatus_available_pages</code>依然小于阈值，先杀掉后台的进程，每杀掉一个进程，判断一下<code>memorystatus_available_pages</code>是否还小于阈值，如果已经小于阈值了，则挂起线程，等待唤醒</li>
+<li>当所有后台进程都被杀掉后，调用<code>memorystatus_kill_top_process_aggressive</code>，杀掉前台的进程，挂起线程，等待唤醒</li>
+<li>如果上面的<code>memorystatus_kill_top_process_aggressive</code>没有杀掉任何进程，就通过LRU杀死Jetsam队列中的第一个进程，挂起线程，等待唤醒</li>
+</ol>
+<h3>如何判定发生了OOM</h3>
+<p>facebook和微信的Matrix都是采用的排除法。在Matrix初始化的时候调用<code>checkRebootType</code>方法，来判定是否发生了OOM，具体流程如下：</p>
+<ol>
+<li>如果当前设备正在DEBUG，则直接返回，不继续执行。</li>
+<li>上次打开app是否发生了普通的崩溃，如果不是继续执行</li>
+<li>上次打开app后，是用户是否主动退出的应用（监听<code>UIApplicationWillTerminateNotification</code>消息），如果不是继续执行</li>
+<li>上次打开app后，是否调用<code>exit</code>相关的函数（通过<code>atexit</code>函数监控），如果不是继续执行</li>
+<li>上次打开app后，app是否挂起<code>suspend</code>或者执行<code>backgroundFetch</code>，如果此时没有被看门狗杀死，则是一种OOM，Matrix起名叫<code>Suspend OOM</code>，如果不是继续执行</li>
+<li>app的uuid是否变化了，如果不是继续执行</li>
+<li>上次打开app后，系统是否升级了，如果不是继续执行</li>
+<li>上次打开app后，设备是否重启了，如果不是继续执行</li>
+<li>上次打开app时，app是否处于后台，如果是，则触发了<code>Background OOM</code>，如果不是继续执行</li>
+<li>上次打开app后，app是否处于前台，是否主线程卡死了，如果没有卡死，则说明触发了<code>Foreground OOM</code>。</li>
+</ol>
+<p>我们平时谈论的OOM，其实大部分都是FOOM。因为如果我们的程序在后台，优先级很低，即便我们不占用大量的内存，也可能会由于前台应用程序占用了大量的内存，而把我们在后台的程序杀掉。这是系统的机制，我们没有太多的办法。</p>
+<p>所以<strong>主要关注FOOM</strong>。而针对于FOOM，我们需要着重关注<code>dirty pages</code>和<code>IOKit mappings</code>，当然注意系统做的缓存，例如图片、字体等。针对于OOM问题监控与解决，可以参考Matrix和OOMDetector两个开源库。目前针对OOM的监控也处于探索阶段，日后如果在监控及处理OOM上有了一些经验后，也会主动分享给大家。</p>
+<h3>参考资料</h3>
+<p>OOM探究：XNU 内存状态管理</p>
+<ul>
+<li><a href="http://www.cocoachina.com/index.php/articles/485753">你真的了解OOM吗？——京东iOS APP内存优化实录</a></li>
+<li>（译）Handling low memory conditions in iOS and Mavericks</li>
+<li><a href="https://juejin.im/post/5c28646f5188257abf1d947d">iOS Out-Of-Memory 原理阐述及方案调研</a></li>
+<li>iOS微信内存监控</li>
+</ul>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "深入了解iOS中的OOM(低内存崩溃).md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

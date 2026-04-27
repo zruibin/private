@@ -1,0 +1,1227 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>UE反射系统实现解析 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="UE反射系统实现解析,Game,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="UE反射系统实现解析" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>UE反射系统实现解析</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2024-12-30 14:58
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_game.html' class='article_tag'>Game</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://km.woa.com/articles/show/587531' target='blank'>UE反射系统实现解析</a></p></h4>
+<blockquote><p>丨 导语 反射系统作为游戏引擎的基础能力，在游戏开发中扮演着至关重要的角色，它能够支持运行时获取对象的类型信息，以及动态调用对象的属性和方法。本文中，我们将详细解析UE反射系统的代码实现，帮助大家更有效地了解UE的反射机制。</p>
+</blockquote>
+<h2>1.概念介绍</h2>
+<p>1982 年 MIT 的 Smith, Brian Cantwell 在他的博士论文中最早提出了程序反射的概念：</p>
+<p>既然我们可以构造“有关某个外部世界表示”的计算过程, 并通过它来对那个外部世界进行推理; 那么我们也可以构造能够对自身表示和计算进行推理的计算过程,它包含负责管理有关自身的操作和结构表示的内部过程。</p>
+<p>编程语言中的反射是指在运行时检查、访问和修改程序的结构、状态和行为的能力。</p>
+<p>它允许程序在运行时动态地获取和操作类型、对象、方法和属性等信息，而不需要在编译时提前知道这些信息。</p>
+<p>一般情况下，针对面向对象语言，反射系统需要提供的基础能力大致包含：</p>
+<ol>
+<li><p>创建实例</p>
+<ol>
+<li>根据类名，创建类对象实例</li>
+</ol>
+</li>
+<li><p>访问成员变量</p>
+<ol>
+<li><p>根据类名，访问所有成员变量的meta数据：名字、类型等</p>
+</li>
+<li><p>根据类名与成员名字，访问/修改某类对象的成员变量数据</p>
+</li>
+</ol>
+</li>
+<li><p>调用成员函数</p>
+<ol>
+<li>根据类名，访问所有成员函数的meta数据：名字、参数信息，返回值信息等</li>
+<li>根据类名与函数名字，调用某类对象的成员函数</li>
+</ol>
+</li>
+</ol>
+<h2>2.piccolo反射系统实现</h2>
+<p>在真正介绍UE反射实现前，我们先解析另外一款游戏引擎（piccolo）的反射系统实现，既为开拓视野，更旨在建立一个最简单通透的反射系统实现认知。</p>
+<h3>2.1.piccolo引擎介绍</h3>
+<p>piccolo引擎是一款开源mini版游戏引擎，专为【<a href="https://games104.boomingtech.com/sc/">GAMES104(现代游戏引擎入门必修课)</a>】课程打造。该引擎的实现宗旨为：提取最简单精炼的思路，实现现代游戏引擎的各类基础功能。</p>
+<h3>2.1.piccolo反射系统实现概览</h3>
+<p>简单了解下piccolo反射系统的总体实现：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20241230-1458-0.png" alt=""></p>
+<p>通过上图可以看出：</p>
+<ol>
+<li>piccolo反射实现多用组合关系，基本不使用派生关系，整体实现清晰有序。</li>
+<li>piccolo反射实现中有着明显的四层结构划分，分别为：<ol>
+<li>Instance Wrapper层：对于类对象的访问包装，不用过多关注。</li>
+<li>Type Meta层：为class结构定义的Meta数据结构，内部包含了class结构中所有fields与methods的accessor。</li>
+<li>Accessor层：为class、array、field、mothod定义的操作处理器数据结构。</li>
+<li>Function Container层：全局容器，用于存储class、array、field、mothod的操作处理器对象。</li>
+</ol>
+</li>
+</ol>
+<p>上图四层结构中，最核心部分是Accessor层，先对其进行详细介绍。</p>
+<h3>2.2.Accessor层</h3>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20241230-1458-1.png" alt=""></p>
+<p>该层中最关键的部分是**FunctionTuple定义：</p>
+<h4>2.2.1.ClassFunctionTuple</h4>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20241230-1458-2.png" alt=""></p>
+<p>为Class提供能力：</p>
+<ol>
+<li><p>解析class的派生关系</p>
+</li>
+<li><p>对类对象执行序列化与反序列化</p>
+</li>
+</ol>
+<h4>2.2.2.ArrayFunctionTuple</h4>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20241230-1458-3.png" alt=""></p>
+<p>为Array提供能力：</p>
+<ol>
+<li><p>Get/Set Array元素内存数据</p>
+</li>
+<li><p>获取Array Size</p>
+</li>
+<li><p>获取Array的Meta数据：数组类型名、数组元素的类型名</p>
+<ol>
+<li><p>示例std::vector<int></p>
+</li>
+<li><p>数组类型名：std::vector<int></p>
+</li>
+<li><p>数组元素的类型名：int</p>
+</li>
+</ol>
+</li>
+</ol>
+<p>注：可以将Array看做一种特殊的Class，std::vector<int>相当于类名。</p>
+<h4>2.2.3.FieldFunctionTuple</h4>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20241230-1458-4.png" alt=""></p>
+<p>为Field提供能力：</p>
+<ol>
+<li><p>Get/Set Field的内存数据</p>
+</li>
+<li><p>获取Field的Meta数据：名字、类型、是否是数组、所在Class的名字</p>
+</li>
+</ol>
+<h4>2.2.4.MethodFunctionTuple</h4>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20241230-1458-5.png" alt=""></p>
+<p>为Method提供能力：</p>
+<ol>
+<li>Method调用</li>
+</ol>
+<p>注：piccolo拥有一定的demo性质，只支持无传参无返回的方法反射。</p>
+<h4>2.2.5.示例</h4>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">XibaTest</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">public</span><span class="o">:</span>
+<span class="w">        </span><span class="kt">void</span><span class="w"> </span><span class="n">test</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="n">m_int</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;}</span>
+<span class="w">    </span><span class="k">public</span><span class="o">:</span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">m_int</span><span class="p">;</span>
+<span class="w">        </span><span class="kt">float</span><span class="w"> </span><span class="n">m_float</span><span class="p">;</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">m_int_array</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>对上述class创建反射数据，需要生成如下对象：</p>
+<ol>
+<li><p>一个ClassFunctionTuple对象，内部包含XibaTest的基类获取接口、序列化与反序列化接口</p>
+</li>
+<li><p>一个ArrayFunctionTuple对象，内部包含std::vector<int>类型数组的元素访问接口</p>
+</li>
+<li><p>三个FieldFunctionTuple对象</p>
+<p>a. FieldFunctionTuple对象for <code>XibaTest::m_int</code>，内部包含<code>m_int</code>成员访问接口</p>
+<p>b. FieldFunctionTuple对象for <code>XibaTest::m_float</code>，内部包含<code>m_float</code>成员访问接口</p>
+<p>c. FieldFunctionTuple对象for <code>XibaTest::m_int_array</code>，内部包含<code>m_int_array</code>成员访问接口</p>
+</li>
+<li><p>一个MethodFunctionTuple对象，内部包含XibaTest::test()的invoke接口</p>
+</li>
+</ol>
+<p>通过上述的FunctionTuple对象，传入对象指针后，便能够实现对象成员的访问与对象函数的调用。</p>
+<p>但此时还缺少对FunctionTuple对象的组织与管理，即如何通过<code>class_name</code>获取到为对应class创建的FunctionTuple对象集合。</p>
+<p>此时便需要用到Function Container层提供的数据管理功能。</p>
+<h3>2.3.Function Container层</h3>
+<p>该层通过创建全局容器，用于维护所有FunctionTuple对象：</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">map</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="p">,</span><span class="w"> </span><span class="n">ClassFunctionTuple</span><span class="o">*&gt;</span><span class="w">       </span><span class="n">m_class_map</span><span class="p">;</span><span class="w">  </span><span class="c1">// key:class_name</span>
+<span class="k">static</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">multimap</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="p">,</span><span class="w"> </span><span class="n">FieldFunctionTuple</span><span class="o">*&gt;</span><span class="w">  </span><span class="n">m_field_map</span><span class="p">;</span><span class="w">  </span><span class="c1">// key:class_name</span>
+<span class="k">static</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">multimap</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="p">,</span><span class="w"> </span><span class="n">MethodFunctionTuple</span><span class="o">*&gt;</span><span class="w"> </span><span class="n">m_method_map</span><span class="p">;</span><span class="w"> </span><span class="c1">// key:class_name</span>
+<span class="k">static</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">map</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="p">,</span><span class="w"> </span><span class="n">ArrayFunctionTuple</span><span class="o">*&gt;</span><span class="w">       </span><span class="n">m_array_map</span><span class="p">;</span><span class="w">  </span><span class="c1">// key:数组类型名</span>
+</code></pre></div>
+<p>可以看出，<code>m_class_map</code>、<code>m_field_map</code>、<code>m_method_map</code>都以<code>class_name</code>作为key。</p>
+<p>于是已知<code>class_name</code>后，便能够获取为该class创建的FunctionTuple集合，也即支持了通过<code>class_name</code>生成该class的Meta数据（也即TypeMeta）。</p>
+<h3>2.4.Type Meta层</h3>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20241230-1458-6.png" alt=""></p>
+<p>通过TypeMeta对象，便实现了反射所需的基础能力：</p>
+<ol>
+<li><p>创建实例</p>
+</li>
+<li><p>访问成员变量</p>
+</li>
+<li><p>调用成员函数</p>
+</li>
+</ol>
+<h3>2.5.反射信息生成示例</h3>
+<p>现在我们通过实例来查看具体的FunctionTuple创建与注册流程。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// class示例：XibaTest 内部所有fields与methods都需要创建functionTuple</span>
+<span class="n">CLASS</span><span class="p">(</span><span class="n">XibaTest</span><span class="p">,</span><span class="w"> </span><span class="n">Methods</span><span class="p">,</span><span class="w"> </span><span class="n">Fields</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">REFLECTION_BODY</span><span class="p">(</span><span class="n">XibaTest</span><span class="p">);</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="n">test</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="n">m_int</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;}</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">m_int</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">float</span><span class="w"> </span><span class="n">m_float</span><span class="p">;</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">m_int_array</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>piccolo专门实现了<code>meta_parse</code>工具，用于自动生成反射信息创建&amp;注册逻辑。</p>
+<p>创建专属Operator类（以下代码全部由<code>meta_parse</code>工具自动生成）：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 为XibaTest创建专属Operator类，内部定义的接口全部为static</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">TypeXibaTestOperator</span><span class="p">{</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">getClassName</span><span class="p">(){</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="s">&quot;XibaTest&quot;</span><span class="p">;}</span>
+
+<span class="w">  </span><span class="c1">// 实现序列化与反序列化</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">constructorWithJson</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">Json</span><span class="o">&amp;</span><span class="w"> </span><span class="n">json_context</span><span class="p">){</span>
+<span class="w">      </span><span class="n">XibaTest</span><span class="o">*</span><span class="w"> </span><span class="n">ret_instance</span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">XibaTest</span><span class="p">;</span>
+<span class="w">      </span><span class="n">Serializer</span><span class="o">::</span><span class="n">read</span><span class="p">(</span><span class="n">json_context</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">ret_instance</span><span class="p">);</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">ret_instance</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="n">Json</span><span class="w"> </span><span class="n">writeByName</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">instance</span><span class="p">){</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">Serializer</span><span class="o">::</span><span class="n">write</span><span class="p">(</span><span class="o">*</span><span class="p">(</span><span class="n">XibaTest</span><span class="o">*</span><span class="p">)</span><span class="n">instance</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 获取基类数组</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">getXibaTestBaseClassReflectionInstanceList</span><span class="p">(</span><span class="n">ReflectionInstance</span><span class="o">*</span><span class="w"> </span><span class="o">&amp;</span><span class="n">out_list</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">instance</span><span class="p">){</span>
+<span class="w">      </span><span class="kt">int</span><span class="w"> </span><span class="n">count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">count</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// op function for field：m_int</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">getFieldName_m_int</span><span class="p">(){</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="s">&quot;m_int&quot;</span><span class="p">;}</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">getFieldTypeName_m_int</span><span class="p">(){</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="s">&quot;int&quot;</span><span class="p">;}</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">set_m_int</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">instance</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">field_value</span><span class="p">){</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">XibaTest</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">instance</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">m_int</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">field_value</span><span class="p">);}</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">get_m_int</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">instance</span><span class="p">){</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">void</span><span class="o">*&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="p">(</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">XibaTest</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">instance</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">m_int</span><span class="p">));}</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">isArray_m_int</span><span class="p">(){</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// op function for field：m_float</span>
+<span class="w">  </span><span class="err">……</span>
+<span class="w">  </span><span class="c1">// op function for field：m_int_array</span>
+<span class="w">  </span><span class="err">……</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">isArray_m_int_array</span><span class="p">(){</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// op function for method：test</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">getMethodName_test</span><span class="p">(){</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="s">&quot;test&quot;</span><span class="p">;}</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">invoke_test</span><span class="p">(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">instance</span><span class="p">){</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">XibaTest</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">instance</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">test</span><span class="p">();}</span>
+<span class="p">};</span>
+
+<span class="cp">#ifndef ArraystdSSvectorLintROperatorMACRO</span>
+<span class="cp">#define ArraystdSSvectorLintROperatorMACRO</span>
+<span class="w">  </span><span class="c1">// 为std::vector&lt;int&gt;创建专属Operator类，内部定义的接口全部为static</span>
+<span class="w">  </span><span class="k">class</span><span class="w"> </span><span class="nc">ArraystdSSvectorLintROperator</span><span class="p">{</span>
+<span class="w">      </span><span class="k">public</span><span class="o">:</span>
+<span class="w">          </span><span class="k">static</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">getArrayTypeName</span><span class="p">(){</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="s">&quot;std::vector&lt;int&gt;&quot;</span><span class="p">;}</span>
+<span class="w">          </span><span class="k">static</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">getElementTypeName</span><span class="p">(){</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="s">&quot;int&quot;</span><span class="p">;}</span>
+<span class="w">          </span><span class="k">static</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">getSize</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">instance</span><span class="p">){</span>
+<span class="w">              </span><span class="c1">//todo: should check validation</span>
+<span class="w">              </span><span class="k">return</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;*&gt;</span><span class="p">(</span><span class="n">instance</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">size</span><span class="p">());</span>
+<span class="w">          </span><span class="p">}</span>
+<span class="w">          </span><span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">get</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">index</span><span class="p">,</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">instance</span><span class="p">){</span>
+<span class="w">              </span><span class="c1">//todo: should check validation</span>
+<span class="w">              </span><span class="k">return</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">void</span><span class="o">*&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="p">((</span><span class="o">*</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;*&gt;</span><span class="p">(</span><span class="n">instance</span><span class="p">))[</span><span class="n">index</span><span class="p">]));</span>
+<span class="w">          </span><span class="p">}</span>
+<span class="w">          </span><span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">set</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">index</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">instance</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">element_value</span><span class="p">){</span>
+<span class="w">              </span><span class="c1">//todo: should check validation</span>
+<span class="w">              </span><span class="p">(</span><span class="o">*</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;*&gt;</span><span class="p">(</span><span class="n">instance</span><span class="p">))[</span><span class="n">index</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">element_value</span><span class="p">);</span>
+<span class="w">          </span><span class="p">}</span>
+<span class="w">  </span><span class="p">};</span>
+<span class="cp">#endif </span><span class="c1">//ArraystdSSvectorLintROperator</span>
+</code></pre></div>
+<p>FunctionTuple的生成与注册（以下代码全部由<code>meta_parse</code>工具自动生成）：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">TypeWrapperRegister_XibaTest</span><span class="p">(){</span>
+<span class="w">  </span><span class="c1">// 创建FieldFunctionTuple for field：m_int</span>
+<span class="w">  </span><span class="n">FieldFunctionTuple</span><span class="o">*</span><span class="w"> </span><span class="n">field_function_tuple_m_int</span><span class="o">=</span><span class="k">new</span><span class="w"> </span><span class="n">FieldFunctionTuple</span><span class="p">(</span>
+<span class="w">      </span><span class="o">&amp;</span><span class="n">TypeFieldReflectionOparator</span><span class="o">::</span><span class="n">TypeXibaTestOperator</span><span class="o">::</span><span class="n">set_m_int</span><span class="p">,</span>
+<span class="w">      </span><span class="o">&amp;</span><span class="n">TypeFieldReflectionOparator</span><span class="o">::</span><span class="n">TypeXibaTestOperator</span><span class="o">::</span><span class="n">get_m_int</span><span class="p">,</span>
+<span class="w">      </span><span class="o">&amp;</span><span class="n">TypeFieldReflectionOparator</span><span class="o">::</span><span class="n">TypeXibaTestOperator</span><span class="o">::</span><span class="n">getClassName</span><span class="p">,</span>
+<span class="w">      </span><span class="o">&amp;</span><span class="n">TypeFieldReflectionOparator</span><span class="o">::</span><span class="n">TypeXibaTestOperator</span><span class="o">::</span><span class="n">getFieldName_m_int</span><span class="p">,</span>
+<span class="w">      </span><span class="o">&amp;</span><span class="n">TypeFieldReflectionOparator</span><span class="o">::</span><span class="n">TypeXibaTestOperator</span><span class="o">::</span><span class="n">getFieldTypeName_m_int</span><span class="p">,</span>
+<span class="w">      </span><span class="o">&amp;</span><span class="n">TypeFieldReflectionOparator</span><span class="o">::</span><span class="n">TypeXibaTestOperator</span><span class="o">::</span><span class="n">isArray_m_int</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 将刚创建的FieldFunctionTuple对象注册进入全局field容器</span>
+<span class="w">  </span><span class="n">REGISTER_FIELD_TO_MAP</span><span class="p">(</span><span class="s">&quot;XibaTest&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">field_function_tuple_m_int</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 创建FieldFunctionTuple for field：m_float</span>
+<span class="w">  </span><span class="c1">// 将刚创建的FieldFunctionTuple对象注册进入全局field容器</span>
+<span class="w">  </span><span class="err">……</span>
+<span class="w">  </span><span class="c1">// 创建FieldFunctionTuple for field：m_int_array</span>
+<span class="w">  </span><span class="c1">// 将刚创建的FieldFunctionTuple对象注册进入全局field容器</span>
+<span class="w">  </span><span class="err">……</span>
+<span class="w">  </span><span class="c1">// 创建MethodFunctionTuple for method：test</span>
+<span class="w">  </span><span class="n">MethodFunctionTuple</span><span class="o">*</span><span class="w"> </span><span class="n">method_function_tuple_test</span><span class="o">=</span><span class="k">new</span><span class="w"> </span><span class="n">MethodFunctionTuple</span><span class="p">(</span>
+<span class="w">      </span><span class="o">&amp;</span><span class="n">TypeFieldReflectionOparator</span><span class="o">::</span><span class="n">TypeXibaTestOperator</span><span class="o">::</span><span class="n">getMethodName_test</span><span class="p">,</span>
+<span class="w">      </span><span class="o">&amp;</span><span class="n">TypeFieldReflectionOparator</span><span class="o">::</span><span class="n">TypeXibaTestOperator</span><span class="o">::</span><span class="n">invoke_test</span><span class="p">);</span>
+<span class="w"> </span><span class="c1">// 将刚创建的FieldFunctionTuple对象注册进入全局method容器</span>
+<span class="w">  </span><span class="n">REGISTER_Method_TO_MAP</span><span class="p">(</span><span class="s">&quot;XibaTest&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">method_function_tuple_test</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 创建ArrayFunctionTuple for array：std::vector&lt;int&gt;</span>
+<span class="w">  </span><span class="n">ArrayFunctionTuple</span><span class="o">*</span><span class="w"> </span><span class="n">array_tuple_stdSSvectorLintR</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w">  </span><span class="n">ArrayFunctionTuple</span><span class="p">(</span>
+<span class="w">      </span><span class="o">&amp;</span><span class="n">ArrayReflectionOperator</span><span class="o">::</span><span class="n">ArraystdSSvectorLintROperator</span><span class="o">::</span><span class="n">set</span><span class="p">,</span>
+<span class="w">      </span><span class="o">&amp;</span><span class="n">ArrayReflectionOperator</span><span class="o">::</span><span class="n">ArraystdSSvectorLintROperator</span><span class="o">::</span><span class="n">get</span><span class="p">,</span>
+<span class="w">      </span><span class="o">&amp;</span><span class="n">ArrayReflectionOperator</span><span class="o">::</span><span class="n">ArraystdSSvectorLintROperator</span><span class="o">::</span><span class="n">getSize</span><span class="p">,</span>
+<span class="w">      </span><span class="o">&amp;</span><span class="n">ArrayReflectionOperator</span><span class="o">::</span><span class="n">ArraystdSSvectorLintROperator</span><span class="o">::</span><span class="n">getArrayTypeName</span><span class="p">,</span>
+<span class="w">      </span><span class="o">&amp;</span><span class="n">ArrayReflectionOperator</span><span class="o">::</span><span class="n">ArraystdSSvectorLintROperator</span><span class="o">::</span><span class="n">getElementTypeName</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 将刚创建的ArrayFunctionTuple对象注册进入全局array容器</span>
+<span class="w">  </span><span class="n">REGISTER_ARRAY_TO_MAP</span><span class="p">(</span><span class="s">&quot;std::vector&lt;int&gt;&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">array_tuple_stdSSvectorLintR</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 创建ClassFunctionTuple for class：XibaTest</span>
+<span class="w">  </span><span class="n">ClassFunctionTuple</span><span class="o">*</span><span class="w"> </span><span class="n">class_function_tuple_XibaTest</span><span class="o">=</span><span class="k">new</span><span class="w"> </span><span class="n">ClassFunctionTuple</span><span class="p">(</span>
+<span class="w">      </span><span class="o">&amp;</span><span class="n">TypeFieldReflectionOparator</span><span class="o">::</span><span class="n">TypeXibaTestOperator</span><span class="o">::</span><span class="n">getXibaTestBaseClassReflectionInstanceList</span><span class="p">,</span>
+<span class="w">      </span><span class="o">&amp;</span><span class="n">TypeFieldReflectionOparator</span><span class="o">::</span><span class="n">TypeXibaTestOperator</span><span class="o">::</span><span class="n">constructorWithJson</span><span class="p">,</span>
+<span class="w">      </span><span class="o">&amp;</span><span class="n">TypeFieldReflectionOparator</span><span class="o">::</span><span class="n">TypeXibaTestOperator</span><span class="o">::</span><span class="n">writeByName</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 将刚创建的ClassFunctionTuple对象注册进入全局class容器</span>
+<span class="w">  </span><span class="n">REGISTER_BASE_CLASS_TO_MAP</span><span class="p">(</span><span class="s">&quot;XibaTest&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">class_function_tuple_XibaTest</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>2.6.反射系统使用示例</h3>
+<div class="highlight"><pre><code><span></span><span class="k">auto</span><span class="w">  </span><span class="n">meta</span><span class="w">           </span><span class="o">=</span><span class="w"> </span><span class="n">Reflection</span><span class="o">::</span><span class="n">TypeMeta</span><span class="o">::</span><span class="n">newMetaFromName</span><span class="p">(</span><span class="s">&quot;XibaTest&quot;</span><span class="p">);</span>
+<span class="w">  </span><span class="n">Reflection</span><span class="o">::</span><span class="n">FieldAccessor</span><span class="o">*</span><span class="w"> </span><span class="n">fields</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">int</span><span class="w">                        </span><span class="n">fields_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">meta</span><span class="p">.</span><span class="n">getFieldsList</span><span class="p">(</span><span class="n">fields</span><span class="p">);</span>
+<span class="w">  </span><span class="k">for</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">fields_count</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">      </span><span class="n">LOG_INFO</span><span class="p">(</span><span class="s">&quot;field_name:{} field_type:{}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">fields</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">getFieldName</span><span class="p">(),</span><span class="w"> </span><span class="n">fields</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">getFieldTypeName</span><span class="p">());</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">delete</span><span class="p">[]</span><span class="w"> </span><span class="n">fields</span><span class="p">;</span>
+
+<span class="w">  </span><span class="n">Reflection</span><span class="o">::</span><span class="n">MethodAccessor</span><span class="o">*</span><span class="w"> </span><span class="n">methods</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w">                      </span><span class="n">method_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">meta</span><span class="p">.</span><span class="n">getMethodsList</span><span class="p">(</span><span class="n">methods</span><span class="p">);</span>
+<span class="w">  </span><span class="k">for</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">method_count</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">      </span><span class="n">LOG_INFO</span><span class="p">(</span><span class="s">&quot;method_name:{}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">methods</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">getMethodName</span><span class="p">());</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">delete</span><span class="p">[]</span><span class="w"> </span><span class="n">methods</span><span class="p">;</span>
+</code></pre></div>
+<p>输出内容：</p>
+<div class="highlight"><pre><code><span></span><span class="p">[</span><span class="n">info</span><span class="p">]</span><span class="w"> </span><span class="n">field_name</span><span class="o">:</span><span class="n">m_int</span><span class="w"> </span><span class="n">field_type</span><span class="o">:</span><span class="kt">int</span>
+<span class="p">[</span><span class="n">info</span><span class="p">]</span><span class="w"> </span><span class="n">field_name</span><span class="o">:</span><span class="n">m_float</span><span class="w"> </span><span class="n">field_type</span><span class="o">:</span><span class="kt">float</span>
+<span class="p">[</span><span class="n">info</span><span class="p">]</span><span class="w"> </span><span class="n">field_name</span><span class="o">:</span><span class="n">m_int_array</span><span class="w"> </span><span class="n">field_type</span><span class="o">:</span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span>
+<span class="p">[</span><span class="n">info</span><span class="p">]</span><span class="w"> </span><span class="n">method_name</span><span class="o">:</span><span class="n">test</span>
+</code></pre></div>
+<h3>2.7.总结</h3>
+<p>piccolo反射系统的实现呈现出了一种难得的简洁之美。</p>
+<p>当然受限于该引擎的demo性质，其中仍然存在一些缺陷，比如不支持带参函数的反射、运行时性能差等等。然而即便整体实现并不完美，但确能让大家一窥反射机制的实现重点。</p>
+<h2>3.UE反射系统实现</h2>
+<h3>3.1.前情提要</h3>
+<p>通过解析piccolo相关代码，可以总结出一个反射系统的实现需要包含如下部分：</p>
+<ol>
+<li><p>Meta定义，包括：</p>
+<ol>
+<li><p>Class/Struct的meta数据定义</p>
+</li>
+<li><p>Field的meta数据定义</p>
+</li>
+<li><p>Method的meta数据定义</p>
+</li>
+</ol>
+</li>
+<li><p>Meta数据的管理</p>
+<ol>
+<li><p>建立Class/Struct与Field/Method Meta数据的关联关系</p>
+</li>
+<li><p>建立<code>class_name</code>与Class Meta数据的关联关系</p>
+</li>
+</ol>
+</li>
+</ol>
+<p>那么带着这些总结，我们开始UE反射系统的解析之旅。</p>
+<h3>3.2.Struct反射实现</h3>
+<p>先创建一个最简单的struct示例：</p>
+<div class="highlight"><pre><code><span></span><span class="n">USTRUCT</span><span class="p">()</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">FFGReflectionStructTest</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">GENERATED_USTRUCT_BODY</span><span class="p">()</span>
+
+<span class="w">  </span><span class="n">UPROPERTY</span><span class="p">()</span>
+<span class="w">  </span><span class="n">int32</span><span class="w"> </span><span class="n">TestVal</span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="mi">4</span><span class="p">}</span><span class="w"> </span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>首先展开编译有效宏：<code>GENERATED_USTRUCT_BODY</code>，此宏定义在自动生成头文件中：generated.h</p>
+<div class="highlight"><pre><code><span></span><span class="n">USTRUCT</span><span class="p">()</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">FFGReflectionStructTest</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="k">friend</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">Z_Construct_UScriptStruct_FFGReflectionStructTest_Statics</span><span class="p">;</span><span class="w"> </span>
+<span class="w">  </span><span class="n">FORTUNEGAME_API</span><span class="w"> </span><span class="k">static</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">UScriptStruct</span><span class="o">*</span><span class="w"> </span><span class="n">StaticStruct</span><span class="p">();</span><span class="w"> </span><span class="c1">// static获取Struct Meta数据</span>
+
+<span class="w">  </span><span class="n">UPROPERTY</span><span class="p">()</span>
+<span class="w">  </span><span class="n">int32</span><span class="w"> </span><span class="n">TestVal</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>宏展开后的代码中定义了StaticStruct();，此接口返回UScriptStruct，也即我们所关注的Struct Meta数据。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20241230-1458-7.png" alt=""></p>
+<h4>3.2.1.构造UScriptStruct</h4>
+<p>UE为构造UScriptStruct数据，定义了一套构造参数：FStructParams</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">FStructParams</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">UObject</span><span class="o">*</span><span class="w">                          </span><span class="p">(</span><span class="o">*</span><span class="n">OuterFunc</span><span class="p">)();</span><span class="c1">// 获取struct定义所在的UObject</span>
+<span class="w">    </span><span class="n">UScriptStruct</span><span class="o">*</span><span class="w">                    </span><span class="p">(</span><span class="o">*</span><span class="n">SuperFunc</span><span class="p">)();</span><span class="c1">// 获取父类meta数据</span>
+<span class="w">    </span><span class="kt">void</span><span class="o">*</span><span class="w">                             </span><span class="p">(</span><span class="o">*</span><span class="n">StructOpsFunc</span><span class="p">)();</span><span class="o">/</span><span class="w"> </span><span class="n">支持自定义内存结构下的动态创建与销毁struct能力</span><span class="err">，</span><span class="n">实际返回ICppStructOps</span><span class="o">*</span><span class="err">，</span><span class="n">维护有struct的size与align信息</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w">                         </span><span class="n">NameUTF8</span><span class="p">;</span><span class="c1">// struct结构名字</span>
+<span class="w">    </span><span class="n">SIZE_T</span><span class="w">                              </span><span class="n">SizeOf</span><span class="p">;</span><span class="w"> </span><span class="c1">// struct的size</span>
+<span class="w">    </span><span class="n">SIZE_T</span><span class="w">                              </span><span class="n">AlignOf</span><span class="p">;</span><span class="c1">// struct的对齐信息</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">FPropertyParamsBase</span><span class="o">*</span><span class="w"> </span><span class="k">const</span><span class="o">*</span><span class="w">   </span><span class="n">PropertyArray</span><span class="p">;</span><span class="c1">// struct内的成员变量列表，成员通过FPropertyParamsBase进行描述</span>
+<span class="w">    </span><span class="n">int32</span><span class="w">                               </span><span class="n">NumProperties</span><span class="p">;</span><span class="c1">// struct内的成员变量数量</span>
+<span class="w">    </span><span class="n">EObjectFlags</span><span class="w">                        </span><span class="n">ObjectFlags</span><span class="p">;</span><span class="c1">// Flags describing an object instance</span>
+<span class="w">    </span><span class="n">uint32</span><span class="w">                              </span><span class="n">StructFlags</span><span class="p">;</span><span class="w">  </span><span class="c1">// Flags describing a struct</span>
+<span class="cp">#if WITH_METADATA</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">FMetaDataPairParam</span><span class="o">*</span><span class="w">           </span><span class="n">MetaDataArray</span><span class="p">;</span><span class="c1">// 其他meta信息：所在文件路径</span>
+<span class="w">    </span><span class="n">int32</span><span class="w">                               </span><span class="n">NumMetaData</span><span class="p">;</span><span class="w">    </span>
+<span class="cp">#endif</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>针对上文示例中的FFGReflectionStructTest结构，UE在自动生成的gen.cpp结构中，为FFGReflectionStructTest实例化的FStructParams对象如下：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 为struct内的成员变量TestVal构建PropertyParams 主要信息：成员名字、成员内存偏移、成员内置类型</span>
+<span class="k">const</span><span class="w"> </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">FIntPropertyParams</span><span class="w"> </span><span class="n">Z_Construct_UScriptStruct_FFGReflectionStructTest_Statics</span><span class="o">::</span><span class="n">NewProp_TestVal</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span>
+<span class="w">    </span><span class="s">&quot;TestVal&quot;</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="p">(</span><span class="n">EPropertyFlags</span><span class="p">)</span><span class="mh">0x0010000000000000</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">EPropertyGenFlags</span><span class="o">::</span><span class="n">Int</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="n">RF_Public</span><span class="o">|</span><span class="n">RF_Transient</span><span class="o">|</span><span class="n">RF_MarkAsNative</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="n">STRUCT_OFFSET</span><span class="p">(</span><span class="n">FFGReflectionStructTest</span><span class="p">,</span><span class="w"> </span><span class="n">TestVal</span><span class="p">),</span><span class="w"> </span>
+<span class="w">    </span><span class="n">METADATA_PARAMS</span><span class="p">(</span><span class="n">Z_Construct_UScriptStruct_FFGReflectionStructTest_Statics</span><span class="o">::</span><span class="n">NewProp_TestVal_MetaData</span><span class="p">,</span><span class="w"> </span>
+<span class="w">                    </span><span class="n">UE_ARRAY_COUNT</span><span class="p">(</span><span class="n">Z_Construct_UScriptStruct_FFGReflectionStructTest_Statics</span><span class="o">::</span><span class="n">NewProp_TestVal_MetaData</span><span class="p">))</span>
+<span class="p">};</span>
+
+<span class="c1">// struct内的成员变量列表，引用上面代码中为成员构建的PropertyParams</span>
+<span class="k">const</span><span class="w"> </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">FPropertyParamsBase</span><span class="o">*</span><span class="w"> </span><span class="k">const</span><span class="w"> </span>
+<span class="n">Z_Construct_UScriptStruct_FFGReflectionStructTest_Statics</span><span class="o">::</span><span class="n">PropPointers</span><span class="p">[]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">FPropertyParamsBase</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">Z_Construct_UScriptStruct_FFGReflectionStructTest_Statics</span><span class="o">::</span><span class="n">NewProp_TestVal</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="c1">// 为Struct构建FStructParams</span>
+<span class="k">const</span><span class="w"> </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">FStructParams</span><span class="w"> </span><span class="n">Z_Construct_UScriptStruct_FFGReflectionStructTest_Statics</span><span class="o">::</span><span class="n">ReturnStructParams</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">(</span><span class="n">UObject</span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="p">)())</span><span class="n">Z_Construct_UPackage__Script_FortuneGame</span><span class="p">,</span><span class="c1">// 获取struct所在的package</span>
+<span class="w">    </span><span class="k">nullptr</span><span class="p">,</span><span class="c1">// 获取父类meta数据                                            </span>
+<span class="w">    </span><span class="o">&amp;</span><span class="n">NewStructOps</span><span class="p">,</span><span class="c1">// 支持自定义内存结构下的动态创建与销毁struct能力，实际返回ICppStructOps*，维护有struct的size与align信息</span>
+<span class="w">    </span><span class="s">&quot;FGReflectionStructTest&quot;</span><span class="p">,</span><span class="c1">// struct结构名字</span>
+<span class="w">    </span><span class="k">sizeof</span><span class="p">(</span><span class="n">FFGReflectionStructTest</span><span class="p">),</span><span class="w"> </span><span class="c1">// struct的size</span>
+<span class="w">    </span><span class="k">alignof</span><span class="p">(</span><span class="n">FFGReflectionStructTest</span><span class="p">),</span><span class="w"> </span><span class="c1">// struct的对齐信息</span>
+<span class="w">    </span><span class="n">Z_Construct_UScriptStruct_FFGReflectionStructTest_Statics</span><span class="o">::</span><span class="n">PropPointers</span><span class="p">,</span><span class="c1">// 上面代码中定义的成员变量列表</span>
+<span class="w">    </span><span class="n">UE_ARRAY_COUNT</span><span class="p">(</span><span class="n">Z_Construct_UScriptStruct_FFGReflectionStructTest_Statics</span><span class="o">::</span><span class="n">PropPointers</span><span class="p">),</span><span class="c1">// struct内的成员变量数量</span>
+<span class="w">    </span><span class="n">RF_Public</span><span class="o">|</span><span class="n">RF_Transient</span><span class="o">|</span><span class="n">RF_MarkAsNative</span><span class="p">,</span><span class="c1">// Flags describing an object instance</span>
+<span class="w">    </span><span class="n">EStructFlags</span><span class="p">(</span><span class="mh">0x00000001</span><span class="p">),</span><span class="c1">// Flags describing a struct</span>
+<span class="w">    </span><span class="n">METADATA_PARAMS</span><span class="p">(</span><span class="n">Z_Construct_UScriptStruct_FFGReflectionStructTest_Statics</span><span class="o">::</span><span class="n">Struct_MetaDataParams</span><span class="p">,</span><span class="w"> </span>
+<span class="w">                    </span><span class="n">UE_ARRAY_COUNT</span><span class="p">(</span><span class="n">Z_Construct_UScriptStruct_FFGReflectionStructTest_Statics</span><span class="o">::</span><span class="n">Struct_MetaDataParams</span><span class="p">))</span><span class="c1">// 其他meta信息：所在文件路径</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>具体实现中，为Struct构建Meta数据时，除了生成UScriptStruct对象，会为struct中的field生成FProperty对象。</p>
+<p>FStructParams所包含的内容，会被赋值到各个不同的结构中：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20241230-1458-8.png" alt=""></p>
+<p>UScriptStruct结构的重要字段解析：</p>
+<ol>
+<li><p>CppStructOps为Struct提供构造接口、序列化接口</p>
+</li>
+<li><p>ChildProperties维护Struct中首个field的FProperty数据指针</p>
+</li>
+<li><p>SuperStruct维护父结构的Meta对象指针</p>
+</li>
+</ol>
+<p>FProperty结构的重要字段解析：</p>
+<ol>
+<li><p>ElementSize记录field的内存size</p>
+</li>
+<li><p>Offset_Internal记录field在所属类型中的地址偏移</p>
+</li>
+<li><p>Owner记录field的所属类型Meta数据</p>
+</li>
+<li><p>Next为所属类型维护下一个field的FProperty数据指针</p>
+</li>
+<li><p>NamePrivate记录field名字</p>
+</li>
+</ol>
+<p>根据UScriptStruct对象中的ChildProperties数据 与 FProperty中的Next数据，便能够拿到Struct中所有fields的FProperty数据。</p>
+<p>另外，FProperty提供了接口ContainerPtrToValuePtr，实现功能：传入struct/class对象指针，获取到对应field的内存数据。</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">ValueType</span><span class="o">&gt;</span>
+<span class="n">FORCEINLINE</span><span class="w"> </span><span class="n">ValueType</span><span class="o">*</span><span class="w"> </span><span class="n">ContainerPtrToValuePtr</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">ContainerPtr</span><span class="p">,</span><span class="w"> </span><span class="n">int32</span><span class="w"> </span><span class="n">ArrayIndex</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="k">const</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="n">ValueType</span><span class="o">*</span><span class="p">)</span><span class="n">ContainerVoidPtrToValuePtrInternal</span><span class="p">(</span><span class="n">ContainerPtr</span><span class="p">,</span><span class="w"> </span><span class="n">ArrayIndex</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="n">FORCEINLINE</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">ContainerVoidPtrToValuePtrInternal</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">ContainerPtr</span><span class="p">,</span><span class="w"> </span><span class="n">int32</span><span class="w"> </span><span class="n">ArrayIndex</span><span class="p">)</span><span class="w"> </span><span class="k">const</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">checkf</span><span class="p">((</span><span class="n">ArrayIndex</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">(</span><span class="n">ArrayIndex</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">ArrayDim</span><span class="p">),</span><span class="w"> </span><span class="n">TEXT</span><span class="p">(</span><span class="s">&quot;Array index out of bounds: %i from an array of size %i&quot;</span><span class="p">),</span><span class="w"> </span><span class="n">ArrayIndex</span><span class="p">,</span><span class="w"> </span><span class="n">ArrayDim</span><span class="p">);</span>
+<span class="w">    </span><span class="n">check</span><span class="p">(</span><span class="n">ContainerPtr</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// in the future, these checks will be tested if the property is NOT relative to a UClass</span>
+<span class="w">        </span><span class="n">check</span><span class="p">(</span><span class="o">!</span><span class="n">GetOwner</span><span class="o">&lt;</span><span class="n">UClass</span><span class="o">&gt;</span><span class="p">());</span><span class="w"> </span><span class="c1">// Check we are _not_ calling this on a direct child property of a UClass, you should pass in a UObject* in that case</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">        </span><span class="c1">// 可以看出，此处就是简单地执行了内存偏移</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="n">uint8</span><span class="o">*</span><span class="p">)</span><span class="n">ContainerPtr</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">Offset_Internal</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">ElementSize</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">ArrayIndex</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>通过ContainerPtrToValuePtr接口，便可以方便实现对field的get/set操作。</p>
+<h4>3.2.2.注册UScriptStruct</h4>
+<p>回顾3.1的内容：</p>
+<p>通过解析piccolo相关代码，可以总结出一个反射系统的实现需要包含如下部分：</p>
+<p>Meta定义：Class/Struct的meta数据定义、Field的meta数据定义、Method的meta数据定义</p>
+<p>Meta数据的管理：建立Class/Struct与Field/Method Meta数据的关联关系、建立<code>class_name</code>与Class Meta数据的关联关系</p>
+<p>上文介绍了Struct的Meta定义，现在开始探索Meta数据的管理：</p>
+<ol>
+<li><p>首先，UScriptStruct已经为内部fields维护了meta数据链表，因此不需要额外建立Struct与Field Meta数据的关联关系</p>
+</li>
+<li><p>因此，此节的关注重点在于：建立<code>struct_name</code>与UScriptStruct数据的关联关系</p>
+</li>
+</ol>
+<p><strong>3.2.2.1.全局UObject对象容器</strong></p>
+<p>首先介绍UE的全局容器FUObjectHashTables：</p>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">FUObjectHashTables</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="cm">/** Hash sets */</span>
+<span class="w">    </span><span class="n">TBucketMap</span><span class="o">&lt;</span><span class="n">int32</span><span class="o">&gt;</span><span class="w"> </span><span class="n">Hash</span><span class="p">;</span><span class="w">   </span><span class="c1">// UObject的NameHash值 -&gt; set of UObjectBase* UScriptStruct即继承自UObjectBase</span>
+<span class="w">    </span><span class="n">TMultiMap</span><span class="o">&lt;</span><span class="n">int32</span><span class="p">,</span><span class="w"> </span><span class="n">uint32</span><span class="o">&gt;</span><span class="w"> </span><span class="n">HashOuter</span><span class="p">;</span><span class="w">  </span><span class="c1">// UObject的NameHash值+UObject的拥有者指针 -&gt; UObject的UniqueID</span>
+
+<span class="w">    </span><span class="err">……</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>显而易见，将UScriptStruct注册到Hash与HashOuter中，便能够建立<code>struct_name</code>与UScriptStruct数据的关联关系。</p>
+<p>另外，UE还为所有UObject维护有一个全局容器：FUObjectArray。上面提到了UObject的UniqueID便来自于该容器所提供的元素索引。</p>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">COREUOBJECT_API</span><span class="w"> </span><span class="n">FUObjectArray</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">typedef</span><span class="w"> </span><span class="n">FChunkedFixedUObjectArray</span><span class="w"> </span><span class="n">TUObjectArray</span><span class="p">;</span>
+
+<span class="w">    </span><span class="cm">/** Array of all live objects.                                            */</span>
+<span class="w">    </span><span class="n">TUObjectArray</span><span class="w"> </span><span class="n">ObjObjects</span><span class="p">;</span>
+
+<span class="w">    </span><span class="cm">/** Available object indices.                                            */</span>
+<span class="w">    </span><span class="n">TArray</span><span class="o">&lt;</span><span class="n">int32</span><span class="o">&gt;</span><span class="w"> </span><span class="n">ObjAvailableList</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>FChunkedFixedUObjectArray解析</p>
+<ul>
+<li><p>按块申请连续内存，用于存储FUObjectItem数据</p>
+</li>
+<li><p>对象池，不提供内存释放功能（因此上层释放FUObjectItem时，会将index存入ObjAvailableList，以供下次复用）</p>
+</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">FUObjectItem</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="c1">// Pointer to the allocated object</span>
+<span class="w">    </span><span class="k">class</span><span class="w"> </span><span class="nc">UObjectBase</span><span class="o">*</span><span class="w"> </span><span class="n">Object</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// Internal flags</span>
+<span class="w">    </span><span class="n">int32</span><span class="w"> </span><span class="n">Flags</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// UObject Owner Cluster Index</span>
+<span class="w">    </span><span class="n">int32</span><span class="w"> </span><span class="n">ClusterRootIndex</span><span class="p">;</span><span class="w">    </span>
+<span class="w">    </span><span class="c1">// Weak Object Pointer Serial number associated with the object</span>
+<span class="w">    </span><span class="n">int32</span><span class="w"> </span><span class="n">SerialNumber</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">FChunkedFixedUObjectArray</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">enum</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="n">NumElementsPerChunk</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">64</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="p">,</span>
+<span class="w">    </span><span class="p">};</span>
+
+<span class="w">    </span><span class="cm">/** Primary table to chunks of pointers **/</span>
+<span class="w">    </span><span class="n">FUObjectItem</span><span class="o">**</span><span class="w"> </span><span class="n">Objects</span><span class="p">;</span>
+<span class="w">    </span><span class="cm">/** If requested, a contiguous memory where all objects are allocated **/</span>
+<span class="w">    </span><span class="n">FUObjectItem</span><span class="o">*</span><span class="w"> </span><span class="n">PreAllocatedObjects</span><span class="p">;</span>
+<span class="w">    </span><span class="cm">/** Maximum number of elements **/</span>
+<span class="w">    </span><span class="n">int32</span><span class="w"> </span><span class="n">MaxElements</span><span class="p">;</span>
+<span class="w">    </span><span class="cm">/** Number of elements we currently have **/</span>
+<span class="w">    </span><span class="n">int32</span><span class="w"> </span><span class="n">NumElements</span><span class="p">;</span>
+<span class="w">    </span><span class="cm">/** Maximum number of chunks **/</span>
+<span class="w">    </span><span class="n">int32</span><span class="w"> </span><span class="n">MaxChunks</span><span class="p">;</span>
+<span class="w">    </span><span class="cm">/** Number of chunks we currently have **/</span>
+<span class="w">    </span><span class="n">int32</span><span class="w"> </span><span class="n">NumChunks</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>FChunkedFixedUObjectArray数据结构示意：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20241230-1458-9.png" alt=""></p>
+<p>FUObjectArray的作用：</p>
+<ul>
+<li><p>全量管理UObject</p>
+</li>
+<li><p>为UObject分配internalIndex（即UniqueID），提供接口：通过internalIndex获取到UObject对象</p>
+</li>
+</ul>
+<p><strong>3.2.2.2.注册机制</strong></p>
+<p>static自动注册机制：UE自动生成的gen.cpp中，通过声明FRegisterCompiledInInfo类型的static变量，实现Meta自动注册。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 声明FRegisterCompiledInInfo类型的static变量</span>
+<span class="k">static</span><span class="w"> </span><span class="n">FRegisterCompiledInInfo</span><span class="w"> </span><span class="n">Z_CompiledInDeferFile_FID_FortuneGame_Source_FortuneGame_AI_FGReflectionStructTest_h_1075197975</span><span class="p">(</span>
+<span class="w">  </span><span class="n">TEXT</span><span class="p">(</span><span class="s">&quot;/Script/FortuneGame&quot;</span><span class="p">),</span>
+<span class="w">  </span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span>
+<span class="w">  </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">Z_CompiledInDeferFile_FID_FortuneGame_Source_FortuneGame_AI_FGReflectionStructTest_h_Statics</span><span class="o">::</span><span class="n">ScriptStructInfo</span><span class="p">,</span><span class="w">   </span>
+<span class="w">  </span><span class="n">UE_ARRAY_COUNT</span><span class="p">(</span><span class="n">Z_CompiledInDeferFile_FID_FortuneGame_Source_FortuneGame_AI_FGReflectionStructTest_h_Statics</span><span class="o">::</span><span class="n">ScriptStructInfo</span><span class="p">),</span>
+<span class="w">  </span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span>
+<span class="w">  </span><span class="mi">0</span><span class="p">);</span>
+
+<span class="k">struct</span><span class="w"> </span><span class="nc">FRegisterCompiledInInfo</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="p">...</span><span class="w"> </span><span class="n">Args</span><span class="o">&gt;</span>
+<span class="w">    </span><span class="n">FRegisterCompiledInInfo</span><span class="p">(</span><span class="n">Args</span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">...</span><span class="w"> </span><span class="n">args</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// 对象构造时执行注册逻辑</span>
+<span class="w">        </span><span class="n">RegisterCompiledInInfo</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">forward</span><span class="o">&lt;</span><span class="n">Args</span><span class="o">&gt;</span><span class="p">(</span><span class="n">args</span><span class="p">)...);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>延迟注册机制：上面代码中RegisterCompiledInInfo只是定义了一个注册任务，真实的Meta数据注册逻辑其实发生在之后的时间片内。（不属于反射重点关注内容，不进行代码展开）</p>
+<p>引入延迟注册的目的：多线程加快处理速度。</p>
+<p>总结而言，UScriptStruct的生成与注册流程总结如下：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20241230-1458-10.png" alt=""></p>
+<h4>3.2.3.反射应用示例</h4>
+<div class="highlight"><pre><code><span></span><span class="n">FFGReflectionStructTest</span><span class="w"> </span><span class="n">StructInstance</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// 根据名字查找Meta数据</span>
+<span class="w">    </span><span class="n">UScriptStruct</span><span class="o">*</span><span class="w"> </span><span class="n">StructObject</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FindObject</span><span class="o">&lt;</span><span class="n">UScriptStruct</span><span class="o">&gt;</span><span class="p">(</span><span class="n">ANY_PACKAGE</span><span class="p">,</span><span class="w"> </span><span class="n">UTF8_TO_TCHAR</span><span class="p">(</span><span class="s">&quot;FGReflectionStructTest&quot;</span><span class="p">));</span><span class="w"> </span><span class="c1">// 注意：此处StructName需要去除F前缀</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">StructObject</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// 根据Meta数据实例化对象</span>
+<span class="w">        </span><span class="n">StructObject</span><span class="o">-&gt;</span><span class="n">InitializeDefaultValue</span><span class="p">(</span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="n">uint8</span><span class="o">*&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="n">StructInstance</span><span class="p">));</span>
+
+<span class="w">        </span><span class="c1">// 获取Field信息</span>
+<span class="w">        </span><span class="n">TArray</span><span class="o">&lt;</span><span class="n">FProperty</span><span class="o">*&gt;</span><span class="w"> </span><span class="n">Fields</span><span class="p">;</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">TFieldIterator</span><span class="o">&lt;</span><span class="n">FProperty</span><span class="o">&gt;</span><span class="w"> </span><span class="n">It</span><span class="p">(</span><span class="n">StructObject</span><span class="p">);</span><span class="w"> </span><span class="n">It</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">It</span><span class="p">)</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">            </span><span class="n">FProperty</span><span class="o">*</span><span class="w"> </span><span class="n">Property</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">It</span><span class="p">;</span>
+<span class="w">            </span><span class="n">FString</span><span class="w"> </span><span class="n">FieldName</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Property</span><span class="o">-&gt;</span><span class="n">GetName</span><span class="p">();</span>
+<span class="w">            </span><span class="n">FString</span><span class="w"> </span><span class="n">FieldType</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Property</span><span class="o">-&gt;</span><span class="n">GetCPPType</span><span class="p">();</span>
+<span class="w">            </span><span class="n">UE_LOG</span><span class="p">(</span><span class="n">LogTemp</span><span class="p">,</span><span class="w"> </span><span class="n">Warning</span><span class="p">,</span><span class="w"> </span><span class="n">TEXT</span><span class="p">(</span><span class="s">&quot;Field Name: %s, Field Type: %s&quot;</span><span class="p">),</span><span class="w"> </span><span class="o">*</span><span class="n">FieldName</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">FieldType</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">        </span><span class="c1">// 根据Field名字 Get/Set Field数据</span>
+<span class="w">        </span><span class="n">FIntProperty</span><span class="w"> </span><span class="o">*</span><span class="n">FieldProp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">CastField</span><span class="o">&lt;</span><span class="n">FIntProperty</span><span class="o">&gt;</span><span class="p">(</span><span class="n">StructObject</span><span class="o">-&gt;</span><span class="n">FindPropertyByName</span><span class="p">(</span><span class="n">TEXT</span><span class="p">(</span><span class="s">&quot;TestVal&quot;</span><span class="p">)));</span>
+<span class="w">        </span><span class="k">if</span><span class="p">(</span><span class="n">FieldProp</span><span class="p">)</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">            </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">FieldAddr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FieldProp</span><span class="o">-&gt;</span><span class="n">ContainerPtrToValuePtr</span><span class="o">&lt;</span><span class="kt">void</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="n">StructInstance</span><span class="p">);</span>
+<span class="w">            </span><span class="n">int32</span><span class="w"> </span><span class="n">FieldVal</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FieldProp</span><span class="o">-&gt;</span><span class="n">GetPropertyValue</span><span class="p">(</span><span class="n">FieldAddr</span><span class="p">);</span>
+<span class="w">            </span><span class="n">UE_LOG</span><span class="p">(</span><span class="n">LogTemp</span><span class="p">,</span><span class="w"> </span><span class="n">Warning</span><span class="p">,</span><span class="w"> </span><span class="n">TEXT</span><span class="p">(</span><span class="s">&quot;FieldVal1: %d&quot;</span><span class="p">),</span><span class="w"> </span><span class="n">FieldVal</span><span class="p">);</span>
+<span class="w">            </span><span class="n">FieldProp</span><span class="o">-&gt;</span><span class="n">SetPropertyValue</span><span class="p">(</span><span class="n">FieldAddr</span><span class="p">,</span><span class="w"> </span><span class="mi">40</span><span class="p">);</span>
+<span class="w">            </span><span class="n">UE_LOG</span><span class="p">(</span><span class="n">LogTemp</span><span class="p">,</span><span class="w"> </span><span class="n">Warning</span><span class="p">,</span><span class="w"> </span><span class="n">TEXT</span><span class="p">(</span><span class="s">&quot;FieldVal2: %d&quot;</span><span class="p">),</span><span class="w"> </span><span class="n">StructInstance</span><span class="p">.</span><span class="n">TestVal</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+</code></pre></div>
+<p>输出：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20241230-1458-11.png" alt=""></p>
+<h3>3.3.Class反射实现</h3>
+<h4>3.3.1.初探UClass</h4>
+<p>先创建一个最简单的class示例：</p>
+<div class="highlight"><pre><code><span></span><span class="n">UCLASS</span><span class="p">()</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">FORTUNEGAME_API</span><span class="w"> </span><span class="n">UFGReflectionTest</span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">UObject</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">GENERATED_BODY</span><span class="p">()</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w">  </span><span class="n">UPROPERTY</span><span class="p">()</span>
+<span class="w">  </span><span class="n">int32</span><span class="w"> </span><span class="n">TestVal</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>展开<code>GENERATED_BODY</code></p>
+<div class="highlight"><pre><code><span></span><span class="n">UCLASS</span><span class="p">()</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">FORTUNEGAME_API</span><span class="w"> </span><span class="n">UFGReflectionTest</span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">UObject</span>
+<span class="p">{</span>
+<span class="w">        </span><span class="err">……</span>
+<span class="k">public</span><span class="o">:</span><span class="w"> </span>
+<span class="c1">// 稍后展开</span>
+<span class="w">    </span><span class="n">DECLARE_CLASS</span><span class="p">(</span><span class="n">UFGReflectionTest</span><span class="p">,</span><span class="w"> </span><span class="n">UObject</span><span class="p">,</span><span class="w"> </span><span class="n">COMPILED_IN_FLAGS</span><span class="p">(</span><span class="mi">0</span><span class="p">),</span><span class="w"> </span><span class="n">CASTCLASS_None</span><span class="p">,</span><span class="w"> </span><span class="n">TEXT</span><span class="p">(</span><span class="s">&quot;/Script/FortuneGame&quot;</span><span class="p">),</span><span class="w"> </span><span class="n">NO_API</span><span class="p">)</span><span class="w"> </span>
+
+<span class="w">    </span><span class="c1">// 序列化相关</span>
+<span class="w">    </span><span class="k">friend</span><span class="w"> </span><span class="n">FArchive</span><span class="w"> </span><span class="o">&amp;</span><span class="k">operator</span><span class="o">&lt;&lt;</span><span class="p">(</span><span class="w"> </span><span class="n">FArchive</span><span class="o">&amp;</span><span class="w"> </span><span class="n">Ar</span><span class="p">,</span><span class="w"> </span><span class="n">UFGReflectionTest</span><span class="o">*&amp;</span><span class="w"> </span><span class="n">Res</span><span class="w"> </span><span class="p">)</span><span class="w"> </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">Ar</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="p">(</span><span class="n">UObject</span><span class="o">*&amp;</span><span class="p">)</span><span class="n">Res</span><span class="p">;</span><span class="w"> </span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span>
+<span class="w">    </span><span class="k">friend</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="k">operator</span><span class="o">&lt;&lt;</span><span class="p">(</span><span class="n">FStructuredArchive</span><span class="o">::</span><span class="n">FSlot</span><span class="w"> </span><span class="n">InSlot</span><span class="p">,</span><span class="w"> </span><span class="n">UFGReflectionTest</span><span class="o">*&amp;</span><span class="w"> </span><span class="n">Res</span><span class="p">)</span><span class="w"> </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span>
+<span class="w">        </span><span class="n">InSlot</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="p">(</span><span class="n">UObject</span><span class="o">*&amp;</span><span class="p">)</span><span class="n">Res</span><span class="p">;</span><span class="w"> </span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 构造与析构相关，不需要过多关注</span>
+<span class="w">    </span><span class="cm">/** Standard constructor, called after all reflected properties have been initialized */</span><span class="w"> </span>\
+<span class="w">    </span><span class="n">NO_API</span><span class="w"> </span><span class="n">UFGReflectionTest</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">FObjectInitializer</span><span class="o">&amp;</span><span class="w"> </span><span class="n">ObjectInitializer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FObjectInitializer</span><span class="o">::</span><span class="n">Get</span><span class="p">());</span><span class="w"> </span>\
+<span class="k">private</span><span class="o">:</span><span class="w"> </span>\
+<span class="w">    </span><span class="cm">/** Private move- and copy-constructors, should never be used */</span><span class="w"> </span>\
+<span class="w">    </span><span class="n">NO_API</span><span class="w"> </span><span class="n">UFGReflectionTest</span><span class="p">(</span><span class="n">UFGReflectionTest</span><span class="o">&amp;&amp;</span><span class="p">);</span><span class="w"> </span>\
+<span class="w">    </span><span class="n">NO_API</span><span class="w"> </span><span class="nf">UFGReflectionTest</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">UFGReflectionTest</span><span class="o">&amp;</span><span class="p">);</span><span class="w"> </span>\
+<span class="k">public</span><span class="o">:</span><span class="w"> </span>\
+<span class="w">    </span><span class="n">DECLARE_VTABLE_PTR_HELPER_CTOR</span><span class="p">(</span><span class="n">NO_API</span><span class="p">,</span><span class="w"> </span><span class="n">UFGReflectionTest</span><span class="p">);</span><span class="w"> </span>\
+<span class="w">    </span><span class="n">DEFINE_VTABLE_PTR_HELPER_CTOR_CALLER</span><span class="p">(</span><span class="n">UFGReflectionTest</span><span class="p">);</span><span class="w"> </span>\
+<span class="w">    </span><span class="n">DEFINE_DEFAULT_OBJECT_INITIALIZER_CONSTRUCTOR_CALL</span><span class="p">(</span><span class="n">UFGReflectionTest</span><span class="p">)</span><span class="w"> </span>\
+<span class="w">    </span><span class="n">NO_API</span><span class="w"> </span><span class="k">virtual</span><span class="w"> </span><span class="o">~</span><span class="n">UFGReflectionTest</span><span class="p">();</span>
+
+<span class="k">public</span><span class="o">:</span>
+<span class="w">    </span><span class="n">UPROPERTY</span><span class="p">()</span>
+<span class="w">    </span><span class="n">int32</span><span class="w"> </span><span class="n">TestVal</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>展开<code>DECLARE_CLASS</code></p>
+<div class="highlight"><pre><code><span></span><span class="n">UCLASS</span><span class="p">()</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">FORTUNEGAME_API</span><span class="w"> </span><span class="n">UFGReflectionTest</span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">UObject</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="err">……</span>
+
+<span class="k">public</span><span class="o">:</span><span class="w"> </span>
+<span class="w">    </span><span class="c1">// DECLARE_CLASS(UFGReflectionTest, UObject, COMPILED_IN_FLAGS(0), CASTCLASS_None, TEXT(&quot;/Script/FortuneGame&quot;), NO_API) </span>
+<span class="k">private</span><span class="o">:</span><span class="w"> </span>
+<span class="w">    </span><span class="n">UFGReflectionTest</span><span class="o">&amp;</span><span class="w"> </span><span class="k">operator</span><span class="o">=</span><span class="p">(</span><span class="n">UFGReflectionTest</span><span class="o">&amp;&amp;</span><span class="p">);</span><span class="w">        </span><span class="c1">// 禁用赋值操作</span>
+<span class="w">    </span><span class="n">UFGReflectionTest</span><span class="o">&amp;</span><span class="w"> </span><span class="k">operator</span><span class="o">=</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">UFGReflectionTest</span><span class="o">&amp;</span><span class="p">);</span><span class="w">   </span><span class="c1">// 禁用赋值操作</span>
+<span class="w">    </span><span class="n">NO_API</span><span class="w"> </span><span class="k">static</span><span class="w"> </span><span class="n">UClass</span><span class="o">*</span><span class="w"> </span><span class="n">GetPrivateStaticClass</span><span class="p">();</span><span class="w">               </span><span class="c1">// 获取Meta数据</span>
+<span class="k">public</span><span class="o">:</span><span class="w"> </span>
+<span class="w">    </span><span class="cm">/** Typedef for the base class ({{ typedef-type }}) */</span><span class="w"> </span>
+<span class="w">    </span><span class="k">typedef</span><span class="w"> </span><span class="n">UObject</span><span class="w"> </span><span class="n">Super</span><span class="p">;</span>
+<span class="w">    </span><span class="cm">/** Typedef for {{ typedef-type }}. */</span><span class="w"> </span>
+<span class="w">    </span><span class="k">typedef</span><span class="w"> </span><span class="n">UFGReflectionTest</span><span class="w"> </span><span class="n">ThisClass</span><span class="p">;</span>
+<span class="w">    </span><span class="cm">/** Returns a UClass object representing this class at runtime */</span><span class="w"> </span>
+<span class="w">    </span><span class="kr">inline</span><span class="w"> </span><span class="k">static</span><span class="w"> </span><span class="n">UClass</span><span class="o">*</span><span class="w"> </span><span class="nf">StaticClass</span><span class="p">()</span><span class="w"> </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">GetPrivateStaticClass</span><span class="p">();</span><span class="w"> </span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span>
+<span class="w">    </span><span class="cm">/** Returns the package this class belongs in */</span><span class="w"> </span>
+<span class="w">    </span><span class="kr">inline</span><span class="w"> </span><span class="k">static</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">TCHAR</span><span class="o">*</span><span class="w"> </span><span class="nf">StaticPackage</span><span class="p">()</span><span class="w"> </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">TEXT</span><span class="p">(</span><span class="s">&quot;/Script/FortuneGame&quot;</span><span class="p">);</span><span class="w"> </span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span>
+<span class="w">    </span><span class="cm">/** For internal use only; use StaticConstructObject() to create new objects. */</span><span class="w"> </span>
+<span class="w">    </span><span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="k">operator</span><span class="w"> </span><span class="k">new</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">InSize</span><span class="p">,</span><span class="w"> </span><span class="n">EInternal</span><span class="w"> </span><span class="n">InInternalOnly</span><span class="p">,</span><span class="w"> </span><span class="n">UObject</span><span class="o">*</span><span class="w"> </span><span class="n">InOuter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">UObject</span><span class="o">*</span><span class="p">)</span><span class="n">GetTransientPackage</span><span class="p">(),</span><span class="w"> </span><span class="n">FName</span><span class="w"> </span><span class="n">InName</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NAME_None</span><span class="p">,</span><span class="w"> </span><span class="n">EObjectFlags</span><span class="w"> </span><span class="n">InSetFlags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">RF_NoFlags</span><span class="p">)</span><span class="w"> </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">StaticAllocateObject</span><span class="p">(</span><span class="n">StaticClass</span><span class="p">(),</span><span class="w"> </span><span class="n">InOuter</span><span class="p">,</span><span class="w"> </span><span class="n">InName</span><span class="p">,</span><span class="w"> </span><span class="n">InSetFlags</span><span class="p">);</span><span class="w"> </span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span>
+<span class="w">    </span><span class="cm">/** For internal use only; use StaticConstructObject() to create new objects. */</span><span class="w"> </span>
+<span class="w">    </span><span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="k">operator</span><span class="w"> </span><span class="k">new</span><span class="p">(</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">InSize</span><span class="p">,</span><span class="w"> </span><span class="n">EInternal</span><span class="o">*</span><span class="w"> </span><span class="n">InMem</span><span class="w"> </span><span class="p">)</span><span class="w"> </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="n">InMem</span><span class="p">;</span><span class="w"> </span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span>
+<span class="w">    </span><span class="cm">/* Eliminate V1062 warning from PVS-Studio while keeping MSVC and Clang happy. */</span><span class="w"> </span>
+<span class="w">    </span><span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="k">operator</span><span class="w"> </span><span class="k">delete</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">InMem</span><span class="p">)</span><span class="w"> </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span>
+<span class="w">        </span><span class="o">::</span><span class="k">operator</span><span class="w"> </span><span class="nf">delete</span><span class="p">(</span><span class="n">InMem</span><span class="p">);</span><span class="w"> </span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="err">……</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w">    </span><span class="n">UPROPERTY</span><span class="p">()</span>
+<span class="w">    </span><span class="n">int32</span><span class="w"> </span><span class="n">TestVal</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>可以看出，UE为class定义的Meta数据类型为UClass。</p>
+<p>虽然相比struct，class定义中多出很多接口，但在解析UClass反射实现时，这些新增内容可以暂时忽略。</p>
+<p>相比struct，class最重要的不同点其实在于：成员函数注册。</p>
+<p><strong>3.3.1.1.FClassParam</strong></p>
+<p>与UStruct类似，UE为构造UClass数据，定义了一套构造参数：FClassParams</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// UClass需要维护依赖关系</span>
+<span class="w">    </span><span class="n">UObject</span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="k">const</span><span class="w"> </span><span class="n">Z_Construct_UClass_UFGReflectionTest_Statics</span><span class="o">::</span><span class="n">DependentSingletons</span><span class="p">[])()</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="p">(</span><span class="n">UObject</span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="p">)())</span><span class="n">Z_Construct_UClass_UObject</span><span class="p">,</span>
+<span class="w">        </span><span class="p">(</span><span class="n">UObject</span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="p">)())</span><span class="n">Z_Construct_UPackage__Script_FortuneGame</span><span class="p">,</span>
+<span class="w">    </span><span class="p">};</span>
+
+<span class="w">    </span><span class="c1">// StaticClass()调用GetPrivateStaticClass()，如果Meta UClass未被创建，则不自动创建</span>
+
+<span class="w">    </span><span class="c1">// 相比FStructParams，多了依赖关系，多了functionArray，多了ImplementedInterfaceArray</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">FClassParams</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="n">UClass</span><span class="o">*</span><span class="w">                                   </span><span class="p">(</span><span class="o">*</span><span class="n">ClassNoRegisterFunc</span><span class="p">)();</span><span class="w">        </span><span class="c1">// UClass的部分内容构建接口</span>
+<span class="w">        </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w">                                 </span><span class="n">ClassConfigNameUTF8</span><span class="p">;</span><span class="w">        </span><span class="c1">// name</span>
+<span class="w">        </span><span class="k">const</span><span class="w"> </span><span class="n">FCppClassTypeInfoStatic</span><span class="o">*</span><span class="w">              </span><span class="n">CppClassInfo</span><span class="p">;</span><span class="w">                </span><span class="c1">// 是否为virtual class</span>
+<span class="w">        </span><span class="n">UObject</span><span class="o">*</span><span class="w">                           </span><span class="p">(</span><span class="o">*</span><span class="k">const</span><span class="w"> </span><span class="o">*</span><span class="n">DependencySingletonFuncArray</span><span class="p">)();</span><span class="w">    </span><span class="c1">// 依赖关系</span>
+<span class="w">        </span><span class="k">const</span><span class="w"> </span><span class="n">FClassFunctionLinkInfo</span><span class="o">*</span><span class="w">               </span><span class="n">FunctionLinkArray</span><span class="p">;</span><span class="w">            </span><span class="c1">// 函数列表</span>
+<span class="w">        </span><span class="k">const</span><span class="w"> </span><span class="n">FPropertyParamsBase</span><span class="o">*</span><span class="w"> </span><span class="k">const</span><span class="o">*</span><span class="w">           </span><span class="n">PropertyArray</span><span class="p">;</span><span class="w"> </span><span class="c1">// 成员列表</span>
+<span class="w">        </span><span class="k">const</span><span class="w"> </span><span class="n">FImplementedInterfaceParams</span><span class="o">*</span><span class="w">          </span><span class="n">ImplementedInterfaceArray</span><span class="p">;</span><span class="w">    </span><span class="c1">// 已实现的接口列表</span>
+<span class="w">        </span><span class="n">int32</span><span class="w">                                       </span><span class="n">NumDependencySingletons</span><span class="p">;</span>
+<span class="w">        </span><span class="n">int32</span><span class="w">                                       </span><span class="n">NumFunctions</span><span class="p">;</span>
+<span class="w">        </span><span class="n">int32</span><span class="w">                                       </span><span class="n">NumProperties</span><span class="p">;</span>
+<span class="w">        </span><span class="n">int32</span><span class="w">                                       </span><span class="n">NumImplementedInterfaces</span><span class="p">;</span>
+<span class="w">        </span><span class="n">uint32</span><span class="w">                                      </span><span class="n">ClassFlags</span><span class="p">;</span><span class="w"> </span><span class="c1">// EClassFlags</span>
+<span class="cp">#if WITH_METADATA</span>
+<span class="w">        </span><span class="k">const</span><span class="w"> </span><span class="n">FMetaDataPairParam</span><span class="o">*</span><span class="w">                   </span><span class="n">MetaDataArray</span><span class="p">;</span>
+<span class="w">        </span><span class="n">int32</span><span class="w">                                       </span><span class="n">NumMetaData</span><span class="p">;</span>
+<span class="cp">#endif</span>
+<span class="w">    </span><span class="p">};</span>
+</code></pre></div>
+<p>相比FStructParams，FClassParams增加了依赖关系，FunctionLinkArray，ImplementedInterfaceArray。</p>
+<p><strong>3.3.1.2.Meta注册流程</strong></p>
+<p>相比于struct，class进行Meta数据注册时，最明显的变化是新增了ChildFunctions的构造。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20241230-1458-12.png" alt=""></p>
+<h4>3.3.2.构造ChildFunctions</h4>
+<p>为我们的class示例新增一个简单的UFUNCTION：</p>
+<div class="highlight"><pre><code><span></span><span class="n">UCLASS</span><span class="p">()</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">FORTUNEGAME_API</span><span class="w"> </span><span class="n">UFGReflectionTest</span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">UObject</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">GENERATED_BODY</span><span class="p">()</span>
+
+<span class="k">public</span><span class="o">:</span>
+<span class="w">    </span><span class="n">UPROPERTY</span><span class="p">()</span>
+<span class="w">    </span><span class="n">int32</span><span class="w"> </span><span class="n">TestVal</span><span class="p">;</span>
+
+<span class="w">    </span><span class="n">UFUNCTION</span><span class="p">()</span>
+<span class="w">    </span><span class="n">int32</span><span class="w"> </span><span class="n">TestFunc</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">InParam1</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">InParam2</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="k">return</span><span class="w"> </span><span class="n">InParam1</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">InParam2</span><span class="p">;}</span>
+<span class="p">};</span>
+</code></pre></div>
+<p><strong>3.3.2.1.构造static exec函数</strong></p>
+<p>UE生成的代码有了如下部分新增：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#define FID_FortuneGame_Source_FortuneGame_AI_FGReflectionTest_h_11_RPC_WRAPPERS \</span>
+<span class="cp"> \</span>
+<span class="cp">    DECLARE_FUNCTION(execTestFunc);</span>
+
+<span class="c1">// 展开DECLARE_FUNCTION</span>
+<span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">execTestFunc</span><span class="p">(</span><span class="w"> </span><span class="n">UObject</span><span class="o">*</span><span class="w"> </span><span class="n">Context</span><span class="p">,</span><span class="w"> </span><span class="n">FFrame</span><span class="o">&amp;</span><span class="w"> </span><span class="n">Stack</span><span class="p">,</span><span class="w"> </span><span class="n">RESULT_DECL</span><span class="w"> </span><span class="p">)</span>
+
+<span class="c1">// 对execTestFunc的实现 </span>
+<span class="kt">void</span><span class="w"> </span><span class="n">execTestFunc</span><span class="p">(</span><span class="w"> </span><span class="n">UObject</span><span class="o">*</span><span class="w"> </span><span class="n">Context</span><span class="p">,</span><span class="w"> </span><span class="n">FFrame</span><span class="o">&amp;</span><span class="w"> </span><span class="n">Stack</span><span class="p">,</span><span class="w"> </span><span class="n">RESULT_DECL</span><span class="w"> </span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">        </span><span class="n">P_GET_PROPERTY</span><span class="p">(</span><span class="n">FIntProperty</span><span class="p">,</span><span class="n">Z_Param_InParam1</span><span class="p">);</span>
+<span class="w">        </span><span class="n">P_GET_PROPERTY</span><span class="p">(</span><span class="n">FIntProperty</span><span class="p">,</span><span class="n">Z_Param_InParam2</span><span class="p">);</span>
+<span class="w">        </span><span class="n">P_FINISH</span><span class="p">;</span>
+<span class="w">        </span><span class="n">P_NATIVE_BEGIN</span><span class="p">;</span>
+<span class="w">        </span><span class="o">*</span><span class="p">(</span><span class="n">int32</span><span class="o">*</span><span class="p">)</span><span class="n">Z_Param__Result</span><span class="o">=</span><span class="n">P_THIS</span><span class="o">-&gt;</span><span class="n">TestFunc</span><span class="p">(</span><span class="n">Z_Param_InParam1</span><span class="p">,</span><span class="n">Z_Param_InParam2</span><span class="p">);</span>
+<span class="w">        </span><span class="n">P_NATIVE_END</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// 展开宏</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">execTestFunc</span><span class="p">(</span><span class="w"> </span><span class="n">UObject</span><span class="o">*</span><span class="w"> </span><span class="n">Context</span><span class="p">,</span><span class="w"> </span><span class="n">FFrame</span><span class="o">&amp;</span><span class="w"> </span><span class="n">Stack</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="k">const</span><span class="w"> </span><span class="n">Z_Param__Result</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">int32</span><span class="w"> </span><span class="n">Z_Param_InParam1</span><span class="o">=</span><span class="w"> </span><span class="n">FIntProperty</span><span class="o">::</span><span class="n">GetDefaultPropertyValue</span><span class="p">();</span><span class="w">                    </span>
+<span class="w">    </span><span class="n">Stack</span><span class="p">.</span><span class="n">StepCompiledIn</span><span class="o">&lt;</span><span class="n">FIntProperty</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="n">Z_Param_InParam1</span><span class="p">);</span>
+<span class="w">    </span><span class="n">int32</span><span class="w"> </span><span class="n">Z_Param_InParam2</span><span class="o">=</span><span class="w"> </span><span class="n">FIntProperty</span><span class="o">::</span><span class="n">GetDefaultPropertyValue</span><span class="p">();</span><span class="w">                    </span>
+<span class="w">    </span><span class="n">Stack</span><span class="p">.</span><span class="n">StepCompiledIn</span><span class="o">&lt;</span><span class="n">FIntProperty</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="n">Z_Param_InParam2</span><span class="p">);</span>
+
+<span class="w">    </span><span class="o">*</span><span class="p">(</span><span class="n">int32</span><span class="o">*</span><span class="p">)</span><span class="n">Z_Param__Result</span><span class="o">=</span><span class="n">P_THIS</span><span class="o">-&gt;</span><span class="n">TestFunc</span><span class="p">(</span><span class="n">Z_Param_InParam1</span><span class="p">,</span><span class="n">Z_Param_InParam2</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>很明显，上述代码为TestFunc构造了一个全局static函数，准备传递给function的Meta对象。</p>
+<p><strong>3.3.2.2.构造function的Meta对象</strong></p>
+<p>UE为function定义的Meta数据类型为UFunction</p>
+<p>与class/struct类似，UE为构造UFunction数据，定义了一套构造参数：FFunctionParams</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">FFunctionParams</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">UObject</span><span class="o">*</span><span class="w">                          </span><span class="p">(</span><span class="o">*</span><span class="n">OuterFunc</span><span class="p">)();</span><span class="w">        </span><span class="c1">// 所属class的UClass对象</span>
+<span class="w">    </span><span class="n">UFunction</span><span class="o">*</span><span class="w">                        </span><span class="p">(</span><span class="o">*</span><span class="n">SuperFunc</span><span class="p">)();</span><span class="w">        </span><span class="c1">// 继承函数的Meta对象</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w">                         </span><span class="n">NameUTF8</span><span class="p">;</span><span class="w">            </span><span class="c1">// 函数名</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w">                         </span><span class="n">OwningClassName</span><span class="p">;</span><span class="w">    </span><span class="c1">// 委托相关，暂不关注</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w">                         </span><span class="n">DelegateName</span><span class="p">;</span><span class="w">        </span><span class="c1">// 委托相关，暂不关注</span>
+<span class="w">    </span><span class="n">SIZE_T</span><span class="w">                              </span><span class="n">StructureSize</span><span class="p">;</span><span class="w">        </span><span class="c1">// 函数参数结构的size</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">FPropertyParamsBase</span><span class="o">*</span><span class="w"> </span><span class="k">const</span><span class="o">*</span><span class="w">   </span><span class="n">PropertyArray</span><span class="p">;</span><span class="w">        </span><span class="c1">// 函数参数列表</span>
+<span class="w">    </span><span class="n">int32</span><span class="w">                               </span><span class="n">NumProperties</span><span class="p">;</span><span class="w">        </span><span class="c1">// 函数参数个数</span>
+<span class="w">    </span><span class="n">EObjectFlags</span><span class="w">                        </span><span class="n">ObjectFlags</span><span class="p">;</span>
+<span class="w">    </span><span class="n">EFunctionFlags</span><span class="w">                      </span><span class="n">FunctionFlags</span><span class="p">;</span>
+<span class="w">    </span><span class="n">uint16</span><span class="w">                              </span><span class="n">RPCId</span><span class="p">;</span>
+<span class="w">    </span><span class="n">uint16</span><span class="w">                              </span><span class="n">RPCResponseId</span><span class="p">;</span>
+<span class="cp">#if WITH_METADATA</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">FMetaDataPairParam</span><span class="o">*</span><span class="w">           </span><span class="n">MetaDataArray</span><span class="p">;</span>
+<span class="w">    </span><span class="n">int32</span><span class="w">                               </span><span class="n">NumMetaData</span><span class="p">;</span>
+<span class="cp">#endif</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>UE为上述示例UFGReflectionTest生成的FFunctionParams数据如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">Z_Construct_UFunction_UFGReflectionTest_TestFunc_Statics</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="c1">// 参数数据结构，return值也在该结构中 该结构定义在此的最重要作用，是计算出函数参数所需size</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">FGReflectionTest_eventTestFunc_Parms</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="n">int32</span><span class="w"> </span><span class="n">InParam1</span><span class="p">;</span>
+<span class="w">        </span><span class="n">int32</span><span class="w"> </span><span class="n">InParam2</span><span class="p">;</span>
+<span class="w">        </span><span class="n">int32</span><span class="w"> </span><span class="n">ReturnValue</span><span class="p">;</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">FUnsizedIntPropertyParams</span><span class="w"> </span><span class="n">NewProp_InParam1</span><span class="p">;</span>
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">FUnsizedIntPropertyParams</span><span class="w"> </span><span class="n">NewProp_InParam2</span><span class="p">;</span>
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">FIntPropertyParams</span><span class="w"> </span><span class="n">NewProp_ReturnValue</span><span class="p">;</span>
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">FPropertyParamsBase</span><span class="o">*</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">PropPointers</span><span class="p">[];</span>
+<span class="cp">#if WITH_METADATA</span>
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">FMetaDataPairParam</span><span class="w"> </span><span class="n">Function_MetaDataParams</span><span class="p">[];</span>
+<span class="cp">#endif</span>
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">FFunctionParams</span><span class="w"> </span><span class="n">FuncParams</span><span class="p">;</span>
+<span class="p">};</span>
+
+<span class="c1">// 为每一个参数定义的主要内容包括：名字、引用标志、参数在FGReflectionTest_eventTestFunc_Parms结构中的偏移</span>
+<span class="k">const</span><span class="w"> </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">FUnsizedIntPropertyParams</span><span class="w"> </span><span class="n">Z_Construct_UFunction_UFGReflectionTest_TestFunc_Statics</span><span class="o">::</span><span class="n">NewProp_InParam1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span>
+<span class="w">    </span><span class="s">&quot;InParam1&quot;</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="p">(</span><span class="n">EPropertyFlags</span><span class="p">)</span><span class="mh">0x0010000000000080</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">EPropertyGenFlags</span><span class="o">::</span><span class="n">Int</span><span class="p">,</span><span class="w"> </span><span class="n">RF_Public</span><span class="o">|</span><span class="n">RF_Transient</span><span class="o">|</span><span class="n">RF_MarkAsNative</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="n">STRUCT_OFFSET</span><span class="p">(</span><span class="n">FGReflectionTest_eventTestFunc_Parms</span><span class="p">,</span><span class="w"> </span><span class="n">InParam1</span><span class="p">),</span><span class="w"> </span>
+<span class="w">    </span><span class="n">METADATA_PARAMS</span><span class="p">(</span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span>
+<span class="p">};</span>
+
+<span class="k">const</span><span class="w"> </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">FUnsizedIntPropertyParams</span><span class="w"> </span><span class="n">Z_Construct_UFunction_UFGReflectionTest_TestFunc_Statics</span><span class="o">::</span><span class="n">NewProp_InParam2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span>
+<span class="w">    </span><span class="s">&quot;InParam2&quot;</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="p">(</span><span class="n">EPropertyFlags</span><span class="p">)</span><span class="mh">0x0010000000000080</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">EPropertyGenFlags</span><span class="o">::</span><span class="n">Int</span><span class="p">,</span><span class="w"> </span><span class="n">RF_Public</span><span class="o">|</span><span class="n">RF_Transient</span><span class="o">|</span><span class="n">RF_MarkAsNative</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="n">STRUCT_OFFSET</span><span class="p">(</span><span class="n">FGReflectionTest_eventTestFunc_Parms</span><span class="p">,</span><span class="w"> </span><span class="n">InParam2</span><span class="p">),</span><span class="w"> </span>
+<span class="w">    </span><span class="n">METADATA_PARAMS</span><span class="p">(</span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="p">};</span>
+
+<span class="k">const</span><span class="w"> </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">FIntPropertyParams</span><span class="w"> </span><span class="n">Z_Construct_UFunction_UFGReflectionTest_TestFunc_Statics</span><span class="o">::</span><span class="n">NewProp_ReturnValue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span>
+<span class="w">    </span><span class="s">&quot;ReturnValue&quot;</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="p">(</span><span class="n">EPropertyFlags</span><span class="p">)</span><span class="mh">0x0010000000000580</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">EPropertyGenFlags</span><span class="o">::</span><span class="n">Int</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="n">RF_Public</span><span class="o">|</span><span class="n">RF_Transient</span><span class="o">|</span><span class="n">RF_MarkAsNative</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="n">STRUCT_OFFSET</span><span class="p">(</span><span class="n">FGReflectionTest_eventTestFunc_Parms</span><span class="p">,</span><span class="w"> </span><span class="n">ReturnValue</span><span class="p">),</span><span class="w"> </span>
+<span class="w">    </span><span class="n">METADATA_PARAMS</span><span class="p">(</span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span>
+<span class="p">};</span>
+
+<span class="c1">// UFunction会将参数作为属性，将参数维护进入childProperty列表</span>
+<span class="k">const</span><span class="w"> </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">FPropertyParamsBase</span><span class="o">*</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">Z_Construct_UFunction_UFGReflectionTest_TestFunc_Statics</span><span class="o">::</span><span class="n">PropPointers</span><span class="p">[]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">FPropertyParamsBase</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">Z_Construct_UFunction_UFGReflectionTest_TestFunc_Statics</span><span class="o">::</span><span class="n">NewProp_InParam1</span><span class="p">,</span>
+<span class="w">    </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">FPropertyParamsBase</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">Z_Construct_UFunction_UFGReflectionTest_TestFunc_Statics</span><span class="o">::</span><span class="n">NewProp_InParam2</span><span class="p">,</span>
+<span class="w">    </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">FPropertyParamsBase</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">Z_Construct_UFunction_UFGReflectionTest_TestFunc_Statics</span><span class="o">::</span><span class="n">NewProp_ReturnValue</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="cp">#if WITH_METADATA</span>
+<span class="k">const</span><span class="w"> </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">FMetaDataPairParam</span><span class="w"> </span><span class="n">Z_Construct_UFunction_UFGReflectionTest_TestFunc_Statics</span><span class="o">::</span><span class="n">Function_MetaDataParams</span><span class="p">[]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;ModuleRelativePath&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;AI/FGReflectionTest.h&quot;</span><span class="w"> </span><span class="p">},</span>
+<span class="p">};</span>
+<span class="cp">#endif</span>
+
+<span class="k">const</span><span class="w"> </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">FFunctionParams</span><span class="w"> </span><span class="n">Z_Construct_UFunction_UFGReflectionTest_TestFunc_Statics</span><span class="o">::</span><span class="n">FuncParams</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span>
+<span class="w">    </span><span class="p">(</span><span class="n">UObject</span><span class="o">*</span><span class="p">(</span><span class="o">*</span><span class="p">)())</span><span class="n">Z_Construct_UClass_UFGReflectionTest</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="s">&quot;TestFunc&quot;</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="k">sizeof</span><span class="p">(</span><span class="n">Z_Construct_UFunction_UFGReflectionTest_TestFunc_Statics</span><span class="o">::</span><span class="n">FGReflectionTest_eventTestFunc_Parms</span><span class="p">),</span><span class="w"> </span>
+<span class="w">    </span><span class="n">Z_Construct_UFunction_UFGReflectionTest_TestFunc_Statics</span><span class="o">::</span><span class="n">PropPointers</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="n">UE_ARRAY_COUNT</span><span class="p">(</span><span class="n">Z_Construct_UFunction_UFGReflectionTest_TestFunc_Statics</span><span class="o">::</span><span class="n">PropPointers</span><span class="p">),</span><span class="w"> </span>
+<span class="w">    </span><span class="n">RF_Public</span><span class="o">|</span><span class="n">RF_Transient</span><span class="o">|</span><span class="n">RF_MarkAsNative</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="n">EFunctionFlags</span><span class="p">)</span><span class="mh">0x00020401</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="n">METADATA_PARAMS</span><span class="p">(</span><span class="n">Z_Construct_UFunction_UFGReflectionTest_TestFunc_Statics</span><span class="o">::</span><span class="n">Function_MetaDataParams</span><span class="p">,</span><span class="w"> </span>
+<span class="w">                    </span><span class="n">UE_ARRAY_COUNT</span><span class="p">(</span><span class="n">Z_Construct_UFunction_UFGReflectionTest_TestFunc_Statics</span><span class="o">::</span><span class="n">Function_MetaDataParams</span><span class="p">))</span><span class="w"> </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>FFunctionParams中的内容，会分散赋值到UFunction与FProperty对象中：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20241230-1458-13.png" alt=""></p>
+<p>UFunction结构的重要字段解析：</p>
+<ol>
+<li><p>NumParms记录参数个数，包含returnValue</p>
+</li>
+<li><p>ParmsSize维护参数结构所需的内存size</p>
+</li>
+<li><p>ReturnValueOffset维护returnValue在参数结构中的偏移</p>
+</li>
+<li><p>Func维护对应static exec函数的指针</p>
+</li>
+<li><p>ChildProperties维护第一个参数的FProperty对象指针</p>
+</li>
+</ol>
+<p>FProperty结构的重要字段解析：</p>
+<ol>
+<li><p>ElementSize记录field的内存size</p>
+</li>
+<li><p>Offset_Internal记录field在所属类型中的地址偏移</p>
+</li>
+<li><p>Owner记录field的所属类型Meta数据</p>
+</li>
+<li><p>Next为所属类型维护下一个参数的FProperty数据指针</p>
+</li>
+<li><p>NamePrivate记录参数名字</p>
+</li>
+</ol>
+<p>根据UFunction对象中的ChildProperties数据 与
+FProperty中的Next数据，便能够拿到function中所有参数的FProperty数据。</p>
+<h4>3.3.3.维护UClass与UFunction的关联关系</h4>
+<p>重新看回UE为class生成的FClassParams 数据：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// class中的UFunction构造列表</span>
+<span class="k">const</span><span class="w"> </span><span class="n">FClassFunctionLinkInfo</span><span class="w"> </span><span class="n">Z_Construct_UClass_UFGReflectionTest_Statics</span><span class="o">::</span><span class="n">FuncInfo</span><span class="p">[]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="o">&amp;</span><span class="n">Z_Construct_UFunction_UFGReflectionTest_TestFunc</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;TestFunc&quot;</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="c1">// 1382218509</span>
+<span class="p">};</span>
+
+<span class="k">const</span><span class="w"> </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">FClassParams</span><span class="w"> </span><span class="n">Z_Construct_UClass_UFGReflectionTest_Statics</span><span class="o">::</span><span class="n">ClassParams</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="o">&amp;</span><span class="n">UFGReflectionTest</span><span class="o">::</span><span class="n">StaticClass</span><span class="p">,</span>
+<span class="w">    </span><span class="k">nullptr</span><span class="p">,</span>
+<span class="w">    </span><span class="o">&amp;</span><span class="n">StaticCppClassTypeInfo</span><span class="p">,</span>
+<span class="w">    </span><span class="n">DependentSingletons</span><span class="p">,</span>
+<span class="w">    </span><span class="n">FuncInfo</span><span class="p">,</span><span class="w"> </span><span class="c1">// 上面的UFunction构造列表</span>
+<span class="w">    </span><span class="n">Z_Construct_UClass_UFGReflectionTest_Statics</span><span class="o">::</span><span class="n">PropPointers</span><span class="p">,</span>
+<span class="w">    </span><span class="k">nullptr</span><span class="p">,</span>
+<span class="w">    </span><span class="n">UE_ARRAY_COUNT</span><span class="p">(</span><span class="n">DependentSingletons</span><span class="p">),</span>
+<span class="w">    </span><span class="n">UE_ARRAY_COUNT</span><span class="p">(</span><span class="n">FuncInfo</span><span class="p">),</span><span class="w"> </span><span class="c1">// 上面的UFunction构造列表个数</span>
+<span class="w">    </span><span class="n">UE_ARRAY_COUNT</span><span class="p">(</span><span class="n">Z_Construct_UClass_UFGReflectionTest_Statics</span><span class="o">::</span><span class="n">PropPointers</span><span class="p">),</span>
+<span class="w">    </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="mh">0x001000A0u</span><span class="p">,</span>
+<span class="w">    </span><span class="n">METADATA_PARAMS</span><span class="p">(</span><span class="n">Z_Construct_UClass_UFGReflectionTest_Statics</span><span class="o">::</span><span class="n">Class_MetaDataParams</span><span class="p">,</span><span class="w"> </span><span class="n">UE_ARRAY_COUNT</span><span class="p">(</span><span class="n">Z_Construct_UClass_UFGReflectionTest_Statics</span><span class="o">::</span><span class="n">Class_MetaDataParams</span><span class="p">))</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>ClassParams 中的FunctionLinkArray被赋值为FuncInfo[] ，然后将生成的UFunction对象绑定到UClass对象上：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">UClass::CreateLinkAndAddChildFunctionsToMap</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">FClassFunctionLinkInfo</span><span class="o">*</span><span class="w"> </span><span class="n">Functions</span><span class="p">,</span><span class="w"> </span><span class="n">uint32</span><span class="w"> </span><span class="n">NumFunctions</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(;</span><span class="w"> </span><span class="n">NumFunctions</span><span class="p">;</span><span class="w"> </span><span class="o">--</span><span class="n">NumFunctions</span><span class="p">,</span><span class="w"> </span><span class="o">++</span><span class="n">Functions</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">FuncNameUTF8</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Functions</span><span class="o">-&gt;</span><span class="n">FuncNameUTF8</span><span class="p">;</span>
+<span class="w">        </span><span class="n">UFunction</span><span class="o">*</span><span class="w">  </span><span class="n">Func</span><span class="w">         </span><span class="o">=</span><span class="w"> </span><span class="n">Functions</span><span class="o">-&gt;</span><span class="n">CreateFuncPtr</span><span class="p">();</span>
+
+<span class="w">        </span><span class="n">Func</span><span class="o">-&gt;</span><span class="n">Next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Children</span><span class="p">;</span>
+<span class="w">        </span><span class="n">Children</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Func</span><span class="p">;</span>
+
+<span class="w">        </span><span class="n">AddFunctionToFunctionMap</span><span class="p">(</span><span class="n">Func</span><span class="p">,</span><span class="w"> </span><span class="n">FName</span><span class="p">(</span><span class="n">UTF8_TO_TCHAR</span><span class="p">(</span><span class="n">FuncNameUTF8</span><span class="p">)));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>FClassParams中的内容，会分散赋值到UClass、UFunction与FProperty对象中：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20241230-1458-14.png" alt=""></p>
+<p>UClass结构的重要字段解析：</p>
+<ol>
+<li><p>FuncMap为class中的所有函数建立name到UFunction*的映射关系</p>
+</li>
+<li><p>NativeFunctionLookupTable为class中的所有原生函数维护static函数指针列表</p>
+</li>
+<li><p>ChildProperties维护class中首个field的FProperty数据指针</p>
+</li>
+<li><p>UField* Children维护首个函数的UFunction数据指针</p>
+</li>
+<li><p>SuperStruct维护父结构的Meta对象指针</p>
+</li>
+</ol>
+<p>UFunction结构的额外字段解析：</p>
+<ol>
+<li>Next为所属类型维护下一个函数的UFunction数据指针</li>
+</ol>
+<p>根据UClass对象中的Children数据 与 UFunction中的Next数据，便能够拿到class中所有函数的UFunction数据。</p>
+<h4>3.3.4.反射应用示例</h4>
+<div class="highlight"><pre><code><span></span><span class="c1">// 通过函数名字调用函数执行</span>
+<span class="n">UObject</span><span class="o">*</span><span class="w"> </span><span class="n">Object</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NewObject</span><span class="o">&lt;</span><span class="n">UObject</span><span class="o">&gt;</span><span class="p">(</span><span class="n">GetTransientPackage</span><span class="p">(),</span><span class="w"> </span><span class="n">TEXT</span><span class="p">(</span><span class="s">&quot;UFGReflectionTest&quot;</span><span class="p">));</span><span class="w"> </span><span class="c1">// 创建一个类实例</span>
+<span class="n">UClass</span><span class="o">*</span><span class="w"> </span><span class="n">MyClass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FindObject</span><span class="o">&lt;</span><span class="n">UClass</span><span class="o">&gt;</span><span class="p">(</span><span class="n">ANY_PACKAGE</span><span class="p">,</span><span class="w"> </span><span class="n">UTF8_TO_TCHAR</span><span class="p">(</span><span class="s">&quot;FGReflectionTest&quot;</span><span class="p">));</span><span class="w"> </span>
+<span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">TFieldIterator</span><span class="o">&lt;</span><span class="n">UFunction</span><span class="o">&gt;</span><span class="w"> </span><span class="n">FunctionIterator</span><span class="p">(</span><span class="n">MyClass</span><span class="p">);</span><span class="w"> </span><span class="n">FunctionIterator</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">FunctionIterator</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">UFunction</span><span class="o">*</span><span class="w"> </span><span class="n">Function</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">FunctionIterator</span><span class="p">;</span>
+<span class="w">    </span><span class="n">UE_LOG</span><span class="p">(</span><span class="n">LogTemp</span><span class="p">,</span><span class="w"> </span><span class="n">Warning</span><span class="p">,</span><span class="w"> </span><span class="n">TEXT</span><span class="p">(</span><span class="s">&quot;Function Name: %s&quot;</span><span class="p">),</span><span class="w"> </span><span class="o">*</span><span class="n">Function</span><span class="o">-&gt;</span><span class="n">GetName</span><span class="p">());</span>
+<span class="p">}</span>
+
+<span class="n">FName</span><span class="w"> </span><span class="n">FunctionName</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TEXT</span><span class="p">(</span><span class="s">&quot;TestFunc&quot;</span><span class="p">);</span><span class="w"> </span><span class="c1">// 要调用的函数名字</span>
+<span class="n">UFunction</span><span class="o">*</span><span class="w"> </span><span class="n">Function</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">MyClass</span><span class="o">-&gt;</span><span class="n">FindFunctionByName</span><span class="p">(</span><span class="n">FunctionName</span><span class="p">);</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">Function</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">uint8</span><span class="o">*</span><span class="w"> </span><span class="n">AllFunctionParam</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">uint8</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">FMemory_Alloca</span><span class="p">(</span><span class="n">Function</span><span class="o">-&gt;</span><span class="n">ParmsSize</span><span class="p">));</span>
+<span class="w">    </span><span class="n">FMemory</span><span class="o">::</span><span class="n">Memzero</span><span class="p">(</span><span class="n">AllFunctionParam</span><span class="p">,</span><span class="w"> </span><span class="n">Function</span><span class="o">-&gt;</span><span class="n">ParmsSize</span><span class="p">);</span>
+<span class="w">    </span><span class="n">FFrame</span><span class="w"> </span><span class="nf">Frame</span><span class="p">(</span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span><span class="n">Function</span><span class="p">,</span><span class="w"> </span><span class="n">AllFunctionParam</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// 设置函数的参数值</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">TFieldIterator</span><span class="o">&lt;</span><span class="n">FProperty</span><span class="o">&gt;</span><span class="w"> </span><span class="n">It</span><span class="p">(</span><span class="n">Function</span><span class="p">);</span><span class="w"> </span><span class="n">It</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">It</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="n">FProperty</span><span class="o">*</span><span class="w"> </span><span class="n">Param</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">It</span><span class="p">;</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">Param</span><span class="o">-&gt;</span><span class="n">HasAnyPropertyFlags</span><span class="p">(</span><span class="n">CPF_Parm</span><span class="p">))</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">            </span><span class="c1">// 根据参数类型设置参数值</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">Param</span><span class="o">-&gt;</span><span class="n">GetName</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s">&quot;InParam1&quot;</span><span class="p">)</span>
+<span class="w">            </span><span class="p">{</span>
+<span class="w">                </span><span class="n">FIntProperty</span><span class="o">*</span><span class="w"> </span><span class="n">IntParam</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">CastField</span><span class="o">&lt;</span><span class="n">FIntProperty</span><span class="o">&gt;</span><span class="p">(</span><span class="n">Param</span><span class="p">);</span>
+<span class="w">                </span><span class="n">int32</span><span class="w"> </span><span class="n">ParamValue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">42</span><span class="p">;</span><span class="w"> </span><span class="c1">// 设置整数参数值</span>
+<span class="w">                </span><span class="n">IntParam</span><span class="o">-&gt;</span><span class="n">SetPropertyValue_InContainer</span><span class="p">(</span><span class="n">Frame</span><span class="p">.</span><span class="n">Locals</span><span class="p">,</span><span class="w"> </span><span class="n">ParamValue</span><span class="p">);</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">            </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">Param</span><span class="o">-&gt;</span><span class="n">GetName</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s">&quot;InParam2&quot;</span><span class="p">)</span>
+<span class="w">            </span><span class="p">{</span>
+<span class="w">                </span><span class="n">FIntProperty</span><span class="o">*</span><span class="w"> </span><span class="n">IntParam</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">CastField</span><span class="o">&lt;</span><span class="n">FIntProperty</span><span class="o">&gt;</span><span class="p">(</span><span class="n">Param</span><span class="p">);</span>
+<span class="w">                </span><span class="n">int32</span><span class="w"> </span><span class="n">ParamValue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">58</span><span class="p">;</span><span class="w"> </span><span class="c1">// 设置整数参数值</span>
+<span class="w">                </span><span class="n">IntParam</span><span class="o">-&gt;</span><span class="n">SetPropertyValue_InContainer</span><span class="p">(</span><span class="n">Frame</span><span class="p">.</span><span class="n">Locals</span><span class="p">,</span><span class="w"> </span><span class="n">ParamValue</span><span class="p">);</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="n">Object</span><span class="o">-&gt;</span><span class="n">ProcessEvent</span><span class="p">(</span><span class="n">Function</span><span class="p">,</span><span class="w"> </span><span class="n">AllFunctionParam</span><span class="p">);</span>
+<span class="w">    </span><span class="n">UE_LOG</span><span class="p">(</span><span class="n">LogTemp</span><span class="p">,</span><span class="w"> </span><span class="n">Warning</span><span class="p">,</span><span class="w"> </span><span class="n">TEXT</span><span class="p">(</span><span class="s">&quot;函数返回值为：%d&quot;</span><span class="p">),</span><span class="w"> </span><span class="o">*</span><span class="p">(</span><span class="n">AllFunctionParam</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">Function</span><span class="o">-&gt;</span><span class="n">ReturnValueOffset</span><span class="p">));</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>输出结果：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20241230-1458-15.png" alt=""></p>
+<p>UObject会注册ExecuteUbergraph函数，因此输出函数中会比预想的多出一个。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// UObject会默认注册ExecuteUbergraph函数</span>
+<span class="k">const</span><span class="w"> </span><span class="n">FClassFunctionLinkInfo</span><span class="w"> </span><span class="n">Z_Construct_UClass_UObject_Statics</span><span class="o">::</span><span class="n">FuncInfo</span><span class="p">[]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="o">&amp;</span><span class="n">Z_Construct_UFunction_UObject_ExecuteUbergraph</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;ExecuteUbergraph&quot;</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="c1">// 3729755051</span>
+<span class="p">};</span>
+</code></pre></div>
+<h4>3.3.5.引用传参的处理</h4>
+<p>为我们的class示例新增一个简单的UFUNCTION，里面使用引用传参：</p>
+<div class="highlight"><pre><code><span></span><span class="n">UFUNCTION</span><span class="p">()</span>
+<span class="n">int32</span><span class="w"> </span><span class="n">TestFuncPlus</span><span class="p">(</span><span class="n">int32</span><span class="w"> </span><span class="o">&amp;</span><span class="n">InParam1</span><span class="p">,</span><span class="w"> </span><span class="n">int32</span><span class="w"> </span><span class="o">&amp;</span><span class="n">InParam2</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">   </span><span class="n">InParam1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">InParam2</span><span class="p">;</span>
+<span class="w">   </span><span class="k">return</span><span class="w"> </span><span class="n">InParam1</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>UE自动生成的exec函数中，获取参数时换为了<code>P_GET_PROPERTY_REF</code>：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#define P_GET_PROPERTY_REF(PropertyType, ParamName)                                                \</span>
+<span class="cp">    PropertyType::TCppType ParamName##Temp = PropertyType::GetDefaultPropertyValue();            \</span>
+<span class="cp">    PropertyType::TCppType&amp; ParamName = Stack.StepCompiledInRef&lt;PropertyType, PropertyType::TCppType&gt;(&amp;ParamName##Temp);</span>
+
+<span class="n">DEFINE_FUNCTION</span><span class="p">(</span><span class="n">UFGReflectionTest</span><span class="o">::</span><span class="n">execTestFuncPlus</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">P_GET_PROPERTY_REF</span><span class="p">(</span><span class="n">FIntProperty</span><span class="p">,</span><span class="n">Z_Param_Out_InParam1</span><span class="p">);</span>
+<span class="w">    </span><span class="n">P_GET_PROPERTY_REF</span><span class="p">(</span><span class="n">FIntProperty</span><span class="p">,</span><span class="n">Z_Param_Out_InParam2</span><span class="p">);</span>
+
+<span class="w">    </span><span class="o">*</span><span class="p">(</span><span class="n">int32</span><span class="o">*</span><span class="p">)</span><span class="n">Z_Param__Result</span><span class="o">=</span><span class="n">P_THIS</span><span class="o">-&gt;</span><span class="n">TestFuncPlus</span><span class="p">(</span><span class="n">Z_Param_Out_InParam1</span><span class="p">,</span><span class="n">Z_Param_Out_InParam2</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>代码中Stack.StepCompiledInRef会返回传入参数的数据引用，以此实现反射时对引用传参函数的调用。</p>
+<h3>3.4.Enum反射实现</h3>
+<p>先创建一个最简单的enum示例：</p>
+<div class="highlight"><pre><code><span></span><span class="n">UENUM</span><span class="p">()</span>
+<span class="k">enum</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">EFGReflectionEnumTest</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">uint8</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">Type1</span><span class="p">,</span>
+<span class="w">    </span><span class="n">Type2</span><span class="p">,</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>生成的代码gen.h</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 循环处理宏</span>
+<span class="cp">#define FOREACH_ENUM_EFGREFLECTIONENUMTEST(op) \</span>
+<span class="cp">    op(EFGReflectionEnumTest::Type1) \</span>
+<span class="cp">    op(EFGReflectionEnumTest::Type2) </span>
+
+<span class="k">enum</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">EFGReflectionEnumTest</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">uint8</span><span class="p">;</span>
+<span class="k">template</span><span class="o">&lt;&gt;</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">TIsUEnumClass</span><span class="o">&lt;</span><span class="n">EFGReflectionEnumTest</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">Value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="w"> </span><span class="p">};</span><span class="w"> </span><span class="p">};</span>
+<span class="k">template</span><span class="o">&lt;&gt;</span><span class="w"> </span><span class="n">FORTUNEGAME_API</span><span class="w"> </span><span class="n">UEnum</span><span class="o">*</span><span class="w"> </span><span class="n">StaticEnum</span><span class="o">&lt;</span><span class="n">EFGReflectionEnumTest</span><span class="o">&gt;</span><span class="p">();</span>
+</code></pre></div>
+<p>可以看出，UE为enum定义的Meta数据类型为UEnum。</p>
+<p>理所当然，UE为构造UEnum数据，定义了一套构造参数：FEnumParams</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">FEnumParams</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">UObject</span><span class="o">*</span><span class="w">                  </span><span class="p">(</span><span class="o">*</span><span class="n">OuterFunc</span><span class="p">)();</span><span class="w">        </span><span class="c1">// 获取enum定义所在的UObject</span>
+<span class="w">    </span><span class="n">FText</span><span class="w">                     </span><span class="p">(</span><span class="o">*</span><span class="n">DisplayNameFunc</span><span class="p">)(</span><span class="n">int32</span><span class="p">);</span><span class="w">    </span><span class="c1">// 自定义的enum别名输出函数</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w">                 </span><span class="n">NameUTF8</span><span class="p">;</span><span class="w">            </span><span class="c1">// enum名字</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w">                 </span><span class="n">CppTypeUTF8</span><span class="p">;</span><span class="w">        </span><span class="c1">// 数据类型名</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">FEnumeratorParam</span><span class="o">*</span><span class="w">     </span><span class="n">EnumeratorParams</span><span class="p">;</span><span class="w">    </span><span class="c1">// 枚举值的定义</span>
+<span class="w">    </span><span class="n">int32</span><span class="w">                       </span><span class="n">NumEnumerators</span><span class="p">;</span><span class="w">        </span><span class="c1">// 枚举值个数</span>
+<span class="w">    </span><span class="n">EObjectFlags</span><span class="w">                </span><span class="n">ObjectFlags</span><span class="p">;</span>
+<span class="w">    </span><span class="n">EEnumFlags</span><span class="w">                  </span><span class="n">EnumFlags</span><span class="p">;</span>
+<span class="w">    </span><span class="n">uint8</span><span class="w">                       </span><span class="n">CppForm</span><span class="p">;</span><span class="w"> </span><span class="c1">// this is of type UEnum::ECppForm</span>
+<span class="cp">#if WITH_METADATA</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">FMetaDataPairParam</span><span class="o">*</span><span class="w">   </span><span class="n">MetaDataArray</span><span class="p">;</span>
+<span class="w">    </span><span class="n">int32</span><span class="w">                       </span><span class="n">NumMetaData</span><span class="p">;</span>
+<span class="cp">#endif</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>UE在自动生成的gen.cpp结构中，为EFGReflectionEnumTest 实例化的FEnumParams对象如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">const</span><span class="w"> </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">FEnumeratorParam</span><span class="w"> </span><span class="n">Z_Construct_UEnum_FortuneGame_EFGReflectionEnumTest_Statics</span><span class="o">::</span><span class="n">Enumerators</span><span class="p">[]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;EFGReflectionEnumTest::Type1&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="n">int64</span><span class="p">)</span><span class="n">EFGReflectionEnumTest</span><span class="o">::</span><span class="n">Type1</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;EFGReflectionEnumTest::Type2&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="n">int64</span><span class="p">)</span><span class="n">EFGReflectionEnumTest</span><span class="o">::</span><span class="n">Type2</span><span class="w"> </span><span class="p">},</span>
+<span class="p">};</span>
+
+<span class="k">const</span><span class="w"> </span><span class="n">UECodeGen_Private</span><span class="o">::</span><span class="n">FEnumParams</span><span class="w"> </span><span class="n">Z_Construct_UEnum_FortuneGame_EFGReflectionEnumTest_Statics</span><span class="o">::</span><span class="n">EnumParams</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">   </span><span class="p">(</span><span class="n">UObject</span><span class="o">*</span><span class="p">(</span><span class="o">*</span><span class="p">)())</span><span class="n">Z_Construct_UPackage__Script_FortuneGame</span><span class="p">,</span>
+<span class="w">   </span><span class="k">nullptr</span><span class="p">,</span>
+<span class="w">   </span><span class="s">&quot;EFGReflectionEnumTest&quot;</span><span class="p">,</span>
+<span class="w">   </span><span class="s">&quot;EFGReflectionEnumTest&quot;</span><span class="p">,</span>
+<span class="w">   </span><span class="n">Z_Construct_UEnum_FortuneGame_EFGReflectionEnumTest_Statics</span><span class="o">::</span><span class="n">Enumerators</span><span class="p">,</span>
+<span class="w">   </span><span class="n">UE_ARRAY_COUNT</span><span class="p">(</span><span class="n">Z_Construct_UEnum_FortuneGame_EFGReflectionEnumTest_Statics</span><span class="o">::</span><span class="n">Enumerators</span><span class="p">),</span>
+<span class="w">   </span><span class="n">RF_Public</span><span class="o">|</span><span class="n">RF_Transient</span><span class="o">|</span><span class="n">RF_MarkAsNative</span><span class="p">,</span>
+<span class="w">   </span><span class="n">EEnumFlags</span><span class="o">::</span><span class="n">None</span><span class="p">,</span>
+<span class="w">   </span><span class="p">(</span><span class="n">uint8</span><span class="p">)</span><span class="n">UEnum</span><span class="o">::</span><span class="n">ECppForm</span><span class="o">::</span><span class="n">EnumClass</span><span class="p">,</span>
+<span class="w">   </span><span class="n">METADATA_PARAMS</span><span class="p">(</span><span class="n">Z_Construct_UEnum_FortuneGame_EFGReflectionEnumTest_Statics</span><span class="o">::</span><span class="n">Enum_MetaDataParams</span><span class="p">,</span><span class="w"> </span><span class="n">UE_ARRAY_COUNT</span><span class="p">(</span><span class="n">Z_Construct_UEnum_FortuneGame_EFGReflectionEnumTest_Statics</span><span class="o">::</span><span class="n">Enum_MetaDataParams</span><span class="p">))</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>FEnumParams所包含的内容，会被赋值到各个不同的结构中：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20241230-1458-16.png" alt=""></p>
+<p>UEnum结构的重要字段解析：</p>
+<ol>
+<li><p>Names维护enum名字与value的映射对</p>
+</li>
+<li><p>EnumDisplayNameFn维护用户自定义的enum别名输出函数</p>
+</li>
+<li><p>EnumPackage记录enum定义所在package的名字</p>
+</li>
+<li><p>AllEnumNames维护全局数据：package内的所有UEnum数据</p>
+</li>
+</ol>
+<p>另外UEnum提供了大量反射相关接口：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20241230-1458-17.png" alt=""></p>
+<h3>3.5.UE反射系统实现概览</h3>
+<p>根据上述Struct、Class、Enum的反射实现，总结出UE反射系统实现概览图如下：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20241230-1458-18.png" alt=""></p>
+<h3>3.6.总结</h3>
+<p>相比于piccolo，UE的反射系统实现复杂得多，不论是结构关系还是功能层次都显得更加晦涩。</p>
+<p>但不可否认的是UE为这套反射系统实现了无比完善的功能特性，也为运行性能做了一定的优化实现。</p>
+<p>最后，希望这篇文章能对大家理解与使用UE反射系统有所帮助。</p>
+<h2>参考资料</h2>
+<ul>
+<li><a href="https://games104.boomingtech.com/sc/">GAMES104（现代游戏引擎入门必修课）</a></li>
+<li><a href="https://zhuanlan.zhihu.com/p/61042237">《InsideUE4》反射实战</a></li>
+</ul>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "UE反射系统实现解析.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

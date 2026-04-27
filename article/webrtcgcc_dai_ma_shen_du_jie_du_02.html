@@ -1,0 +1,857 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>WebRTC GCC代码深度解读02 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="WebRTC GCC代码深度解读02,WebRTC,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="WebRTC GCC代码深度解读(5)基于Loss的带宽估计v1版本<br/>WebRTC GCC代码深度解读(6)基于Loss的带宽估计v2版本<br/>WebRTC GCC代码深度解读(7)InterArrivalDelta<br/>WebRTC GCC代码深度解读(8)TrendlineEstimator" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>WebRTC GCC代码深度解读02</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2022-02-26 14:20
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_webrtc.html' class='article_tag'>WebRTC</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://zhuanlan.zhihu.com/p/490491574' target='blank'>WebRTC GCC代码深度解读(5)基于Loss的带宽估计v1版本</a></p></h4>
+<p>前面一篇，我们介绍过原始版本的丢包估计，有三个版本，一个是<code>SendSideBandwidthEstimation</code>，另外两个是<code>LossBasedBandwidthEstimation</code>和<code>LossBasedBweV2</code>。这一篇，我们介绍下V1版本<code>LossBasedBandwidthEstimation</code>。</p>
+<p>这只是一个实验版本，大家可以放轻松阅读。</p>
+<h2>1. 主要思想介绍</h2>
+<p>基于丢包的带宽估计，在最初的版本里面（<code>SendSideBandwidthEstimation</code>）是直接和阈值来判断，决定带宽是否增加或者降低。这个版本的也差不多，但是有一些不同的地方，主要在于丢包阈值的选取以及增加/降低的码率不是一个固定的值，而是根据丢包和预期的重传码率来决定的。</p>
+<p>这里，我们设置了一个丢包导致N次重传的码率阈值，在阈值选取的时候，我们会保证我们的重传码率控制在这个范围内。</p>
+<p>这个实现没有使用固定阈值，存在一定的优势，毕竟固定的阈值不是很合理。但是由于还在实验阶段，并没有太多数据支撑。</p>
+<h2>2. 源码解读</h2>
+<h3>2.1 接口定义</h3>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">LossBasedBandwidthEstimation</span><span class="w"> </span><span class="p">{</span>
+<span class="w"> </span><span class="k">public</span><span class="o">:</span>
+<span class="w">  </span><span class="c1">// Returns the new estimate.</span>
+<span class="w">  </span><span class="c1">// wanted_bitrate： 需求的带宽</span>
+<span class="w">  </span><span class="n">DataRate</span><span class="w"> </span><span class="n">Update</span><span class="p">(</span><span class="n">Timestamp</span><span class="w"> </span><span class="n">at_time</span><span class="p">,</span>
+<span class="w">                  </span><span class="n">DataRate</span><span class="w"> </span><span class="n">min_bitrate</span><span class="p">,</span>
+<span class="w">                  </span><span class="n">DataRate</span><span class="w"> </span><span class="n">wanted_bitrate</span><span class="p">,</span>
+<span class="w">                  </span><span class="n">TimeDelta</span><span class="w"> </span><span class="n">last_round_trip_time</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 输入TCC ACK的码率</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">UpdateAcknowledgedBitrate</span><span class="p">(</span><span class="n">DataRate</span><span class="w"> </span><span class="n">acknowledged_bitrate</span><span class="p">,</span>
+<span class="w">                                 </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">at_time</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 设置初始码率</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">Initialize</span><span class="p">(</span><span class="n">DataRate</span><span class="w"> </span><span class="n">bitrate</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 返回是否开启基于丢包的带宽估计</span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="nf">Enabled</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">config_</span><span class="p">.</span><span class="n">enabled</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// Returns true if LossBasedBandwidthEstimation is enabled and have</span>
+<span class="w">  </span><span class="c1">// received loss statistics. Ie, this class require transport feedback.</span>
+<span class="w">  </span><span class="c1">// 返回是否在使用基于丢包的带宽估计</span>
+<span class="w">  </span><span class="c1">// 根据enable标志和loss统计是否存在来判断</span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="nf">InUse</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">Enabled</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">last_loss_packet_report_</span><span class="p">.</span><span class="n">IsFinite</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// 输入TCC feedback信息，更新丢包</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">UpdateLossStatistics</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">PacketResult</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">packet_results</span><span class="p">,</span>
+<span class="w">                            </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">at_time</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 获得估计的码率</span>
+<span class="w">  </span><span class="n">DataRate</span><span class="w"> </span><span class="nf">GetEstimate</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">loss_based_bitrate_</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+
+<span class="w"> </span><span class="k">private</span><span class="o">:</span>
+<span class="w">  </span><span class="k">friend</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">GoogCcStatePrinter</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">Reset</span><span class="p">(</span><span class="n">DataRate</span><span class="w"> </span><span class="n">bitrate</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 增加估计带宽时的丢包阈值</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="nf">loss_increase_threshold</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 降低估计带宽时的丢包阈值</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="nf">loss_decrease_threshold</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 重置码率为请求码率时候的丢包阈值</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="nf">loss_reset_threshold</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 降低的码率，ACK码率的0.99倍</span>
+<span class="w">  </span><span class="n">DataRate</span><span class="w"> </span><span class="nf">decreased_bitrate</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">LossBasedControlConfig</span><span class="w"> </span><span class="n">config_</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="n">average_loss_</span><span class="p">;</span><span class="w">             </span><span class="c1">// 平均丢包</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="n">average_loss_max_</span><span class="p">;</span><span class="w">         </span><span class="c1">// 最大丢包</span>
+<span class="w">  </span><span class="n">DataRate</span><span class="w"> </span><span class="n">loss_based_bitrate_</span><span class="p">;</span><span class="w">     </span><span class="c1">// 估计的码率</span>
+<span class="w">  </span><span class="n">DataRate</span><span class="w"> </span><span class="n">acknowledged_bitrate_max_</span><span class="p">;</span><span class="w">   </span><span class="c1">// ACK码率的最大值</span>
+<span class="w">  </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">acknowledged_bitrate_last_update_</span><span class="p">;</span><span class="w"> </span><span class="c1">// 上次估计的ACK码率</span>
+<span class="w">  </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">time_last_decrease_</span><span class="p">;</span><span class="w">                </span><span class="c1">// 上次降低带宽的时间</span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">has_decreased_since_last_loss_report_</span><span class="p">;</span><span class="w">   </span><span class="c1">// 上次loss报告后是否降低带宽</span>
+<span class="w">  </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">last_loss_packet_report_</span><span class="p">;</span><span class="w">           </span><span class="c1">// 上次loss报告时间</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="n">last_loss_ratio_</span><span class="p">;</span><span class="w">                      </span><span class="c1">// 上次的loss ratio，单次统计，没有做过平滑</span>
+<span class="p">};</span>
+</code></pre></div>
+<h3>2.2 丢包更新</h3>
+<div class="highlight"><pre><code><span></span><span class="c1">// 输入TCC feedback，从中获取丢包信息</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">LossBasedBandwidthEstimation::UpdateLossStatistics</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">PacketResult</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">packet_results</span><span class="p">,</span>
+<span class="w">    </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">at_time</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">packet_results</span><span class="p">.</span><span class="n">empty</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_NOTREACHED</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 统计丢包个数和丢包率</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">loss_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">pkt</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">packet_results</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">loss_count</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="o">!</span><span class="n">pkt</span><span class="p">.</span><span class="n">IsReceived</span><span class="p">()</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">last_loss_ratio_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">double</span><span class="o">&gt;</span><span class="p">(</span><span class="n">loss_count</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">packet_results</span><span class="p">.</span><span class="n">size</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// 两次feedback的间隔</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">TimeDelta</span><span class="w"> </span><span class="n">time_passed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">last_loss_packet_report_</span><span class="p">.</span><span class="n">IsFinite</span><span class="p">()</span>
+<span class="w">                                    </span><span class="o">?</span><span class="w"> </span><span class="n">at_time</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">last_loss_packet_report_</span>
+<span class="w">                                    </span><span class="o">:</span><span class="w"> </span><span class="n">TimeDelta</span><span class="o">::</span><span class="n">Seconds</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span>
+<span class="w">  </span><span class="n">last_loss_packet_report_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">at_time</span><span class="p">;</span>
+<span class="w">  </span><span class="n">has_decreased_since_last_loss_report_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 计算平均丢包率，窗口默认800ms，如果间隔低于这个值，那么当前值占比会变低</span>
+<span class="w">  </span><span class="n">average_loss_</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">ExponentialUpdate</span><span class="p">(</span><span class="n">config_</span><span class="p">.</span><span class="n">loss_window</span><span class="p">,</span><span class="w"> </span><span class="n">time_passed</span><span class="p">)</span><span class="w"> </span><span class="o">*</span>
+<span class="w">                   </span><span class="p">(</span><span class="n">last_loss_ratio_</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">average_loss_</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 计算最大平均丢包率</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">average_loss_</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">average_loss_max_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">average_loss_max_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">average_loss_</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 最大值平滑降低</span>
+<span class="w">    </span><span class="c1">// 窗口默认800ms</span>
+<span class="w">    </span><span class="n">average_loss_max_</span><span class="w"> </span><span class="o">+=</span>
+<span class="w">        </span><span class="n">ExponentialUpdate</span><span class="p">(</span><span class="n">config_</span><span class="p">.</span><span class="n">loss_max_window</span><span class="p">,</span><span class="w"> </span><span class="n">time_passed</span><span class="p">)</span><span class="w"> </span><span class="o">*</span>
+<span class="w">        </span><span class="p">(</span><span class="n">average_loss_</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">average_loss_max_</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// 平滑系数，根据间隔的大小来决定，间隔越大，那么数据约可靠，占比越高</span>
+<span class="c1">// 如果两次loss间隔非常短，如0ms，那么最终系数为0，</span>
+<span class="c1">// 则这次的结果不参与平均和最大平均结果的更新</span>
+<span class="c1">// 如果interval非常大，则当前这次的数据权重更大</span>
+<span class="kt">double</span><span class="w"> </span><span class="nf">ExponentialUpdate</span><span class="p">(</span><span class="n">TimeDelta</span><span class="w"> </span><span class="n">window</span><span class="p">,</span><span class="w"> </span><span class="n">TimeDelta</span><span class="w"> </span><span class="n">interval</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Use the convention that exponential window length (which is really</span>
+<span class="w">  </span><span class="c1">// infinite) is the time it takes to dampen to 1/e.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">window</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">TimeDelta</span><span class="o">::</span><span class="n">Zero</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_NOTREACHED</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mf">1.0f</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mf">1.0f</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">exp</span><span class="p">(</span><span class="n">interval</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">window</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">-1.0</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>2.3 ACK码率更新</h3>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">LossBasedBandwidthEstimation::UpdateAcknowledgedBitrate</span><span class="p">(</span>
+<span class="w">    </span><span class="n">DataRate</span><span class="w"> </span><span class="n">acknowledged_bitrate</span><span class="p">,</span>
+<span class="w">    </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">at_time</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 两次TCC  ACK码率更新的间隔，默认未1s</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">TimeDelta</span><span class="w"> </span><span class="n">time_passed</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">acknowledged_bitrate_last_update_</span><span class="p">.</span><span class="n">IsFinite</span><span class="p">()</span>
+<span class="w">          </span><span class="o">?</span><span class="w"> </span><span class="n">at_time</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">acknowledged_bitrate_last_update_</span>
+<span class="w">          </span><span class="o">:</span><span class="w"> </span><span class="n">TimeDelta</span><span class="o">::</span><span class="n">Seconds</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span>
+<span class="w">  </span><span class="n">acknowledged_bitrate_last_update_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">at_time</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 获取最大ACK码率</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">acknowledged_bitrate</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">acknowledged_bitrate_max_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">acknowledged_bitrate_max_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">acknowledged_bitrate</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 如果更新的码率比较小，则最大ACK码率需要缓慢降低</span>
+<span class="w">    </span><span class="c1">// 降低的系数也是采用ExponentialUpdate这个指数方式，经历的时间越长，则降低越快</span>
+<span class="w">    </span><span class="n">acknowledged_bitrate_max_</span><span class="w"> </span><span class="o">-=</span>
+<span class="w">        </span><span class="n">ExponentialUpdate</span><span class="p">(</span><span class="n">config_</span><span class="p">.</span><span class="n">acknowledged_rate_max_window</span><span class="p">,</span><span class="w"> </span><span class="n">time_passed</span><span class="p">)</span><span class="w"> </span><span class="o">*</span>
+<span class="w">        </span><span class="p">(</span><span class="n">acknowledged_bitrate_max_</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">acknowledged_bitrate</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>2.4 更新得到基于丢包的带宽估计</h3>
+<div class="highlight"><pre><code><span></span><span class="n">DataRate</span><span class="w"> </span><span class="nf">LossBasedBandwidthEstimation::Update</span><span class="p">(</span><span class="n">Timestamp</span><span class="w"> </span><span class="n">at_time</span><span class="p">,</span>
+<span class="w">                                              </span><span class="n">DataRate</span><span class="w"> </span><span class="n">min_bitrate</span><span class="p">,</span>
+<span class="w">                                              </span><span class="n">DataRate</span><span class="w"> </span><span class="n">wanted_bitrate</span><span class="p">,</span>
+<span class="w">                                              </span><span class="n">TimeDelta</span><span class="w"> </span><span class="n">last_round_trip_time</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 如果当前没有估计，则直接设置为需求带宽</span>
+<span class="w">  </span><span class="c1">// 出现了丢包后再降嘛</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">loss_based_bitrate_</span><span class="p">.</span><span class="n">IsZero</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">loss_based_bitrate_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">wanted_bitrate</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 这里根据丢包来判断增加或降低带宽，使用的losss不一样</span>
+<span class="w">  </span><span class="c1">// 上升我们更谨慎，因此使用最大、平均丢包</span>
+<span class="w">  </span><span class="c1">// 降低我们要防抖动，因此使用平均值，同时参考上次丢包去最小。</span>
+
+<span class="w">  </span><span class="c1">// Only increase if loss has been low for some time.</span>
+<span class="w">  </span><span class="c1">// 使用丢包最大值来判断是否需要增加估计带宽</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">double</span><span class="w"> </span><span class="n">loss_estimate_for_increase</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">average_loss_max_</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Avoid multiple decreases from averaging over one loss spike.</span>
+<span class="w">  </span><span class="c1">// 使用平均丢包和档次丢包的最小值来判断是否需要降低带宽</span>
+<span class="w">  </span><span class="c1">// 这里参考了单次的结果是为了避免单个较大的loss拉高平均值，导致带宽连续地降，参考了单个值可以避免这个问题</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">double</span><span class="w"> </span><span class="n">loss_estimate_for_decrease</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">average_loss_</span><span class="p">,</span><span class="w"> </span><span class="n">last_loss_ratio_</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 这次是否可以降低带宽需要满足几个条件：</span>
+<span class="w">  </span><span class="c1">// * 上次反馈丢包时没有降低带宽</span>
+<span class="w">  </span><span class="c1">// * 两次降低的间隔需要超过RTT + decrease_interval（默认300ms）</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">allow_decrease</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="o">!</span><span class="n">has_decreased_since_last_loss_report_</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">      </span><span class="p">(</span><span class="n">at_time</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">time_last_decrease_</span><span class="w"> </span><span class="o">&gt;=</span>
+<span class="w">       </span><span class="n">last_round_trip_time</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">config_</span><span class="p">.</span><span class="n">decrease_interval</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// If packet lost reports are too old, dont increase bitrate.</span>
+<span class="w">  </span><span class="c1">// 上次的TCC loss反馈是否有效：两次TCC 丢包间隔小于6s</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">loss_report_valid</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">at_time</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">last_loss_packet_report_</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mf">1.2</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">kMaxRtcpFeedbackInterval</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 丢包足够低（低于reset的阈值），那么认为拥塞已经不存在，这时候直接设置估计的码率为需求带宽</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">loss_report_valid</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">config_</span><span class="p">.</span><span class="n">allow_resets</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">      </span><span class="n">loss_estimate_for_increase</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">loss_reset_threshold</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">loss_based_bitrate_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">wanted_bitrate</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// 丢包较低（低于increase的阈值），这时候需要缓慢增加带宽</span>
+<span class="w">  </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">loss_report_valid</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">             </span><span class="n">loss_estimate_for_increase</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">loss_increase_threshold</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Increase bitrate by RTT-adaptive ratio.</span>
+<span class="w">    </span><span class="c1">// 根据RTT自适应上升带宽，RTT越大，增加越慢，默认有increase_offset（1k）增加</span>
+<span class="w">    </span><span class="n">DataRate</span><span class="w"> </span><span class="n">new_increased_bitrate</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">min_bitrate</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">GetIncreaseFactor</span><span class="p">(</span><span class="n">config_</span><span class="p">,</span><span class="w"> </span><span class="n">last_round_trip_time</span><span class="p">)</span><span class="w"> </span><span class="o">+</span>
+<span class="w">        </span><span class="n">config_</span><span class="p">.</span><span class="n">increase_offset</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// The bitrate that would make the loss &quot;just high enough&quot;.</span>
+<span class="w">    </span><span class="c1">// 增加后bitrate需要保证丢包引入的码率在我们设置的范围内，以此作为上限</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">DataRate</span><span class="w"> </span><span class="n">new_increased_bitrate_cap</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">BitrateFromLoss</span><span class="p">(</span>
+<span class="w">        </span><span class="n">loss_estimate_for_increase</span><span class="p">,</span><span class="w"> </span><span class="n">config_</span><span class="p">.</span><span class="n">loss_bandwidth_balance_increase</span><span class="p">,</span>
+<span class="w">        </span><span class="n">config_</span><span class="p">.</span><span class="n">loss_bandwidth_balance_exponent</span><span class="p">);</span>
+<span class="w">    </span><span class="n">new_increased_bitrate</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">new_increased_bitrate</span><span class="p">,</span><span class="w"> </span><span class="n">new_increased_bitrate_cap</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">loss_based_bitrate_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">(</span><span class="n">new_increased_bitrate</span><span class="p">,</span><span class="w"> </span><span class="n">loss_based_bitrate_</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// 如果丢包比较大，超过decrease的阈值，则开始降低带宽</span>
+<span class="w">  </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">loss_estimate_for_decrease</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">loss_decrease_threshold</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">             </span><span class="n">allow_decrease</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// The bitrate that would make the loss &quot;just acceptable&quot;.</span>
+<span class="w">    </span><span class="c1">// 降低码率后，由于丢包引入的码率低于我们的预期即可</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">DataRate</span><span class="w"> </span><span class="n">new_decreased_bitrate_floor</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">BitrateFromLoss</span><span class="p">(</span>
+<span class="w">        </span><span class="n">loss_estimate_for_decrease</span><span class="p">,</span><span class="w"> </span><span class="n">config_</span><span class="p">.</span><span class="n">loss_bandwidth_balance_decrease</span><span class="p">,</span>
+<span class="w">        </span><span class="n">config_</span><span class="p">.</span><span class="n">loss_bandwidth_balance_exponent</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// decreased_bitrate是最大ACK码率的0.99倍</span>
+<span class="w">    </span><span class="c1">// DataRate LossBasedBandwidthEstimation::decreased_bitrate() const {</span>
+<span class="w">    </span><span class="c1">//  return config_.decrease_factor * acknowledged_bitrate_max_;</span>
+<span class="w">    </span><span class="c1">// }</span>
+<span class="w">    </span><span class="c1">// 降低为ACK码率的0.99倍，同时不低于下限</span>
+<span class="w">    </span><span class="n">DataRate</span><span class="w"> </span><span class="n">new_decreased_bitrate</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">(</span><span class="n">decreased_bitrate</span><span class="p">(),</span><span class="w"> </span><span class="n">new_decreased_bitrate_floor</span><span class="p">);</span>
+
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">new_decreased_bitrate</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">loss_based_bitrate_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">time_last_decrease_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">at_time</span><span class="p">;</span>
+<span class="w">      </span><span class="n">has_decreased_since_last_loss_report_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">      </span><span class="n">loss_based_bitrate_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">new_decreased_bitrate</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">loss_based_bitrate_</span><span class="p">;</span>
+<span class="p">}</span>
+
+
+<span class="c1">// Increase slower when RTT is high.</span>
+<span class="c1">// 根据RTT来决定带宽上升的系数，RTT越大，增加越慢;RTT越小，增加越快。</span>
+<span class="kt">double</span><span class="w"> </span><span class="nf">GetIncreaseFactor</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">LossBasedControlConfig</span><span class="o">&amp;</span><span class="w"> </span><span class="n">config</span><span class="p">,</span><span class="w"> </span><span class="n">TimeDelta</span><span class="w"> </span><span class="n">rtt</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Clamp the RTT</span>
+<span class="w">  </span><span class="c1">// 限制RTT范围在[increase_low_rtt, increase_high_rtt]</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">rtt</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">config</span><span class="p">.</span><span class="n">increase_low_rtt</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">rtt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">config</span><span class="p">.</span><span class="n">increase_low_rtt</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">rtt</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">config</span><span class="p">.</span><span class="n">increase_high_rtt</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">rtt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">config</span><span class="p">.</span><span class="n">increase_high_rtt</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">rtt_range</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">config</span><span class="p">.</span><span class="n">increase_high_rtt</span><span class="p">.</span><span class="n">Get</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">config</span><span class="p">.</span><span class="n">increase_low_rtt</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 没有设置有效的RTT范围则返回默认系数1.02</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">rtt_range</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">TimeDelta</span><span class="o">::</span><span class="n">Zero</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_NOTREACHED</span><span class="p">();</span><span class="w">  </span><span class="c1">// Only on misconfiguration.</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">config</span><span class="p">.</span><span class="n">min_increase_factor</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// factor = min_increase_factor +  [1- (rtt - increase_low_rtt) / (increase_high_rtt - increase_low_rtt)] * (max_increase_factor - min_increase_factor)</span>
+<span class="w">  </span><span class="c1">// 因此factor在[min_increase_factor, max_increase_factor]之间，RTT越小，增加越多</span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">rtt_offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rtt</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">config</span><span class="p">.</span><span class="n">increase_low_rtt</span><span class="p">;</span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">relative_offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">(</span><span class="mf">0.0</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">rtt_offset</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">rtt_range</span><span class="p">,</span><span class="w"> </span><span class="mf">1.0</span><span class="p">));</span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">factor_range</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">config</span><span class="p">.</span><span class="n">max_increase_factor</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">config</span><span class="p">.</span><span class="n">min_increase_factor</span><span class="p">;</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">config</span><span class="p">.</span><span class="n">min_increase_factor</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">relative_offset</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">factor_range</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// 在增加和降低码率的时候，我们使用了这个函数:</span>
+<span class="c1">// bitrate * bitrate*loss^(1/exponent) = loss_bandwidth_balance</span>
+<span class="c1">// 这里的思想是：</span>
+<span class="c1">// 假如重传N次，重传N次只能允许使用的码率为loss_bandwidth_balance</span>
+<span class="c1">// exponent默认为0.5，1/0.5 = 2，即重传两次的码率</span>
+<span class="n">DataRate</span><span class="w"> </span><span class="nf">BitrateFromLoss</span><span class="p">(</span><span class="kt">double</span><span class="w"> </span><span class="n">loss</span><span class="p">,</span>
+<span class="w">                         </span><span class="n">DataRate</span><span class="w"> </span><span class="n">loss_bandwidth_balance</span><span class="p">,</span>
+<span class="w">                         </span><span class="kt">double</span><span class="w"> </span><span class="n">exponent</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">exponent</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_NOTREACHED</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">DataRate</span><span class="o">::</span><span class="n">Infinity</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">loss</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mf">1e-5</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">DataRate</span><span class="o">::</span><span class="n">Infinity</span><span class="p">();</span>
+<span class="w">  </span><span class="c1">// 在给定的丢包和丢包两次允许的重传码率下，求此时的传输码率。</span>
+<span class="w">  </span><span class="c1">// 丢包越小，最终得到的码率越高</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">loss_bandwidth_balance</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">pow</span><span class="p">(</span><span class="n">loss</span><span class="p">,</span><span class="w"> </span><span class="mf">-1.0</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">exponent</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>2.5 关于阈值如何确定</h3>
+<div class="highlight"><pre><code><span></span><span class="c1">// 根据当前码率获取loss阈值，不妨把下面的计算转换下，就可以得到:</span>
+<span class="c1">// bitrate*loss^(1/exponent) = loss_bandwidth_balance</span>
+<span class="c1">// 这里的思想是：</span>
+<span class="c1">// 假如重传N次，重传N次只能允许使用的码率为loss_bandwidth_balance</span>
+<span class="c1">// exponent默认为0.5，1/0.5 = 2，即重传两次的码率</span>
+<span class="kt">double</span><span class="w"> </span><span class="nf">LossFromBitrate</span><span class="p">(</span><span class="n">DataRate</span><span class="w"> </span><span class="n">bitrate</span><span class="p">,</span>
+<span class="w">                       </span><span class="n">DataRate</span><span class="w"> </span><span class="n">loss_bandwidth_balance</span><span class="p">,</span>
+<span class="w">                       </span><span class="kt">double</span><span class="w"> </span><span class="n">exponent</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">loss_bandwidth_balance</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">bitrate</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mf">1.0</span><span class="p">;</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">pow</span><span class="p">(</span><span class="n">loss_bandwidth_balance</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">bitrate</span><span class="p">,</span><span class="w"> </span><span class="n">exponent</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">double</span><span class="w"> </span><span class="nf">LossBasedBandwidthEstimation::loss_reset_threshold</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 给定重传两次的码率为0.1kbps，那么此时的丢包为：</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">LossFromBitrate</span><span class="p">(</span><span class="n">loss_based_bitrate_</span><span class="p">,</span>
+<span class="w">                         </span><span class="n">config_</span><span class="p">.</span><span class="n">loss_bandwidth_balance_reset</span><span class="p">,</span>
+<span class="w">                         </span><span class="n">config_</span><span class="p">.</span><span class="n">loss_bandwidth_balance_exponent</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">double</span><span class="w"> </span><span class="nf">LossBasedBandwidthEstimation::loss_increase_threshold</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 给定重传两次的码率为0.5kbps，那么此时的丢包为：</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">LossFromBitrate</span><span class="p">(</span><span class="n">loss_based_bitrate_</span><span class="p">,</span>
+<span class="w">                         </span><span class="n">config_</span><span class="p">.</span><span class="n">loss_bandwidth_balance_increase</span><span class="p">,</span>
+<span class="w">                         </span><span class="n">config_</span><span class="p">.</span><span class="n">loss_bandwidth_balance_exponent</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">double</span><span class="w"> </span><span class="nf">LossBasedBandwidthEstimation::loss_decrease_threshold</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 给定重传两次的码率为4kbps，那么此时的丢包为：</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">LossFromBitrate</span><span class="p">(</span><span class="n">loss_based_bitrate_</span><span class="p">,</span>
+<span class="w">                         </span><span class="n">config_</span><span class="p">.</span><span class="n">loss_bandwidth_balance_decrease</span><span class="p">,</span>
+<span class="w">                         </span><span class="n">config_</span><span class="p">.</span><span class="n">loss_bandwidth_balance_exponent</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<h2>3. 总结</h2>
+<p>这个实现提供了一个另外的思路，根据设置的重传码率来设置丢包阈值以及估计码率。思路比较奇特。至于是否好用，这里不是很好说。</p>
+<hr>
+
+<h4><p>原文出处：<a href='https://zhuanlan.zhihu.com/p/490526586' target='blank'>WebRTC GCC代码深度解读(6)基于Loss的带宽估计v2版本</a></p></h4>
+<h2>1. 介绍</h2>
+<p>前面我们介绍过最原始的基于丢包的带宽估计，以及丢包动态阈值的V1版本，这一篇我们介绍下使用最大似然模型的V2版本。关于前面两种方法可以见之前的两篇：</p>
+<p><a href="https://zhuanlan.zhihu.com/p/490481512">https://zhuanlan.zhihu.com/p/490481512</a>
+<a href="https://zhuanlan.zhihu.com/p/490491574">https://zhuanlan.zhihu.com/p/490491574</a></p>
+<p>由于这个版本也是近期才加入的，所以大家可以带着好奇的心去看看即可，可以从中吸取一些思想。因为没有做过太多实验，因此效果也没法去完全确认。这个功能可以可选打开的。</p>
+<h2>2. 原理</h2>
+<p><strong>先占坑，后面再补。</strong></p>
+<hr>
+
+<h4><p>原文出处：<a href='https://zhuanlan.zhihu.com/p/490528187' target='blank'>WebRTC GCC代码深度解读(7)InterArrivalDelta</a></p></h4>
+<h2>1. 介绍</h2>
+<p>前面我们讲过基于丢包的延迟估计，现在是时候介绍基于延迟的估计了。延迟估计的一个重点是单向延迟的估计，也就是这里的<code>InterArrivalDelta</code>。<code>InterArrivalDelta</code>这个类是源于<code>modules/remote_bitrate_estimator/inter_arrival</code>，因为我们这里是使用TCC，需要在发送端做带宽估计，因此inter_arrival的计算也需要放到发送端。</p>
+<p>我们知道，基于延迟的拥塞控制核心在于，拥塞会导致报文之间的间隔逐渐增大。因此我们会利用这个现象来判断当前是否进入拥塞状态。<code>InterArrivalDelta</code>用来计算两次突发的发送之间存在的相对延迟，如果没有拥塞，那么发送的报文到达接收端都是均匀的，如果有拥塞那么就会存在一定的延迟趋势。<code>InterArrivalDelta</code>只返回包组的发送时间差、接收时间差、字节差等，并不会得出是否拥塞的结果。拥塞的判断需要借助于其他类，后面我们将会介绍。</p>
+<p>下面我们就从代码角度来理解这个类。</p>
+<h2>2. 源码解读</h2>
+<h3>2.1 对外接口</h3>
+<p>主要的对外接口是<code>ComputeDeltas</code>，基于TCC feedback获取报文发送时间、接收时间、报文大小，输出包组的发送时间差、接收时间差、字节数差，返回值用来指示当前是否计算返回delta结果。返回的结果用于后续的单向延迟是否存在增加的的判断。见<code>DelayIncreaseDetectorInterface</code>接口。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">bool</span><span class="w"> </span><span class="nf">ComputeDeltas</span><span class="p">(</span><span class="n">Timestamp</span><span class="w"> </span><span class="n">send_time</span><span class="p">,</span>
+<span class="w"> </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">arrival_time</span><span class="p">,</span>
+<span class="w"> </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">system_time</span><span class="p">,</span>
+<span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">packet_size</span><span class="p">,</span>
+<span class="w"> </span><span class="n">TimeDelta</span><span class="o">*</span><span class="w"> </span><span class="n">send_time_delta</span><span class="p">,</span>
+<span class="w"> </span><span class="n">TimeDelta</span><span class="o">*</span><span class="w"> </span><span class="n">arrival_time_delta</span><span class="p">,</span>
+<span class="w"> </span><span class="kt">int</span><span class="o">*</span><span class="w"> </span><span class="n">packet_size_delta</span><span class="p">);</span>
+</code></pre></div>
+<h3>2.2 以group方式计算相对延迟</h3>
+<p>我们可以以包方式来计算相对延迟，但是这会存在很大误差，为什么呢？主要有几个原因：</p>
+<ul>
+<li>pacer调度通常是以5ms突发发送一系列报文，因此这些在瞬间发送出去的报文一般接收延迟基本相同，没有所谓的相对延迟</li>
+<li>对于wifi来说，其转发通常也会存在这样的突发  </li>
+</ul>
+<p>这些突发导致直接使用包与包之间的相对延迟不是很准确。因此这里采用了包组的方式，即根据报文的发送接收时间的聚集性，将这些包分为一组，然后计算包组与包组之间的相对延迟，这个方式会更加准确。</p>
+<p>包组的定义如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">SendTimeGroup</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">SendTimeGroup</span><span class="p">()</span>
+<span class="w">      </span><span class="o">:</span><span class="w"> </span><span class="n">size</span><span class="p">(</span><span class="mi">0</span><span class="p">),</span>
+<span class="w">          </span><span class="n">first_send_time</span><span class="p">(</span><span class="n">Timestamp</span><span class="o">::</span><span class="n">MinusInfinity</span><span class="p">()),</span>
+<span class="w">          </span><span class="n">send_time</span><span class="p">(</span><span class="n">Timestamp</span><span class="o">::</span><span class="n">MinusInfinity</span><span class="p">()),</span>
+<span class="w">          </span><span class="n">first_arrival</span><span class="p">(</span><span class="n">Timestamp</span><span class="o">::</span><span class="n">MinusInfinity</span><span class="p">()),</span>
+<span class="w">          </span><span class="n">complete_time</span><span class="p">(</span><span class="n">Timestamp</span><span class="o">::</span><span class="n">MinusInfinity</span><span class="p">()),</span>
+<span class="w">          </span><span class="n">last_system_time</span><span class="p">(</span><span class="n">Timestamp</span><span class="o">::</span><span class="n">MinusInfinity</span><span class="p">())</span><span class="w"> </span><span class="p">{}</span>
+
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">IsFirstPacket</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">complete_time</span><span class="p">.</span><span class="n">IsInfinite</span><span class="p">();</span><span class="w"> </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">;</span><span class="w">  </span><span class="c1">// 包组的总字节数</span>
+<span class="w">  </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">first_send_time</span><span class="p">;</span><span class="w">  </span><span class="c1">// 包组的第一个包发送时间</span>
+<span class="w">  </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">send_time</span><span class="p">;</span><span class="w">  </span><span class="c1">// 包组当前最后一个报文发送时间</span>
+<span class="w">  </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">first_arrival</span><span class="p">;</span><span class="w">  </span><span class="c1">// 包组第一个到达时间</span>
+<span class="w">  </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">complete_time</span><span class="p">;</span><span class="w">  </span><span class="c1">// 包组完成时间（最后一个包接收时间）</span>
+<span class="w">  </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">last_system_time</span><span class="p">;</span><span class="w"> </span><span class="c1">// 最后的系统时间</span>
+<span class="p">};</span>
+</code></pre></div>
+<h3>2.3 是否需要开始新的group</h3>
+<p>我们需要根据发送时间和接收时间来判断，是否需要结束当前的group，开始一个新的group。一般来说，距离当前group的最小发送时间超过5ms就需要开始新的group，5ms恰好也是pacer的调度时间（5ms一次突发，burst）。这个5ms阈值也比较合理。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// Assumes that `timestamp` is not reordered compared to</span>
+<span class="c1">// `current_timestamp_group_`.</span>
+<span class="kt">bool</span><span class="w"> </span><span class="nf">InterArrivalDelta::NewTimestampGroup</span><span class="p">(</span><span class="n">Timestamp</span><span class="w"> </span><span class="n">arrival_time</span><span class="p">,</span>
+<span class="w">                                          </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">send_time</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 新的group条件：</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">IsFirstPacket</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 当前group没有任何报文，不需要重新开始新的group</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">BelongsToBurst</span><span class="p">(</span><span class="n">arrival_time</span><span class="p">,</span><span class="w"> </span><span class="n">send_time</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 和当前group同属于一个突发（burst），那么还要放到当前group里面</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 发送时间超过阈值（默认为pacer的调度周期5ms），那么要开始一次新的group</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">send_time</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">first_send_time</span><span class="w"> </span><span class="o">&gt;</span>
+<span class="w">           </span><span class="n">send_time_group_length_</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>2.4 如何判断当前报文是否和当前group一起突发的</h3>
+<p>判断是否突发，只需要和最后一个包做比较，任意条件满足：</p>
+<ul>
+<li>与最后一个包一起发送，你们肯定是突发</li>
+<li>接收时间差-发送时间差小于0，且在和最后一个包间隔在5ms内，与第一个包间隔不超过100ms，则认为是突发  </li>
+</ul>
+<p>第二个条件一般在拥塞缓解的时候出现较多，100ms以内间隔发送的报文，在网络中缓存然后突发全部到达。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 如何判断一个包是不是属于当前group一同burst的？</span>
+<span class="kt">bool</span><span class="w"> </span><span class="nf">InterArrivalDelta::BelongsToBurst</span><span class="p">(</span><span class="n">Timestamp</span><span class="w"> </span><span class="n">arrival_time</span><span class="p">,</span>
+<span class="w">                                       </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">send_time</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">complete_time</span><span class="p">.</span><span class="n">IsFinite</span><span class="p">());</span>
+<span class="w">  </span><span class="n">TimeDelta</span><span class="w"> </span><span class="n">arrival_time_delta</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">arrival_time</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">complete_time</span><span class="p">;</span>
+<span class="w">  </span><span class="n">TimeDelta</span><span class="w"> </span><span class="n">send_time_delta</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">send_time</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">send_time</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">send_time_delta</span><span class="p">.</span><span class="n">IsZero</span><span class="p">())</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">  </span><span class="n">TimeDelta</span><span class="w"> </span><span class="n">propagation_delta</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">arrival_time_delta</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">send_time_delta</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">propagation_delta</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">TimeDelta</span><span class="o">::</span><span class="n">Zero</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">      </span><span class="n">arrival_time_delta</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">kBurstDeltaThreshold</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">      </span><span class="n">arrival_time</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">first_arrival</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">kMaxBurstDuration</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>2.5 相对延迟的计算核心代码</h3>
+<div class="highlight"><pre><code><span></span><span class="kt">bool</span><span class="w"> </span><span class="nf">InterArrivalDelta::ComputeDeltas</span><span class="p">(</span><span class="n">Timestamp</span><span class="w"> </span><span class="n">send_time</span><span class="p">,</span>
+<span class="w">                                      </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">arrival_time</span><span class="p">,</span>
+<span class="w">                                      </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">system_time</span><span class="p">,</span>
+<span class="w">                                      </span><span class="kt">size_t</span><span class="w"> </span><span class="n">packet_size</span><span class="p">,</span>
+<span class="w">                                      </span><span class="n">TimeDelta</span><span class="o">*</span><span class="w"> </span><span class="n">send_time_delta</span><span class="p">,</span>
+<span class="w">                                      </span><span class="n">TimeDelta</span><span class="o">*</span><span class="w"> </span><span class="n">arrival_time_delta</span><span class="p">,</span>
+<span class="w">                                      </span><span class="kt">int</span><span class="o">*</span><span class="w"> </span><span class="n">packet_size_delta</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">calculated_deltas</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">IsFirstPacket</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 当前包组的第一个包</span>
+<span class="w">    </span><span class="c1">// We don&#39;t have enough data to update the filter, so we store it until we</span>
+<span class="w">    </span><span class="c1">// have two frames of data to process.</span>
+<span class="w">    </span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">send_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">send_time</span><span class="p">;</span>
+<span class="w">    </span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">first_send_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">send_time</span><span class="p">;</span>
+<span class="w">    </span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">first_arrival</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">arrival_time</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">first_send_time</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">send_time</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 存在乱序，直接丢弃当前的包</span>
+<span class="w">    </span><span class="c1">// Reordered packet.</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">NewTimestampGroup</span><span class="p">(</span><span class="n">arrival_time</span><span class="p">,</span><span class="w"> </span><span class="n">send_time</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 当前包不属于当前group，需要创建一个新的group</span>
+
+<span class="w">    </span><span class="c1">// First packet of a later send burst, the previous packets sample is ready.</span>
+<span class="w">    </span><span class="c1">// 存在两个包组（pre，current），就可以计算结果了</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">prev_timestamp_group_</span><span class="p">.</span><span class="n">complete_time</span><span class="p">.</span><span class="n">IsFinite</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// 包组间的发送时间差，以最后发送时间为准</span>
+<span class="w">      </span><span class="o">*</span><span class="n">send_time_delta</span><span class="w"> </span><span class="o">=</span>
+<span class="w">          </span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">send_time</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">prev_timestamp_group_</span><span class="p">.</span><span class="n">send_time</span><span class="p">;</span>
+<span class="w">      </span><span class="c1">// 包组间的接收时间差，以最后接收时间为准</span>
+<span class="w">      </span><span class="o">*</span><span class="n">arrival_time_delta</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">complete_time</span><span class="w"> </span><span class="o">-</span>
+<span class="w">                            </span><span class="n">prev_timestamp_group_</span><span class="p">.</span><span class="n">complete_time</span><span class="p">;</span>
+
+<span class="w">      </span><span class="c1">// 两次系统时间差，如果两个group跨度超过3s，需要重置</span>
+<span class="w">      </span><span class="n">TimeDelta</span><span class="w"> </span><span class="n">system_time_delta</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">last_system_time</span><span class="w"> </span><span class="o">-</span>
+<span class="w">                                    </span><span class="n">prev_timestamp_group_</span><span class="p">.</span><span class="n">last_system_time</span><span class="p">;</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">arrival_time_delta</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">system_time_delta</span><span class="w"> </span><span class="o">&gt;=</span>
+<span class="w">          </span><span class="n">kArrivalTimeOffsetThreshold</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">Reset</span><span class="p">();</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="c1">// 如果系统时间存在乱序，需要重置（基本发生）</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">arrival_time_delta</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">TimeDelta</span><span class="o">::</span><span class="n">Zero</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// The group of packets has been reordered since receiving its local</span>
+<span class="w">        </span><span class="c1">// arrival timestamp.</span>
+<span class="w">        </span><span class="o">++</span><span class="n">num_consecutive_reordered_packets_</span><span class="p">;</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">num_consecutive_reordered_packets_</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">kReorderedResetThreshold</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="n">Reset</span><span class="p">();</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">num_consecutive_reordered_packets_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+
+<span class="w">      </span><span class="c1">// 两个包组的字节数之差</span>
+<span class="w">      </span><span class="o">*</span><span class="n">packet_size_delta</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">size</span><span class="p">)</span><span class="w"> </span><span class="o">-</span>
+<span class="w">                           </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">prev_timestamp_group_</span><span class="p">.</span><span class="n">size</span><span class="p">);</span>
+<span class="w">      </span><span class="n">calculated_deltas</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 更新两个group</span>
+<span class="w">    </span><span class="n">prev_timestamp_group_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">current_timestamp_group_</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// The new timestamp is now the current frame.</span>
+<span class="w">    </span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">first_send_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">send_time</span><span class="p">;</span>
+<span class="w">    </span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">send_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">send_time</span><span class="p">;</span>
+<span class="w">    </span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">first_arrival</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">arrival_time</span><span class="p">;</span>
+<span class="w">    </span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 还是老的分组，更新发送时间</span>
+<span class="w">    </span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">send_time</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">(</span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">send_time</span><span class="p">,</span><span class="w"> </span><span class="n">send_time</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 更新当前分组</span>
+<span class="w">  </span><span class="c1">// Accumulate the frame size.</span>
+<span class="w">  </span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">size</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">packet_size</span><span class="p">;</span>
+<span class="w">  </span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">complete_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">arrival_time</span><span class="p">;</span>
+<span class="w">  </span><span class="n">current_timestamp_group_</span><span class="p">.</span><span class="n">last_system_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">system_time</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">calculated_deltas</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<h2>3. 总结</h2>
+<p>InterArrivalDelta以包组方式计算一些中间结果，用于后续的基于延迟的拥塞控制。</p>
+<hr>
+
+<h4><p>原文出处：<a href='https://zhuanlan.zhihu.com/p/490775550' target='blank'>WebRTC GCC代码深度解读(8)TrendlineEstimator</a></p></h4>
+<h2>1. 原理介绍</h2>
+<p>在GCC算法里面，基于延迟的拥塞控制核心在于估计单向延迟的趋势，如果单向延迟存在增加趋势（trendline)，那么认为进入拥塞状态，就需要通过AIMD方式调整带宽。而<code>TrendlineEstimator</code>正是检测单向延迟趋势的一个工具类，它的输入是<code>InterArrivalDelta</code>的输出结果。</p>
+<p><code>TrendlineEstimator</code>的输出结果有3个(见<code>BandwidthUsage</code>)：Normal、Underusing、Overusing。这个输出将会输入到AIMD中做带宽调整。</p>
+<p><code>InterArrivalDelta</code>介绍见：</p>
+<p><a href="https://zhuanlan.zhihu.com/p/490528187">言剑：WebRTC GCC代码深度解读(7)</a></p>
+<h2>2. 源码分析</h2>
+<p>这里我们直接从源码角度分析下，TrendlineEstimator是如何根据InterArrivalDelta输出结果检测延迟趋势的吧。</p>
+<h3>2.1 接口</h3>
+<p><code>TrendlineEstimator</code>实现了<code>DelayIncreaseDetectorInterface</code>接口，根据名字，我们也可以知道，这个类的功能就是用来检测延迟增加的趋势的。主要的Update函数输入参数就是InterArrivalDelta的输出。</p>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">DelayIncreaseDetectorInterface</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="p">...</span>
+<span class="w">  </span><span class="k">virtual</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">Update</span><span class="p">(</span><span class="kt">double</span><span class="w"> </span><span class="n">recv_delta_ms</span><span class="p">,</span>
+<span class="w">                      </span><span class="kt">double</span><span class="w"> </span><span class="n">send_delta_ms</span><span class="p">,</span>
+<span class="w">                      </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">send_time_ms</span><span class="p">,</span>
+<span class="w">                      </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">arrival_time_ms</span><span class="p">,</span>
+<span class="w">                      </span><span class="kt">size_t</span><span class="w"> </span><span class="n">packet_size</span><span class="p">,</span>
+<span class="w">                      </span><span class="kt">bool</span><span class="w"> </span><span class="n">calculated_deltas</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<h3>2.2 PacketTiming定义</h3>
+<p>实现内部使用<code>PacketTiming</code>来记录时间，我们需要介绍下这个类成员的含义。后续的拟合正式看<code>smoothed_delay_ms</code>是否随到达时间<code>arrival_time_ms</code>存在增加趋势，如果有增加了就说明网络队列正在拥堵。</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">PacketTiming</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="w">    </span><span class="c1">// 以某一个包组为基准，后面的包组到达时间与该时间之差</span>
+<span class="w">    </span><span class="kt">double</span><span class="w"> </span><span class="n">arrival_time_ms</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// 接收时间差 - 发送时间差的平滑结果，反映了网络队列引入的延迟</span>
+<span class="w">    </span><span class="kt">double</span><span class="w"> </span><span class="n">smoothed_delay_ms</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// 接收时间差 - 发送时间差的累计结果</span>
+<span class="w">    </span><span class="kt">double</span><span class="w"> </span><span class="n">raw_delay_ms</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<h3>2.3 最小二乘法拟合延迟趋势</h3>
+<p>如何知道延迟存在增加趋势呢？可以看随着时间变化，网络队列引入的延迟<code>smoothed_delay_ms</code>是否在增加。我们这里假设这个是一个线性关系，这个可以用最小二乘法拟合，x = 时间，y = 队列引入的延迟<code>smoothed_delay_ms</code>。关于最小二乘法原理，可以见：</p>
+<p>根据公式就可以得到斜率（slope）的计算，这里我们也只需要返回斜率即可，通过斜率我们可以知道延迟增加的趋势大小。</p>
+<div class="highlight"><pre><code><span></span><span class="n">absl</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="kt">double</span><span class="o">&gt;</span><span class="w"> </span><span class="n">LinearFitSlope</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">deque</span><span class="o">&lt;</span><span class="n">TrendlineEstimator</span><span class="o">::</span><span class="n">PacketTiming</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">packets</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">packets</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">2</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// Compute the &quot;center of mass&quot;.</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="n">sum_x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="n">sum_y</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">packet</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">packets</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">sum_x</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">arrival_time_ms</span><span class="p">;</span>
+<span class="w">    </span><span class="n">sum_y</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">smoothed_delay_ms</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="n">x_avg</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sum_x</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">packets</span><span class="p">.</span><span class="n">size</span><span class="p">();</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="n">y_avg</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sum_y</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">packets</span><span class="p">.</span><span class="n">size</span><span class="p">();</span>
+<span class="w">  </span><span class="c1">// Compute the slope k = \sum (x_i-x_avg)(y_i-y_avg) / \sum (x_i-x_avg)^2</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="n">numerator</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="n">denominator</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">packet</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">packets</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">double</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">arrival_time_ms</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">double</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">smoothed_delay_ms</span><span class="p">;</span>
+<span class="w">    </span><span class="n">numerator</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="p">(</span><span class="n">x</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">x_avg</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="n">y</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">y_avg</span><span class="p">);</span>
+<span class="w">    </span><span class="n">denominator</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="p">(</span><span class="n">x</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">x_avg</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="n">x</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">x_avg</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">denominator</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">absl</span><span class="o">::</span><span class="n">nullopt</span><span class="p">;</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">numerator</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">denominator</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>2.4 支持自定义实现</h3>
+<p>这里还支持了使用外部自定义的状态检测器，即自己定义<code>NetworkStatePredictor</code>实现，替代<code>TrendlineEstimator</code>功能。所以我们可以看到，在Update里面不仅有内部的实现，还可以调用<code>NetworkStatePredictor</code>并参考TrendlineEstimator本身的结果（<code>hypothesis_</code>）得到另外一个结果（<code>hypothesis_predicted_</code>）。一般不用关心这个自定义实现。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">TrendlineEstimator::Update</span><span class="p">(</span><span class="kt">double</span><span class="w"> </span><span class="n">recv_delta_ms</span><span class="p">,</span>
+<span class="w">                                </span><span class="kt">double</span><span class="w"> </span><span class="n">send_delta_ms</span><span class="p">,</span>
+<span class="w">                                </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">send_time_ms</span><span class="p">,</span>
+<span class="w">                                </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">arrival_time_ms</span><span class="p">,</span>
+<span class="w">                                </span><span class="kt">size_t</span><span class="w"> </span><span class="n">packet_size</span><span class="p">,</span>
+<span class="w">                                </span><span class="kt">bool</span><span class="w"> </span><span class="n">calculated_deltas</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">calculated_deltas</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">UpdateTrendline</span><span class="p">(</span><span class="n">recv_delta_ms</span><span class="p">,</span><span class="w"> </span><span class="n">send_delta_ms</span><span class="p">,</span><span class="w"> </span><span class="n">send_time_ms</span><span class="p">,</span><span class="w"> </span><span class="n">arrival_time_ms</span><span class="p">,</span>
+<span class="w">                    </span><span class="n">packet_size</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">network_state_predictor_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">hypothesis_predicted_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">network_state_predictor_</span><span class="o">-&gt;</span><span class="n">Update</span><span class="p">(</span>
+<span class="w">        </span><span class="n">send_time_ms</span><span class="p">,</span><span class="w"> </span><span class="n">arrival_time_ms</span><span class="p">,</span><span class="w"> </span><span class="n">hypothesis_</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>2.5 trendline更新</h3>
+<p>输入InterArrivalDelta的结果，估计当前的状态。如果斜率&gt;0，则说明延迟趋势增加，斜率&lt;0，延迟趋势降低。一般我们不会直接和0比较，而是和一个阈值做对比。超过阈值才认为是在增加/降低，认为是overuse/underuse。</p>
+<p>同时在这里还会根据样本点，计算一个斜率上限，用在检测overuse的时候，不会超出范围。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">TrendlineEstimator::UpdateTrendline</span><span class="p">(</span><span class="kt">double</span><span class="w"> </span><span class="n">recv_delta_ms</span><span class="p">,</span>
+<span class="w">                                         </span><span class="kt">double</span><span class="w"> </span><span class="n">send_delta_ms</span><span class="p">,</span>
+<span class="w">                                         </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">send_time_ms</span><span class="p">,</span>
+<span class="w">                                         </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">arrival_time_ms</span><span class="p">,</span>
+<span class="w">                                         </span><span class="kt">size_t</span><span class="w"> </span><span class="n">packet_size</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 接收时间差 - 发送时间差 反映了网络队列引入的传输延迟（propagation delay）</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">double</span><span class="w"> </span><span class="n">delta_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">recv_delta_ms</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">send_delta_ms</span><span class="p">;</span>
+<span class="w">  </span><span class="o">++</span><span class="n">num_of_deltas_</span><span class="p">;</span>
+<span class="w">  </span><span class="n">num_of_deltas_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">num_of_deltas_</span><span class="p">,</span><span class="w"> </span><span class="n">kDeltaCounterMax</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">first_arrival_time_ms_</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">-1</span><span class="p">)</span>
+<span class="w">    </span><span class="n">first_arrival_time_ms_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">arrival_time_ms</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Exponential backoff filter.</span>
+<span class="w">  </span><span class="c1">// 指数滤波，得到一个更平滑的smoothed_delay_</span>
+<span class="w">  </span><span class="c1">// 滤波参数的更新，见后面部分介绍</span>
+<span class="w">  </span><span class="n">accumulated_delay_</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">delta_ms</span><span class="p">;</span>
+<span class="w">  </span><span class="n">smoothed_delay_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">smoothing_coef_</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">smoothed_delay_</span><span class="w"> </span><span class="o">+</span>
+<span class="w">                    </span><span class="p">(</span><span class="mi">1</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">smoothing_coef_</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">accumulated_delay_</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Maintain packet window</span>
+<span class="w">  </span><span class="c1">// 维护包组历史信息，这里可以对历史信息做一下排序</span>
+<span class="w">  </span><span class="c1">// 维护历史信息的原因在于后面要做最小二乘法拟合趋势</span>
+<span class="w">  </span><span class="n">delay_hist_</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span>
+<span class="w">      </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">double</span><span class="o">&gt;</span><span class="p">(</span><span class="n">arrival_time_ms</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">first_arrival_time_ms_</span><span class="p">),</span>
+<span class="w">      </span><span class="n">smoothed_delay_</span><span class="p">,</span><span class="w"> </span><span class="n">accumulated_delay_</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">settings_</span><span class="p">.</span><span class="n">enable_sort</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">delay_hist_</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">         </span><span class="n">i</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">         </span><span class="n">delay_hist_</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">arrival_time_ms</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">delay_hist_</span><span class="p">[</span><span class="n">i</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">].</span><span class="n">arrival_time_ms</span><span class="p">;</span>
+<span class="w">         </span><span class="o">--</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">swap</span><span class="p">(</span><span class="n">delay_hist_</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="w"> </span><span class="n">delay_hist_</span><span class="p">[</span><span class="n">i</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">]);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// 历史信息保存个数有限，默认20个，拟合的窗口时长选择也比较重要</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">delay_hist_</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">settings_</span><span class="p">.</span><span class="n">window_size</span><span class="p">)</span>
+<span class="w">    </span><span class="n">delay_hist_</span><span class="p">.</span><span class="n">pop_front</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// Simple linear regression.</span>
+<span class="w">  </span><span class="c1">// 调用LinearFitSlope完成最小二乘法线性回归</span>
+<span class="w">  </span><span class="c1">// 这里只需要获取斜率(slop)k，如果k &gt; 0，则说明队列延迟增加，很可能处于overuse状态</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="n">trend</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">prev_trend_</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">delay_hist_</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">settings_</span><span class="p">.</span><span class="n">window_size</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Update trend_ if it is possible to fit a line to the data. The delay</span>
+<span class="w">    </span><span class="c1">// trend can be seen as an estimate of (send_rate - capacity)/capacity.</span>
+<span class="w">    </span><span class="c1">// 0 &lt; trend &lt; 1   -&gt;  the delay increases, queues are filling up</span>
+<span class="w">    </span><span class="c1">//   trend == 0    -&gt;  the delay does not change</span>
+<span class="w">    </span><span class="c1">//   trend &lt; 0     -&gt;  the delay decreases, queues are being emptied</span>
+<span class="w">    </span><span class="n">trend</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">LinearFitSlope</span><span class="p">(</span><span class="n">delay_hist_</span><span class="p">).</span><span class="n">value_or</span><span class="p">(</span><span class="n">trend</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// 对于K &gt; 0情况，需要限制k的上限：</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">settings_</span><span class="p">.</span><span class="n">enable_cap</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">absl</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="kt">double</span><span class="o">&gt;</span><span class="w"> </span><span class="n">cap</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ComputeSlopeCap</span><span class="p">(</span><span class="n">delay_hist_</span><span class="p">,</span><span class="w"> </span><span class="n">settings_</span><span class="p">);</span>
+<span class="w">      </span><span class="c1">// We only use the cap to filter out overuse detections, not</span>
+<span class="w">      </span><span class="c1">// to detect additional underuses.</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">trend</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">cap</span><span class="p">.</span><span class="n">has_value</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">trend</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">cap</span><span class="p">.</span><span class="n">value</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">trend</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cap</span><span class="p">.</span><span class="n">value</span><span class="p">();</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 根据smoothdelay趋势(trend)和其他参数，检测当前状态</span>
+<span class="w">  </span><span class="n">Detect</span><span class="p">(</span><span class="n">trend</span><span class="p">,</span><span class="w"> </span><span class="n">send_delta_ms</span><span class="p">,</span><span class="w"> </span><span class="n">arrival_time_ms</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在检测趋势的时候，为了避免overuse检测（斜率&gt;0）时检测出现较大偏差，这里会根据当前的数据计算一个斜率上限，用来限制。</p>
+<div class="highlight"><pre><code><span></span><span class="n">absl</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="kt">double</span><span class="o">&gt;</span><span class="w"> </span><span class="n">ComputeSlopeCap</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">deque</span><span class="o">&lt;</span><span class="n">TrendlineEstimator</span><span class="o">::</span><span class="n">PacketTiming</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">packets</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">TrendlineEstimatorSettings</span><span class="o">&amp;</span><span class="w"> </span><span class="n">settings</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="p">...</span>
+<span class="w">  </span><span class="n">TrendlineEstimator</span><span class="o">::</span><span class="n">PacketTiming</span><span class="w"> </span><span class="n">early</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packets</span><span class="p">[</span><span class="mi">0</span><span class="p">];</span>
+<span class="w">  </span><span class="c1">// 开始的7个包中最，累计delay最小的包</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">settings</span><span class="p">.</span><span class="n">beginning_packets</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">packets</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">raw_delay_ms</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">early</span><span class="p">.</span><span class="n">raw_delay_ms</span><span class="p">)</span>
+<span class="w">      </span><span class="n">early</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packets</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 最后7个包中，累计delay最小的包</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">late_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packets</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">settings</span><span class="p">.</span><span class="n">end_packets</span><span class="p">;</span>
+<span class="w">  </span><span class="n">TrendlineEstimator</span><span class="o">::</span><span class="n">PacketTiming</span><span class="w"> </span><span class="n">late</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packets</span><span class="p">[</span><span class="n">late_start</span><span class="p">];</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">late_start</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">packets</span><span class="p">.</span><span class="n">size</span><span class="p">();</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">packets</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">raw_delay_ms</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">late</span><span class="p">.</span><span class="n">raw_delay_ms</span><span class="p">)</span>
+<span class="w">      </span><span class="n">late</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packets</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">late</span><span class="p">.</span><span class="n">arrival_time_ms</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">early</span><span class="p">.</span><span class="n">arrival_time_ms</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">absl</span><span class="o">::</span><span class="n">nullopt</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 根据上面计算得到的early和late，计算得到一个斜率，可以认为是一个最大斜率</span>
+<span class="w">  </span><span class="c1">// 我们使用最小二乘法回归的结果不能超过这个范围，这算是一个保护。</span>
+<span class="w">  </span><span class="c1">// 增加了一个cap_uncertainty，因为估计结果存在误差。</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="n">late</span><span class="p">.</span><span class="n">raw_delay_ms</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">early</span><span class="p">.</span><span class="n">raw_delay_ms</span><span class="p">)</span><span class="w"> </span><span class="o">/</span>
+<span class="w">             </span><span class="p">(</span><span class="n">late</span><span class="p">.</span><span class="n">arrival_time_ms</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">early</span><span class="p">.</span><span class="n">arrival_time_ms</span><span class="p">)</span><span class="w"> </span><span class="o">+</span>
+<span class="w">         </span><span class="n">settings</span><span class="p">.</span><span class="n">cap_uncertainty</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>2.6 状态检测</h3>
+<p>状态检测就是拿trend和阈值比较，判断overuse还是underuse，还是normal。需要注意的是，overuse的检测需要持续超过一定的阈值才认为是，使用单个点误差太大。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">TrendlineEstimator::Detect</span><span class="p">(</span><span class="kt">double</span><span class="w"> </span><span class="n">trend</span><span class="p">,</span><span class="w"> </span><span class="kt">double</span><span class="w"> </span><span class="n">ts_delta</span><span class="p">,</span><span class="w"> </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">now_ms</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 只输入两个样本，样本太少，默认normal状态</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">num_of_deltas_</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">hypothesis_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">BandwidthUsage</span><span class="o">::</span><span class="n">kBwNormal</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 原始的trend太小，区分度不高，做一个增益计算</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">double</span><span class="w"> </span><span class="n">modified_trend</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">num_of_deltas_</span><span class="p">,</span><span class="w"> </span><span class="n">kMinNumDeltas</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">trend</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">threshold_gain_</span><span class="p">;</span>
+<span class="w">  </span><span class="n">prev_modified_trend_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">modified_trend</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 趋势显著增加，overuse！</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">modified_trend</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">threshold_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// overuse时间累计，overuse count增加</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">time_over_using_</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Initialize the timer. Assume that we&#39;ve been</span>
+<span class="w">      </span><span class="c1">// over-using half of the time since the previous</span>
+<span class="w">      </span><span class="c1">// sample.</span>
+<span class="w">      </span><span class="c1">// 第一次采用发送时间的一般作为overuse时间</span>
+<span class="w">      </span><span class="n">time_over_using_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ts_delta</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Increment timer</span>
+<span class="w">      </span><span class="n">time_over_using_</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">ts_delta</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">overuse_counter_</span><span class="o">++</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// overuse超过一定时间才会真正进入overuse状态，阈值初始化默认10ms，后续会动态调整</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">time_over_using_</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">overusing_time_threshold_</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">overuse_counter_</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">trend</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">prev_trend_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">time_over_using_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">        </span><span class="n">overuse_counter_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">        </span><span class="n">hypothesis_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">BandwidthUsage</span><span class="o">::</span><span class="n">kBwOverusing</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 趋势显著降低，直接置为underuse，不需要观察</span>
+<span class="w">  </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">modified_trend</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="o">-</span><span class="n">threshold_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">time_over_using_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">-1</span><span class="p">;</span>
+<span class="w">    </span><span class="n">overuse_counter_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="n">hypothesis_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">BandwidthUsage</span><span class="o">::</span><span class="n">kBwUnderusing</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// 否则是normal状态</span>
+<span class="w">  </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">time_over_using_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">-1</span><span class="p">;</span>
+<span class="w">    </span><span class="n">overuse_counter_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="n">hypothesis_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">BandwidthUsage</span><span class="o">::</span><span class="n">kBwNormal</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">prev_trend_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">trend</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// overuse、underuse阈值的更新</span>
+<span class="w">  </span><span class="n">UpdateThreshold</span><span class="p">(</span><span class="n">modified_trend</span><span class="p">,</span><span class="w"> </span><span class="n">now_ms</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>2.7 阈值更新</h3>
+<p>为什么需要调整阈值？因为随着trend变化，trendline可能会变化越来越慢，但是仍然存在增加或降低趋势（一些异常点会导致trend偏离0越来越大），这个时候很大可能性不是overuse或者underuse。因此需要自适应调整阈值。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">TrendlineEstimator::UpdateThreshold</span><span class="p">(</span><span class="kt">double</span><span class="w"> </span><span class="n">modified_trend</span><span class="p">,</span>
+<span class="w">                                         </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">now_ms</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">last_update_ms_</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">-1</span><span class="p">)</span>
+<span class="w">    </span><span class="n">last_update_ms_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">now_ms</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// kMaxAdaptOffsetMs: 15ms</span>
+<span class="w">  </span><span class="c1">// trend存在较大变化，这个时候不需要调整</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">fabs</span><span class="p">(</span><span class="n">modified_trend</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">threshold_</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">kMaxAdaptOffsetMs</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Avoid adapting the threshold to big latency spikes, caused e.g.,</span>
+<span class="w">    </span><span class="c1">// by a sudden capacity drop.</span>
+<span class="w">    </span><span class="n">last_update_ms_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">now_ms</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 阈值上调和下调快慢不一样，上调默认为0.0087，下调默认为0.039</span>
+<span class="w">  </span><span class="c1">// 对于overuse的检测我们需要更晋升</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">double</span><span class="w"> </span><span class="n">k</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fabs</span><span class="p">(</span><span class="n">modified_trend</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">threshold_</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">k_down_</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">k_up_</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 单位时间内调整比例为k</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">kMaxTimeDeltaMs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">time_delta_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">now_ms</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">last_update_ms_</span><span class="p">,</span><span class="w"> </span><span class="n">kMaxTimeDeltaMs</span><span class="p">);</span>
+<span class="w">  </span><span class="n">threshold_</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">k</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="n">fabs</span><span class="p">(</span><span class="n">modified_trend</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">threshold_</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">time_delta_ms</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 阈值限制在6~600之间</span>
+<span class="w">  </span><span class="n">threshold_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">SafeClamp</span><span class="p">(</span><span class="n">threshold_</span><span class="p">,</span><span class="w"> </span><span class="mf">6.f</span><span class="p">,</span><span class="w"> </span><span class="mf">600.f</span><span class="p">);</span>
+<span class="w">  </span><span class="n">last_update_ms_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">now_ms</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<h2>3. 总结</h2>
+<p>以上便是根据延迟趋势判断当前状态（overuse/underuse/normal）的逻辑，原理也比较简单。在做完这些检测后，便可以将这些输入到AIMD做带宽的估计了，这是下一个章节的内容。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "WebRTC GCC代码深度解读02.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

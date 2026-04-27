@@ -1,0 +1,502 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>iOS中线程Call Stack的捕获和解析 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="iOS中线程Call Stack的捕获和解析,iOS,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="iOS中线程Call Stack的捕获和解析" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>iOS中线程Call Stack的捕获和解析</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2016-08-09 15:38
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_ios.html' class='article_tag'>iOS</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='http://blog.csdn.net/jasonblog/article/details/49909163' target='blank'>iOS中线程Call Stack的捕获和解析(一)</a></p></h4>
+<h2>一、获取任意一个线程的Call Stack</h2>
+<p>如果要获取当前线程的调用栈，可以直接使用现有API：<code>[NSThread callStackSymbols]</code>。</p>
+<p>但是并没有相关API支持获取任意线程的调用栈，所以只能自己编码实现。</p>
+<h3>1. 基础结构</h3>
+<p>一个线程的调用栈是什么样的呢？</p>
+<p>我的理解是应该包含当前线程的执行地址，并且从这个地址可以一级一级回溯到线程的入口地址，这样就反向构成了一条链：线程入口执行某个方法，然后逐级嵌套调用到当前现
+场。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/6fe88303be1468f692bf80099fdf0d18a5e6efad.png" alt="Call_stack_layout_svg">
+（图片来源于维基百科）</p>
+<p>如图所示，每一级的方法调用，都对应了一张活动记录，也称为活动帧。也就是说，调用栈是由一张张帧结构组成的，可以称之为栈帧。</p>
+<p>我们可以看到，一张栈帧结构中包含着Return Address，也就是当前活动记录执行结束后要返回的地址（展开）。</p>
+<p>那么，在我们获取到栈帧后，就可以通过返回地址来进行回溯了。</p>
+<h3>2. 指令指针和基址指针</h3>
+<p>我们明确了两个目标：(1)当前执行的指令，(2)当前栈帧结构。</p>
+<p>以x86为例，寄存器用途如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">SP</span><span class="o">/</span><span class="n">ESP</span><span class="o">/</span><span class="n">RSP</span><span class="o">:</span><span class="w"> </span><span class="n">Stack</span><span class="w"> </span><span class="n">pointer</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">top</span><span class="w"> </span><span class="n">address</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">stack</span><span class="p">.</span>
+<span class="n">BP</span><span class="o">/</span><span class="n">EBP</span><span class="o">/</span><span class="n">RBP</span><span class="o">:</span><span class="w"> </span><span class="n">Stack</span><span class="w"> </span><span class="n">base</span><span class="w"> </span><span class="n">pointer</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">holding</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">address</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">current</span><span class="w"> </span><span class="n">stack</span><span class="w"> </span><span class="n">frame</span><span class="p">.</span>
+<span class="n">IP</span><span class="o">/</span><span class="n">EIP</span><span class="o">/</span><span class="n">RIP</span><span class="o">:</span><span class="w"> </span><span class="n">Instruction</span><span class="w"> </span><span class="n">pointer</span><span class="p">.</span><span class="w"> </span><span class="n">Holds</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">program</span><span class="w"> </span><span class="n">counter</span><span class="p">,</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">current</span><span class="w"> </span><span class="n">instruction</span><span class="w"> </span><span class="n">address</span><span class="p">.</span>
+</code></pre></div>
+<p>可以看到，我们可以通过指令指针来获取当前指令地址，以及通过栈基址指针获取当前栈帧地址。</p>
+<p>那么问题来了，我们怎么获取到相关寄存器呢？</p>
+<h3>3. 线程执行状态</h3>
+<p>考虑到一个线程被挂起时，后续继续执行需要恢复现场，所以在挂起时相关现场需要被保存起来，比如当前执行到哪条指令了。</p>
+<p>那么就要有相关的结构体来为线程保存运行时的状态，经过一番查阅，得到如下信息：</p>
+<p><em>The function thread_get_state returns the execution state (e.g. the machine
+registers) of target_thread as specified by flavor.</em></p>
+<div class="highlight"><pre><code><span></span><span class="n">Function</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">Return</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">execution</span><span class="w"> </span><span class="n">state</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="kr">thread</span><span class="p">.</span>
+<span class="n">SYNOPSIS</span>
+<span class="n">kern_return_t</span><span class="w">   </span><span class="n">thread_get_state</span>
+<span class="w">                </span><span class="p">(</span><span class="n">thread_act_t</span><span class="w">                     </span><span class="n">target_thread</span><span class="p">,</span>
+<span class="w">                 </span><span class="n">thread_state_flavor_t</span><span class="w">                   </span><span class="n">flavor</span><span class="p">,</span>
+<span class="w">                 </span><span class="n">thread_state_t</span><span class="w">                       </span><span class="n">old_state</span><span class="p">,</span>
+<span class="w">                 </span><span class="n">mach_msg_type_number_t</span><span class="w">         </span><span class="n">old_state_count</span><span class="p">);</span>
+<span class="cm">/*</span>
+<span class="cm"> * THREAD_STATE_FLAVOR_LIST 0</span>
+<span class="cm"> *  these are the supported flavors</span>
+<span class="cm"> */</span>
+<span class="cp">#define x86_THREAD_STATE32      1</span>
+<span class="cp">#define x86_FLOAT_STATE32       2</span>
+<span class="cp">#define x86_EXCEPTION_STATE32       3</span>
+<span class="cp">#define x86_THREAD_STATE64      4</span>
+<span class="cp">#define x86_FLOAT_STATE64       5</span>
+<span class="cp">#define x86_EXCEPTION_STATE64       6</span>
+<span class="cp">#define x86_THREAD_STATE        7</span>
+<span class="cp">#define x86_FLOAT_STATE         8</span>
+<span class="cp">#define x86_EXCEPTION_STATE     9</span>
+<span class="cp">#define x86_DEBUG_STATE32       10</span>
+<span class="cp">#define x86_DEBUG_STATE64       11</span>
+<span class="cp">#define x86_DEBUG_STATE         12</span>
+<span class="cp">#define THREAD_STATE_NONE       13</span>
+<span class="cm">/* 14 and 15 are used for the internal x86_SAVED_STATE flavours */</span>
+<span class="cp">#define x86_AVX_STATE32         16</span>
+<span class="cp">#define x86_AVX_STATE64         17</span>
+<span class="cp">#define x86_AVX_STATE           18</span>
+</code></pre></div>
+<p>所以我们可以通过这个API搭配相关参数来获得想要的寄存器信息：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">bool</span><span class="w"> </span><span class="nf">jdy_fillThreadStateIntoMachineContext</span><span class="p">(</span><span class="n">thread_t</span><span class="w"> </span><span class="kr">thread</span><span class="p">,</span><span class="w"> </span><span class="n">_STRUCT_MCONTEXT</span><span class="w"> </span><span class="o">*</span><span class="n">machineContext</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">mach_msg_type_number_t</span><span class="w"> </span><span class="n">state_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">x86_THREAD_STATE64_COUNT</span><span class="p">;</span>
+<span class="w">    </span><span class="n">kern_return_t</span><span class="w"> </span><span class="n">kr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">thread_get_state</span><span class="p">(</span><span class="kr">thread</span><span class="p">,</span><span class="w"> </span><span class="n">x86_THREAD_STATE64</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="n">thread_state_t</span><span class="p">)</span><span class="o">&amp;</span><span class="n">machineContext</span><span class="o">-&gt;</span><span class="n">__ss</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">state_count</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="n">kr</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">KERN_SUCCESS</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这里引入了一个结构体叫<code>_STRUCT_MCONTEXT</code>。</p>
+<h3>4. 不同平台的寄存器</h3>
+<p><code>_STRUCT_MCONTEXT</code>在不同平台上的结构不同：</p>
+<p>x86_64，如iPhone 6模拟器：</p>
+<div class="highlight"><pre><code><span></span><span class="n">_STRUCT_MCONTEXT64</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">_STRUCT_X86_EXCEPTION_STATE64</span><span class="w">   </span><span class="n">__es</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_STRUCT_X86_THREAD_STATE64</span><span class="w">  </span><span class="n">__ss</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_STRUCT_X86_FLOAT_STATE64</span><span class="w">   </span><span class="n">__fs</span><span class="p">;</span>
+<span class="p">};</span>
+<span class="n">_STRUCT_X86_THREAD_STATE64</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">  </span><span class="n">__rax</span><span class="p">;</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">  </span><span class="n">__rbx</span><span class="p">;</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">  </span><span class="n">__rcx</span><span class="p">;</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">  </span><span class="n">__rdx</span><span class="p">;</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">  </span><span class="n">__rdi</span><span class="p">;</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">  </span><span class="n">__rsi</span><span class="p">;</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">  </span><span class="n">__rbp</span><span class="p">;</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">  </span><span class="n">__rsp</span><span class="p">;</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">  </span><span class="n">__r8</span><span class="p">;</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">  </span><span class="n">__r9</span><span class="p">;</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">  </span><span class="n">__r10</span><span class="p">;</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">  </span><span class="n">__r11</span><span class="p">;</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">  </span><span class="n">__r12</span><span class="p">;</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">  </span><span class="n">__r13</span><span class="p">;</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">  </span><span class="n">__r14</span><span class="p">;</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">  </span><span class="n">__r15</span><span class="p">;</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">  </span><span class="n">__rip</span><span class="p">;</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">  </span><span class="n">__rflags</span><span class="p">;</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">  </span><span class="n">__cs</span><span class="p">;</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">  </span><span class="n">__fs</span><span class="p">;</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">  </span><span class="n">__gs</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>x86_32，如iPhone 4s模拟器：</p>
+<div class="highlight"><pre><code><span></span><span class="n">_STRUCT_MCONTEXT32</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">_STRUCT_X86_EXCEPTION_STATE32</span><span class="w">   </span><span class="n">__es</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_STRUCT_X86_THREAD_STATE32</span><span class="w">  </span><span class="n">__ss</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_STRUCT_X86_FLOAT_STATE32</span><span class="w">   </span><span class="n">__fs</span><span class="p">;</span>
+<span class="p">};</span>
+<span class="n">_STRUCT_X86_THREAD_STATE32</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w">    </span><span class="n">__eax</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w">    </span><span class="n">__ebx</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w">    </span><span class="n">__ecx</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w">    </span><span class="n">__edx</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w">    </span><span class="n">__edi</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w">    </span><span class="n">__esi</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w">    </span><span class="n">__ebp</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w">    </span><span class="n">__esp</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w">    </span><span class="n">__ss</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w">    </span><span class="n">__eflags</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w">    </span><span class="n">__eip</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w">    </span><span class="n">__cs</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w">    </span><span class="n">__ds</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w">    </span><span class="n">__es</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w">    </span><span class="n">__fs</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w">    </span><span class="n">__gs</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>ARM64，如iPhone 5s：</p>
+<div class="highlight"><pre><code><span></span><span class="n">_STRUCT_MCONTEXT64</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">_STRUCT_ARM_EXCEPTION_STATE64</span><span class="w">   </span><span class="n">__es</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_STRUCT_ARM_THREAD_STATE64</span><span class="w">  </span><span class="n">__ss</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_STRUCT_ARM_NEON_STATE64</span><span class="w">    </span><span class="n">__ns</span><span class="p">;</span>
+<span class="p">};</span>
+<span class="n">_STRUCT_ARM_THREAD_STATE64</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">    </span><span class="n">__x</span><span class="p">[</span><span class="mi">29</span><span class="p">];</span><span class="w">  </span><span class="cm">/* General purpose registers x0-x28 */</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">    </span><span class="n">__fp</span><span class="p">;</span><span class="w">     </span><span class="cm">/* Frame pointer x29 */</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">    </span><span class="n">__lr</span><span class="p">;</span><span class="w">     </span><span class="cm">/* Link register x30 */</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">    </span><span class="n">__sp</span><span class="p">;</span><span class="w">     </span><span class="cm">/* Stack pointer x31 */</span>
+<span class="w">    </span><span class="n">__uint64_t</span><span class="w">    </span><span class="n">__pc</span><span class="p">;</span><span class="w">     </span><span class="cm">/* Program counter */</span>
+<span class="w">    </span><span class="n">__uint32_t</span><span class="w">    </span><span class="n">__cpsr</span><span class="p">;</span><span class="w">   </span><span class="cm">/* Current program status register */</span>
+<span class="w">    </span><span class="n">__uint32_t</span><span class="w">    </span><span class="n">__pad</span><span class="p">;</span><span class="w">    </span><span class="cm">/* Same size for 32-bit or 64-bit clients */</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>ARMv7/v6，如iPhone 4s：</p>
+<div class="highlight"><pre><code><span></span><span class="n">_STRUCT_MCONTEXT32</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">_STRUCT_ARM_EXCEPTION_STATE</span><span class="w"> </span><span class="n">__es</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_STRUCT_ARM_THREAD_STATE</span><span class="w">    </span><span class="n">__ss</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_STRUCT_ARM_VFP_STATE</span><span class="w">       </span><span class="n">__fs</span><span class="p">;</span>
+<span class="p">};</span>
+<span class="n">_STRUCT_ARM_THREAD_STATE</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">__uint32_t</span><span class="w">  </span><span class="n">__r</span><span class="p">[</span><span class="mi">13</span><span class="p">];</span><span class="w">    </span><span class="cm">/* General purpose register r0-r12 */</span>
+<span class="w">    </span><span class="n">__uint32_t</span><span class="w">  </span><span class="n">__sp</span><span class="p">;</span><span class="w">       </span><span class="cm">/* Stack pointer r13 */</span>
+<span class="w">    </span><span class="n">__uint32_t</span><span class="w">  </span><span class="n">__lr</span><span class="p">;</span><span class="w">       </span><span class="cm">/* Link register r14 */</span>
+<span class="w">    </span><span class="n">__uint32_t</span><span class="w">  </span><span class="n">__pc</span><span class="p">;</span><span class="w">       </span><span class="cm">/* Program counter r15 */</span>
+<span class="w">    </span><span class="n">__uint32_t</span><span class="w">  </span><span class="n">__cpsr</span><span class="p">;</span><span class="w">     </span><span class="cm">/* Current program status register */</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>可以对照《iOS ABI Function Call Guide》，其中在ARM64相关章节中描述到：</p>
+<p><em>The frame pointer register (x29) must always address a valid frame record,
+although some functions–such as leaf functions or tail calls–may elect not to
+create an entry in this list. As a result, stack traces will always be
+meaningful, even without debug information</em></p>
+<p>而在ARMv7/v6上描述到：</p>
+<p><em>The function calling conventions used in the ARMv6 environment are the same
+as those used in the Procedure Call Standard for the ARM Architecture (release
+1.07), with the following exceptions:</em></p>
+<p><em>The stack is 4-byte aligned at the point of function calls.<br>
+Large data types (larger than 4 bytes) are 4-byte aligned.<br>
+Register R7 is used as a frame pointer<br>
+Register R9 has special usage.</em></p>
+<p>所以，通过了解以上不同平台的寄存器结构，我们可以编写出比较通用的回溯功能。</p>
+<h3>5. 算法实现</h3>
+<div class="highlight"><pre><code><span></span><span class="cm">/**</span>
+<span class="cm"> * 关于栈帧的布局可以参考：</span>
+<span class="cm"> * https://en.wikipedia.org/wiki/Call_stack</span>
+<span class="cm"> * http://www.cs.cornell.edu/courses/cs412/2008sp/lectures/lec20.pdf</span>
+<span class="cm"> * http://eli.thegreenplace.net/2011/09/06/stack-frame-layout-on-x86-64/</span>
+<span class="cm"> */</span>
+<span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">JDYStackFrame</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">JDYStackFrame</span><span class="o">*</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">previous</span><span class="p">;</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">returnAddress</span><span class="p">;</span>
+<span class="p">}</span><span class="w"> </span><span class="n">JDYStackFrame</span><span class="p">;</span>
+<span class="c1">//</span>
+<span class="kt">int</span><span class="w"> </span><span class="nf">jdy_backtraceThread</span><span class="p">(</span><span class="n">thread_t</span><span class="w"> </span><span class="kr">thread</span><span class="p">,</span><span class="w"> </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="o">*</span><span class="n">backtraceBuffer</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">limit</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">limit</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_STRUCT_MCONTEXT</span><span class="w"> </span><span class="n">mcontext</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">jdy_fillThreadStateIntoMachineContext</span><span class="p">(</span><span class="kr">thread</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">mcontext</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">pc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">jdy_programCounterOfMachineContext</span><span class="p">(</span><span class="o">&amp;</span><span class="n">mcontext</span><span class="p">);</span>
+<span class="w">    </span><span class="n">backtraceBuffer</span><span class="p">[</span><span class="n">i</span><span class="o">++</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pc</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">limit</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">i</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">lr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">jdy_linkRegisterOfMachineContext</span><span class="p">(</span><span class="o">&amp;</span><span class="n">mcontext</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">lr</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="cm">/* 由于lr保存的也是返回地址，所以在lr有效时，应该会产生重复的地址项 */</span>
+<span class="w">        </span><span class="n">backtraceBuffer</span><span class="p">[</span><span class="n">i</span><span class="o">++</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">lr</span><span class="p">;</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">limit</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">i</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">JDYStackFrame</span><span class="w"> </span><span class="n">frame</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="mi">0</span><span class="p">};</span>
+<span class="w">    </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">fp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">jdy_framePointerOfMachineContext</span><span class="p">(</span><span class="o">&amp;</span><span class="n">mcontext</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">fp</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">jdy_copyMemory</span><span class="p">((</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">fp</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">frame</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">frame</span><span class="p">))</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">KERN_SUCCESS</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">i</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">limit</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">backtraceBuffer</span><span class="p">[</span><span class="n">i</span><span class="o">++</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">frame</span><span class="p">.</span><span class="n">returnAddress</span><span class="p">;</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">frame</span><span class="p">.</span><span class="n">returnAddress</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span>
+<span class="w">            </span><span class="o">||</span><span class="w"> </span><span class="n">frame</span><span class="p">.</span><span class="n">previous</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nb">NULL</span>
+<span class="w">            </span><span class="o">||</span><span class="w"> </span><span class="n">jdy_copyMemory</span><span class="p">((</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">frame</span><span class="p">.</span><span class="n">previous</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">frame</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">frame</span><span class="p">))</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">KERN_SUCCESS</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">i</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>如上。</p>
+<h2>二、编码实现对一个地址进行符号化解析</h2>
+<p>后续<a href="">iOS中线程Call Stack的捕获和解析（二）</a>。</p>
+<hr>
+
+
+
+<h4><p>原文出处：<a href='http://blog.csdn.net/jasonblog/article/details/49909209' target='blank'>iOS中线程Call Stack的捕获和解析（二）</a></p></h4>
+<h3>1. 部分参考资料</h3>
+<p>做这一块时也是查阅了很多链接和书籍，包括但不限于：</p>
+<ul>
+<li><p><a href="https://developer.apple.com/library/mac/documentation/DeveloperTools/Conceptual/MachORuntime/">《OS X ABI Mach-O File Format Reference》</a></p>
+</li>
+<li><p><a href="https://developer.apple.com/library/mac/documentation/DeveloperTools/Conceptual/MachOTopics/0-Introduction/introduction.html">《Mach-O Programming Topics》</a></p>
+</li>
+<li><p><a href="http://book.douban.com/subject/3652388/">《程序员的自我修养》</a>——这本几年前读过的，又一次从书架上拿下来温习，主要是用来对比确认；</p>
+</li>
+<li><p><a href="http://www.amazon.cn/The-Mac-Hacker-s-Handbook-Miller-Charles/dp/0470395362/ref=sr_1_1?ie=UTF8&qid=1447826833&sr=8-1&keywords=mac+hacker+handbook">《The Mac Hacker’s Handbook》</a></p>
+</li>
+<li><p><a href="http://www.amazon.cn/Mac-OS-X-and-iOS-Internals-To-the-Apple-s-Core-Levin-Jonathan/dp/1118057651/ref=pd_sim_sbs_14_1?ie=UTF8&dpID=51y%2BHC3RdML&dpSrc=sims&preST=_AC_UL160_SR126%2C160_&refRID=0RVDY2AYPWF1ZEY43J5C">《Mac OS X and iOS Internals》</a></p>
+</li>
+</ul>
+<p>以及很多Google Search。</p>
+<h3>2. 相关API和数据结构</h3>
+<p>由于我们在上面回溯线程调用栈拿到的是一组地址，所以这里进行符号化的输入输出应该分别是地址和符号，接口设计类似如下：</p>
+<p><code>\- (NSString *)symbolicateAddress:(uintptr_t)addr;</code></p>
+<p>不过在实际操作中，我们需要依赖于dyld相关方法和数据结构：</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/*</span>
+<span class="cm"> * Structure filled in by dladdr().</span>
+<span class="cm"> */</span>
+<span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">dl_info</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w">      </span><span class="o">*</span><span class="n">dli_fname</span><span class="p">;</span><span class="w">     </span><span class="cm">/* Pathname of shared object */</span>
+<span class="w">        </span><span class="kt">void</span><span class="w">            </span><span class="o">*</span><span class="n">dli_fbase</span><span class="p">;</span><span class="w">     </span><span class="cm">/* Base address of shared object */</span>
+<span class="w">        </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w">      </span><span class="o">*</span><span class="n">dli_sname</span><span class="p">;</span><span class="w">     </span><span class="cm">/* Name of nearest symbol */</span>
+<span class="w">        </span><span class="kt">void</span><span class="w">            </span><span class="o">*</span><span class="n">dli_saddr</span><span class="p">;</span><span class="w">     </span><span class="cm">/* Address of nearest symbol */</span>
+<span class="p">}</span><span class="w"> </span><span class="n">Dl_info</span><span class="p">;</span>
+<span class="k">extern</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="nf">dladdr</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="p">,</span><span class="w"> </span><span class="n">Dl_info</span><span class="w"> </span><span class="o">*</span><span class="p">);</span>
+<span class="n">DESCRIPTION</span>
+<span class="w">     </span><span class="n">These</span><span class="w"> </span><span class="n">routines</span><span class="w"> </span><span class="n">provide</span><span class="w"> </span><span class="n">additional</span><span class="w"> </span><span class="n">introspection</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">dyld</span><span class="w"> </span><span class="n">beyond</span><span class="w"> </span><span class="n">that</span><span class="w"> </span><span class="n">provided</span><span class="w"> </span><span class="n">by</span><span class="w"> </span><span class="n">dlopen</span><span class="p">()</span><span class="w"> </span><span class="n">and</span><span class="w"> </span><span class="n">dladdr</span><span class="p">()</span>
+<span class="w">     </span><span class="n">_dyld_image_count</span><span class="p">()</span><span class="w"> </span><span class="n">returns</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">current</span><span class="w"> </span><span class="n">number</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">images</span><span class="w"> </span><span class="n">mapped</span><span class="w"> </span><span class="n">in</span><span class="w"> </span><span class="n">by</span><span class="w"> </span><span class="n">dyld</span><span class="p">.</span><span class="w"> </span><span class="n">Note</span><span class="w"> </span><span class="n">that</span><span class="w"> </span><span class="n">using</span><span class="w"> </span><span class="n">this</span><span class="w"> </span><span class="n">count</span>
+<span class="w">     </span><span class="n">to</span><span class="w"> </span><span class="n">iterate</span><span class="w"> </span><span class="n">all</span><span class="w"> </span><span class="n">images</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">not</span><span class="w"> </span><span class="kr">thread</span><span class="w"> </span><span class="n">safe</span><span class="p">,</span><span class="w"> </span><span class="n">because</span><span class="w"> </span><span class="n">another</span><span class="w"> </span><span class="kr">thread</span><span class="w"> </span><span class="n">may</span><span class="w"> </span><span class="n">be</span><span class="w"> </span><span class="n">adding</span><span class="w"> </span><span class="n">or</span><span class="w"> </span><span class="n">removing</span><span class="w"> </span><span class="n">images</span><span class="w"> </span><span class="n">dur</span><span class="o">-</span><span class="n">ing</span><span class="w"> </span><span class="n">during</span>
+<span class="w">     </span><span class="n">ing</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">iteration</span><span class="p">.</span>
+<span class="w">     </span><span class="n">_dyld_get_image_header</span><span class="p">()</span><span class="w"> </span><span class="n">returns</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="n">pointer</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">mach</span><span class="w"> </span><span class="n">header</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">image</span><span class="w"> </span><span class="n">indexed</span><span class="w"> </span><span class="n">by</span><span class="w"> </span><span class="n">image_index</span><span class="p">.</span><span class="w">  </span><span class="n">If</span>
+<span class="w">     </span><span class="n">image_index</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">out</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">range</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">returned</span><span class="p">.</span>
+<span class="w">     </span><span class="n">_dyld_get_image_vmaddr_slide</span><span class="p">()</span><span class="w"> </span><span class="n">returns</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">virtural</span><span class="w"> </span><span class="n">memory</span><span class="w"> </span><span class="n">address</span><span class="w"> </span><span class="n">slide</span><span class="w"> </span><span class="n">amount</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">image</span><span class="w"> </span><span class="n">indexed</span><span class="w"> </span><span class="n">by</span>
+<span class="w">     </span><span class="n">image_index</span><span class="p">.</span><span class="w"> </span><span class="n">If</span><span class="w"> </span><span class="n">image_index</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">out</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">range</span><span class="w"> </span><span class="n">zero</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">returned</span><span class="p">.</span>
+<span class="w">     </span><span class="n">_dyld_get_image_name</span><span class="p">()</span><span class="w"> </span><span class="n">returns</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">image</span><span class="w"> </span><span class="n">indexed</span><span class="w"> </span><span class="n">by</span><span class="w"> </span><span class="n">image_index</span><span class="p">.</span><span class="w"> </span><span class="n">The</span><span class="w"> </span><span class="n">C</span><span class="o">-</span><span class="n">string</span><span class="w"> </span><span class="n">continues</span><span class="w"> </span><span class="n">to</span>
+<span class="w">     </span><span class="n">be</span><span class="w"> </span><span class="n">owned</span><span class="w"> </span><span class="n">by</span><span class="w"> </span><span class="n">dyld</span><span class="w"> </span><span class="n">and</span><span class="w"> </span><span class="n">should</span><span class="w"> </span><span class="n">not</span><span class="w"> </span><span class="n">deleted</span><span class="p">.</span><span class="w">  </span><span class="n">If</span><span class="w"> </span><span class="n">image_index</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">out</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">range</span><span class="w"> </span><span class="nb">NULL</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">returned</span><span class="p">.</span>
+</code></pre></div>
+<p>又为了要判断此次解析是否成功，所以接口设计演变为：</p>
+<p><code>bool jdy_symbolicateAddress(const uintptr_t addr, Dl_info *info)</code></p>
+<p>Dl_info用来填充解析的结果。</p>
+<h3>3. 算法思路</h3>
+<p>对一个地址进行符号化解析说起来也是比较直接的，就是找到地址所属的内存镜像，然后定位该镜像中的符号表，最后从符号表中匹配目标地址的符号。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/48e6115f37b8833334c75453d1b1872ad7f495c6.gif" alt="mach_o_segments">（图片来源于
+苹果官方文档）</p>
+<p>以下思路是描述一个大致的方向，并没有涵盖具体的细节，比如基于ASLR的偏移量：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 基于ASLR的偏移量https://en.wikipedia.org/wiki/Address_space_layout_randomization</span>
+<span class="w">        </span><span class="cm">/**</span>
+<span class="cm">         * When the dynamic linker loads an image, </span>
+<span class="cm">         * the image must be mapped into the virtual address space of the process at an unoccupied address.</span>
+<span class="cm">         * The dynamic linker accomplishes this by adding a value &quot;the virtual memory slide amount&quot; to the base address of the image.</span>
+<span class="cm">         */</span>
+</code></pre></div>
+<h4>3.1 寻找包含地址的目标镜像</h4>
+<p>起初看到一个API还有点小惊喜，可惜iPhone上用不了：</p>
+<p><code>extern bool _dyld_image_containing_address(const void* address)  
+__OSX_AVAILABLE_BUT_DEPRECATED(__MAC_10_3,__MAC_10_5,__IPHONE_NA,__IPHONE_NA);</code></p>
+<p>所以得自己来判断。</p>
+<p>怎么判断呢？</p>
+<p><em>A segment defines a range of bytes in a Mach-O file and the addresses and
+memory protection attributes at which those bytes are mapped into virtual
+memory when the dynamic linker loads the application. As such, segments are
+always virtual memory page aligned. A segment contains zero or more sections.</em></p>
+<p>通过遍历每个段，判断目标地址是否落在该段包含的范围内：</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/*</span>
+<span class="cm"> * The segment load command indicates that a part of this file is to be</span>
+<span class="cm"> * mapped into the task&#39;s address space.  The size of this segment in memory,</span>
+<span class="cm"> * vmsize, maybe equal to or larger than the amount to map from this file,</span>
+<span class="cm"> * filesize.  The file is mapped starting at fileoff to the beginning of</span>
+<span class="cm"> * the segment in memory, vmaddr.  The rest of the memory of the segment,</span>
+<span class="cm"> * if any, is allocated zero fill on demand.  The segment&#39;s maximum virtual</span>
+<span class="cm"> * memory protection and initial virtual memory protection are specified</span>
+<span class="cm"> * by the maxprot and initprot fields.  If the segment has sections then the</span>
+<span class="cm"> * section structures directly follow the segment command and their size is</span>
+<span class="cm"> * reflected in cmdsize.</span>
+<span class="cm"> */</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">segment_command</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="cm">/* for 32-bit architectures */</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w">    </span><span class="n">cmd</span><span class="p">;</span><span class="w">        </span><span class="cm">/* LC_SEGMENT */</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w">    </span><span class="n">cmdsize</span><span class="p">;</span><span class="w">    </span><span class="cm">/* includes sizeof section structs */</span>
+<span class="w">    </span><span class="kt">char</span><span class="w">        </span><span class="n">segname</span><span class="p">[</span><span class="mi">16</span><span class="p">];</span><span class="w">    </span><span class="cm">/* segment name */</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w">    </span><span class="n">vmaddr</span><span class="p">;</span><span class="w">     </span><span class="cm">/* memory address of this segment */</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w">    </span><span class="n">vmsize</span><span class="p">;</span><span class="w">     </span><span class="cm">/* memory size of this segment */</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w">    </span><span class="n">fileoff</span><span class="p">;</span><span class="w">    </span><span class="cm">/* file offset of this segment */</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w">    </span><span class="n">filesize</span><span class="p">;</span><span class="w">   </span><span class="cm">/* amount to map from the file */</span>
+<span class="w">    </span><span class="n">vm_prot_t</span><span class="w">   </span><span class="n">maxprot</span><span class="p">;</span><span class="w">    </span><span class="cm">/* maximum VM protection */</span>
+<span class="w">    </span><span class="n">vm_prot_t</span><span class="w">   </span><span class="n">initprot</span><span class="p">;</span><span class="w">   </span><span class="cm">/* initial VM protection */</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w">    </span><span class="n">nsects</span><span class="p">;</span><span class="w">     </span><span class="cm">/* number of sections in segment */</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w">    </span><span class="n">flags</span><span class="p">;</span><span class="w">      </span><span class="cm">/* flags */</span>
+<span class="p">};</span>
+<span class="cm">/**</span>
+<span class="cm"> * @brief 判断某个segment_command是否包含addr这个地址，基于segment的虚拟地址和段大小来判断</span>
+<span class="cm"> */</span>
+<span class="kt">bool</span><span class="w"> </span><span class="nf">jdy_segmentContainsAddress</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">load_command</span><span class="w"> </span><span class="o">*</span><span class="n">cmdPtr</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">addr</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">cmdPtr</span><span class="o">-&gt;</span><span class="n">cmd</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">LC_SEGMENT</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">struct</span><span class="w"> </span><span class="nc">segment_command</span><span class="w"> </span><span class="o">*</span><span class="n">segPtr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">segment_command</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">cmdPtr</span><span class="p">;</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">addr</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">segPtr</span><span class="o">-&gt;</span><span class="n">vmaddr</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">addr</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="p">(</span><span class="n">segPtr</span><span class="o">-&gt;</span><span class="n">vmaddr</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">segPtr</span><span class="o">-&gt;</span><span class="n">vmsize</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+</code></pre></div>
+<p>这样一来，我们就可以找到包含目标地址的镜像文件了。</p>
+<h4>3.2 定位目标镜像的符号表</h4>
+<p>由于符号的收集和符号表的创建贯穿着编译和链接阶段，这里就不展开了，而是只要确定除了代码段_TEXT和数据段DATA外，还有个_LINKEDIT段包含符号表：</p>
+<p><code>The __LINKEDIT segment contains raw data used by the dynamic linker, such as
+symbol, string, and relocation table entries.</code></p>
+<p>所以现在我们需要先定位到__LINKEDIT段，同样摘自苹果官方文档：</p>
+<p><code>Segments and sections are normally accessed by name. Segments, by convention,
+are named using all uppercase letters preceded by two underscores (for
+example, _TEXT); sections should be named using all lowercase letters preceded
+by two underscores (for example, _text). This naming convention is standard,
+although not required for the tools to operate correctly.</code></p>
+<p>我们通过遍历每个段，比较段名称是否和__LINKEDIT相同：</p>
+<div class="highlight"><pre><code><span></span><span class="n">usr</span><span class="o">/</span><span class="n">include</span><span class="o">/</span><span class="n">mach</span><span class="o">-</span><span class="n">o</span><span class="o">/</span><span class="n">loader</span><span class="p">.</span><span class="n">h</span>
+<span class="cp">#define SEG_LINKEDIT    &quot;__LINKEDIT&quot;</span>
+</code></pre></div>
+<p>接着来找符号表：</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/**</span>
+<span class="cm"> * 摘自《The Mac Hacker&#39;s Handbook》：</span>
+<span class="cm"> * The LC_SYMTAB load command describes where to find the string and symbol tables within the __LINKEDIT segment. The offsets given are file offsets, so you subtract the file offset of the __LINKEDIT segment to obtain the virtual memory offset of the string and symbol tables. Adding the virtual memory offset to the virtual-memory address where the __LINKEDIT segment is loaded will give you the in-memory location of the string and sym- bol tables.</span>
+<span class="cm"> */</span>
+</code></pre></div>
+<p>也就是说，我们需要结合__LINKEDIT segment_command（见上面结构描述）和LC_SYMTAB
+load_command（见下面结构描述）来定位符号表：</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/*</span>
+<span class="cm"> * The symtab_command contains the offsets and sizes of the link-edit 4.3BSD</span>
+<span class="cm"> * &quot;stab&quot; style symbol table information as described in the header files</span>
+<span class="cm"> * &lt;nlist.h&gt; and &lt;stab.h&gt;.</span>
+<span class="cm"> */</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">symtab_command</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w">    </span><span class="n">cmd</span><span class="p">;</span><span class="w">        </span><span class="cm">/* LC_SYMTAB */</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w">    </span><span class="n">cmdsize</span><span class="p">;</span><span class="w">    </span><span class="cm">/* sizeof(struct symtab_command) */</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w">    </span><span class="n">symoff</span><span class="p">;</span><span class="w">     </span><span class="cm">/* symbol table offset */</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w">    </span><span class="n">nsyms</span><span class="p">;</span><span class="w">      </span><span class="cm">/* number of symbol table entries */</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w">    </span><span class="n">stroff</span><span class="p">;</span><span class="w">     </span><span class="cm">/* string table offset */</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w">    </span><span class="n">strsize</span><span class="p">;</span><span class="w">    </span><span class="cm">/* string table size in bytes */</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>如上述引用描述，LC_SYMTAB和_LINKEDIT中的偏移量都是文件偏移量，所以要获得内存中符号表和字符串表的地址，我们先将LC_SYMTAB的symo
+ff和stroff分别减去LINKEDIT的fileoff得到虚拟地址偏移量，然后再加上_LINKEDIT的vmoffset得到虚拟地址。当然，要得到最终的
+实际内存地址，还需要加上基于ASLR的偏移量。</p>
+<h4>3.3 在符号表中寻找和目标地址最匹配的符号</h4>
+<p>终于找到符号表了，写到这里有点小累，直接贴下代码：</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/**</span>
+<span class="cm"> * @brief 在指定的符号表中为地址匹配最合适的符号，这里的地址需要减去vmaddr_slide</span>
+<span class="cm"> */</span>
+<span class="k">const</span><span class="w"> </span><span class="n">JDY_SymbolTableEntry</span><span class="w"> </span><span class="o">*</span><span class="nf">jdy_findBestMatchSymbolForAddress</span><span class="p">(</span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">addr</span><span class="p">,</span>
+<span class="w">                                                              </span><span class="n">JDY_SymbolTableEntry</span><span class="w"> </span><span class="o">*</span><span class="n">symbolTable</span><span class="p">,</span>
+<span class="w">                                                              </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">nsyms</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 1. addr &gt;= symbol.value; 因为addr是某个函数中的一条指令地址，它应该大于等于这个函数的入口地址，也就是对应符号的值；</span>
+<span class="w">    </span><span class="c1">// 2. symbol.value is nearest to addr; 离指令地址addr更近的函数入口地址，才是更准确的匹配项；</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">JDY_SymbolTableEntry</span><span class="w"> </span><span class="o">*</span><span class="n">nearestSymbol</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">currentDistance</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">UINT32_MAX</span><span class="p">;</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">symIndex</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">symIndex</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">nsyms</span><span class="p">;</span><span class="w"> </span><span class="n">symIndex</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">symbolValue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">symbolTable</span><span class="p">[</span><span class="n">symIndex</span><span class="p">].</span><span class="n">n_value</span><span class="p">;</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">symbolValue</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">symbolDistance</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">addr</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">symbolValue</span><span class="p">;</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">symbolValue</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">addr</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">symbolDistance</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">currentDistance</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">currentDistance</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">symbolDistance</span><span class="p">;</span>
+<span class="w">                </span><span class="n">nearestSymbol</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">symbolTable</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">symIndex</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">nearestSymbol</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="cm">/*</span>
+<span class="cm"> * This is the symbol table entry structure for 64-bit architectures.</span>
+<span class="cm"> */</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">nlist_64</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">union</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">uint32_t</span><span class="w">  </span><span class="n">n_strx</span><span class="p">;</span><span class="w"> </span><span class="cm">/* index into the string table */</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="n">n_un</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">n_type</span><span class="p">;</span><span class="w">        </span><span class="cm">/* type flag, see below */</span>
+<span class="w">    </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">n_sect</span><span class="p">;</span><span class="w">        </span><span class="cm">/* section number or NO_SECT */</span>
+<span class="w">    </span><span class="kt">uint16_t</span><span class="w"> </span><span class="n">n_desc</span><span class="p">;</span><span class="w">       </span><span class="cm">/* see &lt;mach-o/stab.h&gt; */</span>
+<span class="w">    </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">n_value</span><span class="p">;</span><span class="w">      </span><span class="cm">/* value of this symbol (or stab offset) */</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>找到匹配的nlist结构后，我们可以通过.n_un.n_strx来定位字符串表中相应的符号名。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "iOS中线程Call Stack的捕获和解析.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

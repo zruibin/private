@@ -1,0 +1,697 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>揭秘Linux进程调度器 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="揭秘Linux进程调度器,Linux,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="揭秘Linux进程调度器" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>揭秘Linux进程调度器</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2022-01-08 15:50
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_linux.html' class='article_tag'>Linux</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://mp.weixin.qq.com/s/E-aGLSn5cckS4_WAxMRyGg' target='blank'>揭秘Linux进程调度器</a></p></h4>
+<h2>准备知识</h2>
+<p>想深入理解操作系统的进程调度，需要先获得一些准备知识，这样后面就不懵圈啦：</p>
+<ul>
+<li>调度究竟是个啥</li>
+<li>操作系统有哪几种？常用的是哪种？</li>
+<li>进程的分类和优先级是怎么回事</li>
+<li>抢占式调度和非抢占式调度有啥区别</li>
+<li>如何设计一个可用的调度器</li>
+</ul>
+<h3>调度的概念</h3>
+<p>科技源自生活，调度系统绝对不是计算机领域的专利，现实生活中调度无处不在：</p>
+<ul>
+<li>连锁超市某些热门商品短缺，就需要在全城范围内考虑人口密度、超市规模、商品缺口等多个因素，进行资源调配</li>
+<li>铁路部门为了应对春运会在热门线路增加列车来缓解运输压力，春运结束则恢复正常</li>
+</ul>
+<blockquote><p><strong>调度是为了解决资源和需求之间的不匹配问题，现实往往是资源少&amp;需求多，计算机领域也是如此</strong>。</p>
+</blockquote>
+<p>在操作系统中CPU资源是有限的，需要使用CPU的进程数量是不确定的，并且大部分情况下进程数量远大于CPU数量，如何解决不匹配问题就是进程调度核心：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-2.png" alt=""></p>
+<h3>操作系统分类</h3>
+<p>操作系统的种类非常多，本身上是硬件层和应用层之间的中间层，对上与应用程序进行交互，对下实现硬件资源的管理。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-3.png" alt=""></p>
+<ul>
+<li>批处理系统( Batch Processing System )</li>
+</ul>
+<blockquote><p>批处理是指用户将一批作业提交给操作系统后就不再干预，由操作系统控制它们自动运行，这种采用批量处理作业任务的操作系统称为批处理操作系统，不具有交互性，用户无法干预任务的运行。</p>
+</blockquote>
+<ul>
+<li>实时系统( Real-Time System)</li>
+</ul>
+<blockquote><p>实时系统最大的特点在于计算的正确性不仅取决于程序的逻辑正确性，也取决于结果产生的时间，如果系统的时间约束条件得不到满足，将会发生系统出错，强实时系统一般应用在航空航天、导弹导航制导、核工业等领域。</p>
+</blockquote>
+<ul>
+<li>分时系统( Time Sharing System)</li>
+</ul>
+<blockquote><p>分时系统将计算机系统资源（比如CPU）进行时间上的分割，每个时间段称为一个时间片，每个用户依次轮流使用时间片，由于时间间隔很短，每个用户的感觉就像他独占计算机一样，从而有效增加资源的使用率，提高用户交互体验。</p>
+</blockquote>
+<p>Linux属于分时系统，是互联网服务器的主流操作系统，重点研究它就行！</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-4.png" alt=""></p>
+<h3>进程分类</h3>
+<p>根据进程运行时的状态，可以分为：</p>
+<ul>
+<li>I/O密集型( IO-bound )</li>
+</ul>
+<blockquote><p>在进程占用CPU期间频繁有IO操作，出现IO阻塞等待情况，比如负责监听socket的进程，真正使用CPU进行计算的时间并不多。</p>
+</blockquote>
+<ul>
+<li>CPU密集型( CPU-bound)</li>
+</ul>
+<blockquote><p>在进程占用CPU期间基本都在进行计算，很少进行IO操作，期间对CPU的真实使用率很高。</p>
+</blockquote>
+<p>进程调度器需要根据进程是IO密集型还是CPU密集型会采用不同的策略。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-5.png" alt=""></p>
+<p><strong>在调度器中往往需要对IO密集型进程进行奖励来提高其调度优先级，对CPU密集型进程进行惩罚降低其调度优先级。</strong></p>
+<p>对进程的奖惩策略是调度器的一项核心工作，希望大家务必理解：</p>
+<blockquote><p>交互进程往往伴随较多的IO操作，同时也是响应时间敏感的任务，鼠标点一下半天没响应，想想就很糟糕，因此属于高优先级进程。</p>
+<p>非交互进程往往是纯CPU计算，用户是无感知的，所以对响应时间的要求并没有那么高，属于低优先级进程。</p>
+</blockquote>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-6.png" alt=""></p>
+<h3>进程优先级</h3>
+<p>根据进程的重要性，可以分为：</p>
+<ul>
+<li>实时进程(Real-Time Process)</li>
+<li>普通进程(Normal Process)</li>
+</ul>
+<blockquote><p>在操作系统中有很多进程，实时进程是相对重要的，需要保证其CPU占用优先级，普通进程并不需要额外照顾。</p>
+</blockquote>
+<p>实时进程和普通进程的进程优先级不同，调度器都会根据优先级来确定进程的CPU优先权和运行时间。</p>
+<p>在Linux中影响优先级的两个因素：Nice谦让值和Priority权重值。</p>
+<ul>
+<li>实时进程PR值范围是0~99，数值越大被调度优先级越高</li>
+<li>普通进程PR值范围是100~139，数值越小被调度优先级越高</li>
+<li>Nice值范围是<code>-20~19</code>，并不是优先级但影响PR值，一般作用在普通进程上</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-7.png" alt=""></p>
+<p>PR值由内核来确定，用户可以修改Nice谦让值，进而干预PR值：</p>
+<ul>
+<li><code>PR_new = PR_old + Nice</code></li>
+</ul>
+<p>nice值也被称为谦让值，数值越大越谦让，会哭的孩子有奶吃，总谦让优先级肯定低了：</p>
+<ul>
+<li>如果nice值是0，即用户层认可内核的决定不额外干预，听天由命</li>
+<li>如果nice为负值表示毫不谦让，即用户层干预来提升被调度的优先级，把机会留给自己</li>
+<li>如果nice为正值表示予以谦让，即用户层干预降低被调度的优先级，把机会留给别人</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-8.png" alt=""></p>
+<h3>非抢占和抢占式</h3>
+<p>根据进程任务在占用CPU时，使用权是否会被夺取分为：</p>
+<ul>
+<li>协作式调度( Cooperative Scheduling)</li>
+</ul>
+<blockquote><p>进程任务一旦占用CPU只有当任务完成或者因为某些原因主动释放CPU，除上述两种情况外不能被其他进程夺走</p>
+</blockquote>
+<ul>
+<li>抢占式调度( Preemptive Scheduling)</li>
+</ul>
+<blockquote><p>进程任务占用CPU期间可以被其他进程夺走，具体由操作系统调度器决定下一个占用CPU的进程</p>
+</blockquote>
+<p>Linux采用抢占式调度，其可以提高CPU利用率、降低进程的响应时间等，同时也增加了切换进程时的开销，各有利弊。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-9.png" alt=""></p>
+<h3>调度器设计思路</h3>
+<h4>设计目标</h4>
+<p>有两个指标需要重视：</p>
+<ul>
+<li>周转时间( Cycling Time )</li>
+</ul>
+<blockquote><p>进程任务从开始排队等待获取CPU资源直到任务完成的时间差，就像超市排队结账时从开始排队到结算完成离开的时间差。</p>
+</blockquote>
+<ul>
+<li>响应时间Response Time</li>
+</ul>
+<blockquote><p>进程任务从开始排队等待获取CPU资源直到开始使用CPU的时间差，就像超市排队结账时从开始排队到轮到结算的时间差。</p>
+</blockquote>
+<p>综合来说：</p>
+<ul>
+<li>实时进程要更优先被调度，普通进程的优先级一定低于实时进程</li>
+<li>IO密集型进程要调度频繁一些，IO密集型要少分配时间片，少吃多餐</li>
+<li>CPU密集型可以稍微惩罚，CPU密集型可以分配长一些的时间片，少餐多吃</li>
+</ul>
+<p>只有做到这几点，调度器才可能在周转时间和响应时间上得到一个良好的表现。</p>
+<h4>设计实现</h4>
+<p>要实现一个调度器，主要包括两个核心部分：</p>
+<ul>
+<li>算法设计</li>
+<li>工程实现</li>
+</ul>
+<p>算法更多是一种思想，调度器基于某种调度算法进行工程化实现，捋清楚二者的关系对于后续内容的理解将大有裨益。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-10.png" alt=""></p>
+<h3>本章重点</h3>
+<ul>
+<li>调度是为了解决资源和需求之间的不匹配问题，现实生活和计算机领域都非常普遍</li>
+<li>操作系统可以分为：批处理系统、实时系统、分时系统三大类，分时系统是研究重点</li>
+<li>进程可以分为两大类：IO密集型和CPU密集型，调度时采用不同的策略</li>
+<li>进程可以分为普通进程和实时进程，实时进程优先级永远高于普通进程</li>
+<li>进程调度模型可以分为两大类：协作式调度和抢占式调度，抢占式是主流</li>
+<li>要设计一个进程调度器需要有设计目标后选择合适的调度算法进行工程化实现</li>
+</ul>
+<h2>调度算法</h2>
+<p>调度算法也经历了从简单到复杂的演进，到目前为止也没有哪种调度算法是万能的，抛开场景来评判调度算法优劣并不明智。</p>
+<p>以下介绍的主要是调度算法的思想，工程上使用的调度算法往往是其中一种或者几种的变形，更加复杂。</p>
+<h3>先来先服务FCFS</h3>
+<p>先来先服务First Come First Service可以说是最早最简单的调度算法，哪个进程先来就先让它占用CPU，释放CPU之后第二个进程再使用，依次类推。</p>
+<ul>
+<li><p>场景一<br>
+假如有ABC三个进程依次进入等候使用CPU资源的队列FIFO，A进程占用CPU运行5ms，B进程10ms，C进程25ms，根据FCFS算法的规则，可知：</p>
+<ul>
+<li>周转时间 A-5ms B-15ms C-40ms 平均(5+15+40)/3=20ms</li>
+<li>响应时间 A-0ms B-5ms   C-15ms  平均(0+5+15)/3=6.67ms</li>
+</ul>
+</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-11.png" alt=""></p>
+<ul>
+<li><p>场景二<br>
+假如有ABC三个进程依次进入等候使用CPU资源的队列FIFO，A进程占用CPU运行100ms，B进程10ms，C进程25ms，根据FCFS算法的规则，可知：</p>
+<ul>
+<li>周转时间 A-100ms B-110ms C-135ms 平均(100+110+135)/3=115ms</li>
+<li>响应时间 A-0ms B-100ms   C-110ms  平均(0+100+110)/3=70ms 综上，在场景二中A进程的运行时间长达100ms，这样拉升了B和C的周转时间5倍多。
+<img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-12.png" alt=""></li>
+</ul>
+</li>
+</ul>
+<p>在FCFS中优先被调度的进程如果耗时很长，后续进程都必须要等待这个大CPU消耗的进程，最终导致周转时间直线拉升，也就是护航效应。</p>
+<h3>最短任务优先SJF</h3>
+<p>最短任务优先Shortest Job First的思想是当多个进程同时出现时，优先安排执行时间最短的任务，然后是执行时间次短，以此类推。</p>
+<p>SJF可以解决FCFS中同时到达进程执行时间不一致带来的护航效应问题：</p>
+<ul>
+<li><p>场景一<br>
+假如有ABC三个进程同时进入等候使用CPU资源的队列FIFO，A进程占用CPU运行100ms，B进程10ms，C进程25ms，根据SJF算法的规则，可知：</p>
+<ul>
+<li>进程执行顺序是B-&gt;C-&gt;A</li>
+<li>周转时间 A-135ms B-10ms C-35ms 平均(135+10+35)/3=60ms</li>
+<li>响应时间 A-35ms B-0ms C-10ms 平均(35+0+10)/3=15ms</li>
+</ul>
+</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-13.png" alt=""></p>
+<p>相比于FCFS可能的执行顺序是A-&gt;C-&gt;B来说，周转时间和响应时间都得到很大的改善。</p>
+<p>SJF的算法思想有些理想化，但并非一无是处，升级改进下也有用武之地：</p>
+<ul>
+<li>大部分场景下进程都是有先后顺序进行等待队列的，同时出现的概率并不高</li>
+<li>进程执行时间的长短并不能预测</li>
+</ul>
+<h3>抢占式最短任务优先PSJF</h3>
+<p>SJF算法最具启发的地方在于优先调度执行时间短的任务来解决护航效应，但是该算法属于非抢占式调度，对于先后到达且执行时间差别较大的场景也束手无策。</p>
+<p>当向SJF算法增加抢占调度时能力就大大增强了，这就是PSJF( Preemptive Shortest Job First )算法。</p>
+<ul>
+<li><p>场景一<br>
+假如有ABC三个进程间隔20ms(BC同时且晚于A)依次进入等候使用CPU资源的队列FIFO，A进程占用CPU运行100ms，B进程10ms，C进程25ms
+，根据PSJF算法的规则，可知：</p>
+<ul>
+<li>A先被执行20ms，再执行B10ms，再执行C25ms，再执行A80ms</li>
+<li>周转时间 A-135ms B-10ms C-35ms 平均(135+10+35)/3=60ms</li>
+<li>响应时间 A-0ms B-0ms   C-10ms  平均(0+0+10)/3=3.3ms</li>
+</ul>
+</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-14.png" alt=""></p>
+<p>抢占机制有效削弱了护航效应，周转时间和响应时间都降低了许多，但是还远不够完美。</p>
+<p>PSJF算法对于进程A来说却不友好，进程A在被抢占之后只能等待B和C运行完成后，此时如果再来短任务DEF都会抢占A，就会产生饥饿效应。</p>
+<p>PSJF算法是基于对任务运行时间长短来进行调度的，但在调度前任务的运行时间是未知的，因此首要问题是通过历史数据来预测运行时间。</p>
+<h3>时间片轮转RR</h3>
+<p>时间片轮转RR(Round-Robin)将CPU执行时间按照时钟脉冲进行切割称为时间切片Time-
+Slice，一个时间切片是时钟周期的数倍，时钟周期和CPU的主频呈倒数关系。</p>
+<blockquote><p>比如 CPU的主频是1000hz，则时钟周期TimeClick=1ms，<code>Time Slice = n*Time Click</code>，时间切片可以是2ms/4ms/10ms等。</p>
+</blockquote>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-15.png" alt=""></p>
+<p>在一个时间片内CPU分配给一个进程，时间片耗尽则调度选择下一个进程，如此循环。</p>
+<p>进程往往需要多个循环获取多次时间片才能完成任务，因此需要操作系统记录上一次的数据，等进程下一次被分配时间片时再拿出来，这就是传说中的上下文Context。</p>
+<p>进程上下文被存储和拿出的过程被称为上下文切换Context Switch，上下文切换是比较消耗资源的，因此时间片的划分就显得很重要：</p>
+<ul>
+<li>时间片太短，上下文频繁切换，有效执行时间变少</li>
+<li>时间片太大，无法保证多个进程可以雨露均沾，响应时间较大</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-16.png" alt=""></p>
+<p>RR算法在保障了多个进程都能占用CPU，属于公平策略的一种，但是RR算法将原本可以一次运行完的任务切分成多个部分来完成，从而拉升了周转时间。</p>
+<p>RR算法也非银弹，但是响应时间和公平性得到了有效保障，是个非常有意义的算法模型。</p>
+<h3>多级反馈队列MLFQ</h3>
+<p>多级反馈队列( Multi-Level Feedback Queue )尝试去同时解决响应时间和周转时间两个问题，具体做法：</p>
+<ul>
+<li>设置了多个任务队列，每个队列对应的优先级不同，队列内部的优先级相同</li>
+<li>优先分配CPU给高优先级的任务，同优先级队列中的任务采用RR轮询机制</li>
+<li>通过对任务运行状态的追踪来调整优先级，也就是所谓的Feedback反馈机制<ul>
+<li>任务在运行期间有较多IO请求和等待，预测为交互进程，优先级保持或提升</li>
+<li>任务在运行期间一直进行CPU计算，预测为非交互进程，优先级保持或下降</li>
+</ul>
+</li>
+<li>最初将所以任务都设置为高优先级队列，随着后续的运行状态再进行调整<ul>
+<li>运行期间有IO操作则保持优先级</li>
+<li>运行期间无IO操作则把任务放到低一级的队列中</li>
+</ul>
+</li>
+<li>不同队列分配不同的时间片<ul>
+<li>高优先级队列往往是IO型任务，配置较小的时间片来保障响应时间</li>
+<li>低优先级队列往往是CPU型任务，配置较长时间片来保障任务一直运行</li>
+</ul>
+</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-17.png" alt=""></p>
+<p>上述是MLFQ算法的基本规则，在实际应用中仍然会有一些问题：</p>
+<ul>
+<li>饥饿问题<ul>
+<li>CPU密集型的任务随着时间推移优先级会越来越低，在IO型进程多的场景下很容易出现饥饿问题，一直无法得到调度</li>
+<li>任务是CPU密集型还是IO密集型可能是动态变化的，低优先级队列中的IO型任务的响应时间被拉升，调度频率下降</li>
+</ul>
+</li>
+<li>作弊问题<ul>
+<li>基于MLFQ对IO型任务的偏爱，用户可能为CPU密集型任务编写无用的IO空操作，从而人为提升任务优先级，相当于作弊</li>
+</ul>
+</li>
+</ul>
+<p>针对上述问题MLFQ还需增加几个补丁：</p>
+<ul>
+<li>周期性提升所有任务的优先级到最高，避免饥饿问题</li>
+<li>调度程序记录任务在某个层级队列中消耗的时间片，如果达到某个比例，无论期间是否有IO操作都降低任务的优先级，通过计时来确定真正的IO型任务</li>
+</ul>
+<p>MLFQ的算法思想在1962年被提出，其作者也获得了图灵奖，可谓是影响深远。</p>
+<p>在朴素MLFQ算法基础上出现一些变种，通过工程实现和经验配置最终被使用到操作系统中，成为真正的工业级进程调度器。</p>
+<h2>Linux进程调度器</h2>
+<p>Linux的进程调度器是不断演进的，先后出现过三种里程碑式的调度器：</p>
+<ul>
+<li>O(n)调度器 内核版本 2.4-2.6</li>
+<li>O(1) 调度器 内核版本 2.6.0-2.6.22</li>
+<li>CFS调度器 内核版本 2.6.23-至今</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-18.png" alt=""></p>
+<p>O(n)属于早期版本在pick next过程是需要遍历进程任务队列来实现，O(1)版本性能上有较大提升可以实现O(1)复杂度的pick next过程。</p>
+<p>CFS调度器可以说是一种O(logn)调度器，但是其算法思想相比前两种有些不同，并且设计实现上也更加轻量，一直被Linux内核沿用至今。</p>
+<h3>调度器设计核心</h3>
+<p>要理解这些复杂的调度器设计，我们必须要有一个核心主线，再去理解精髓。</p>
+<p>调度器需要解决的关键问题：</p>
+<ul>
+<li>采用何种数据结构来组织进程以及如何实现pick next</li>
+<li>如何根据进程优先级来确定进程运行时间</li>
+<li>如何判断进程类型<ul>
+<li>判断进程的交互性质，是否为IO密集</li>
+<li>奖励IO密集型&amp;惩罚CPU密集型</li>
+<li>实时进程高优&amp;普通进程低优</li>
+</ul>
+</li>
+<li>如何确定进程的动态优先级<ul>
+<li>影响因素：静态优先级、nice值、IO密集型和CPU密集型产生的奖惩</li>
+</ul>
+</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-19.png" alt=""></p>
+<p>事实上，调度器在设计实现上考虑的问题还有很多，篇幅所限只列举几个公共问题。</p>
+<h3>O(n) 调度器</h3>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-20.png" alt=""></p>
+<p>O(n)调度器采用一个全局队列runqueue作为核心数据结构，具备以下特点：</p>
+<ul>
+<li>多个cpu共享全局队列，并非每个cpu有单独的队列</li>
+<li>实时进程和普通进程混合且无序存放，寻找最合适进程需要遍历</li>
+<li>就绪进程将被添加到队列，运行结束被删除</li>
+<li>全局队列增删进程任务时需要加锁</li>
+<li>进程被挂到不同CPU运行，缓存利用率低</li>
+</ul>
+<p>在Linux中进程使用task_struct结构体来表示，其中有个counter表示进程剩余的CPU时间片：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">task_struct</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">long</span><span class="w"> </span><span class="n">counter</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">long</span><span class="w"> </span><span class="n">nice</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">policy</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">processor</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">cpus_runnable</span><span class="p">,</span><span class="w"> </span><span class="n">cpus_allowed</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>counter值在调度周期开始时被赋值，随着调度的进行递减，直至counter=0表示无可用CPU时间，等待下一个调度周期。</p>
+<p>O(n)调度器中调度权重是在goodness函数中完成计算的：</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="kr">inline</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="nf">goodness</span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">task_struct</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">this_cpu</span><span class="p">,</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">mm_struct</span><span class="w"> </span><span class="o">*</span><span class="n">this_mm</span><span class="p">)</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">weight</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="n">weight</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">-1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="cm">/*进程可以设置调度策略为SCHED_YIELD即“礼让”策略，这时候它的权值为-1,权值相当低*/</span><span class="w">  </span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="o">-&gt;</span><span class="n">policy</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">SCHED_YIELD</span><span class="p">)</span><span class="w">  </span>
+<span class="w">                </span><span class="k">goto</span><span class="w"> </span><span class="n">out</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">        </span><span class="cm">/*  </span>
+<span class="cm">         * Non-RT process - normal case first.  </span>
+<span class="cm">         */</span><span class="w">  </span>
+
+<span class="w">        </span><span class="cm">/*对于调度策略为SCHED_OTHER的进程，没有实时性要求，它的权值仅仅取决于  </span>
+<span class="cm">         * 时间片的剩余和它的nice值，数值上nice越小，则优先级越高，总的权值 = 时间片剩余 + (20 - nice)  </span>
+<span class="cm">         * */</span><span class="w">  </span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="o">-&gt;</span><span class="n">policy</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">SCHED_OTHER</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">                </span><span class="cm">/*  </span>
+<span class="cm">                 * Give the process a first-approximation goodness value  </span>
+<span class="cm">                 * according to the number of clock-ticks it has left.  </span>
+<span class="cm">                 *  </span>
+<span class="cm">                 * Don&#39;t do any other calculations if the time slice is  </span>
+<span class="cm">                 * over..  </span>
+<span class="cm">                 */</span><span class="w">  </span>
+<span class="w">                </span><span class="n">weight</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">counter</span><span class="p">;</span><span class="w">  </span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">weight</span><span class="p">)</span><span class="w">  </span>
+<span class="w">                        </span><span class="k">goto</span><span class="w"> </span><span class="n">out</span><span class="p">;</span><span class="w">  </span>
+
+<span class="cp">#ifdef CONFIG_SMP  </span>
+<span class="w">                </span><span class="cm">/* Give a largish advantage to the same processor...   */</span><span class="w">  </span>
+<span class="w">                </span><span class="cm">/* (this is equivalent to penalizing other processors) */</span><span class="w">  </span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="o">-&gt;</span><span class="n">processor</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">this_cpu</span><span class="p">)</span><span class="w">  </span>
+<span class="w">                        </span><span class="n">weight</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">PROC_CHANGE_PENALTY</span><span class="p">;</span><span class="w">  </span>
+<span class="cp">#endif  </span>
+
+<span class="w">                </span><span class="cm">/* .. and a slight advantage to the current MM */</span><span class="w">  </span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="o">-&gt;</span><span class="n">mm</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">this_mm</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">!</span><span class="n">p</span><span class="o">-&gt;</span><span class="n">mm</span><span class="p">)</span><span class="w">  </span>
+<span class="w">                        </span><span class="n">weight</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">                </span><span class="n">weight</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">20</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">nice</span><span class="p">;</span><span class="w">  </span>
+<span class="w">                </span><span class="k">goto</span><span class="w"> </span><span class="n">out</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">        </span><span class="cm">/*  </span>
+<span class="cm">         *对于实时进程，也就是SCHED_FIFO或者SCHED_RR调度策略，  </span>
+<span class="cm">         *具有一个实时优先级，总的权值仅仅取决于该实时优先级，  </span>
+<span class="cm">         *总的权值 = 1000 + 实时优先级。  </span>
+<span class="cm">         * */</span><span class="w">  </span>
+<span class="w">        </span><span class="n">weight</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1000</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">rt_priority</span><span class="p">;</span><span class="w">  </span>
+<span class="nl">out</span><span class="p">:</span><span class="w">  </span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">weight</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>从代码可以看到：</p>
+<ul>
+<li>当进程的剩余时间片Counter为0时，无论静态优先级是多少都不会被选中</li>
+<li>普通进程的优先级=剩余时间片Counter+20-nice</li>
+<li>实时进程的优先级=1000+进程静态优先级</li>
+<li>实时进程的动态优先级远大于普通进程，更容易被选中</li>
+<li>剩余时间片counter越多说明进程IO较多，分配给它的没用完，被调度的优先级需要高一些</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="cp">#if HZ &lt; 200  </span>
+<span class="cp">#define TICK_SCALE(x)        ((x) &gt;&gt; 2)  </span>
+<span class="cp">#elif HZ &lt; 400  </span>
+<span class="cp">#define TICK_SCALE(x)        ((x) &gt;&gt; 1)  </span>
+<span class="cp">#elif HZ &lt; 800  </span>
+<span class="cp">#define TICK_SCALE(x)        (x)  </span>
+<span class="cp">#elif HZ &lt; 1600  </span>
+<span class="cp">#define TICK_SCALE(x)        ((x) &lt;&lt; 1)  </span>
+<span class="cp">#else  </span>
+<span class="cp">#define TICK_SCALE(x)        ((x) &lt;&lt; 2)  </span>
+<span class="cp">#endif  </span>
+
+<span class="cp">#define NICE_TO_TICKS(nice)        (TICK_SCALE(20-(nice))+1)</span>
+</code></pre></div>
+<p><code>NICE_TO_TICKS</code>是个宏函数，根据不同的调度频率HZ有对应的<code>TICK_SCALE</code>宏定义，这样就解决了不同优先级的进程的时间片分配问题。</p>
+<p>O(n)调度器对实时进程和普通进程采用不同的调度策略：</p>
+<ul>
+<li>实时进程采用的是<code>SCHED_RR</code>或者<code>SCHED_FIFO</code>，高级优先&amp;同级轮转或者顺序执行</li>
+<li>普通进程采用的是SCHED_OTHER</li>
+<li>进程采用的策略在<code>task_struct</code>中policy体现</li>
+</ul>
+<p>在runqueue中搜索下一个合适的进程是基于动态优先级来实现的，动态优先级最高的就是下一个被执行的进程。</p>
+<p>O(n)调度器设计和实现上存在一些问题，但是其中的很多思想为后续调度器设计指明了方向，意义深远。</p>
+<h3>O(1)调度器</h3>
+<p>O(n)调度器在linux内核中大约使用了4年，在Linux 2.6.0采纳了Red Hat公司Ingo Molnar设计的O(1)调度算法，该调度算法的核心思想基于Corbato等人提出的多级反馈队列算法。</p>
+<p>O(1)调度器引入了多个队列，并且增加了负载均衡机制，对新出现的进行任务分配到合适的cpu-runqueue中：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-21.png" alt=""></p>
+<p>为了实现O(1)复杂度的pick-next算法，内核实现代码量增加了一倍多，其有以下几个特点：</p>
+<ul>
+<li>实现了per-cpu-runqueue，每个CPU都有一个就绪进程任务队列</li>
+<li>引入活跃数组active和过期数组expire，分别存储就绪进程和结束进程</li>
+<li>采用全局优先级：实时进程0-99，普通进程100-139，数值越低优先级越高，更容易被调度</li>
+<li>每个优先级对应一个链表，引入bitmap数组来记录140个链表中的活跃任务情况  </li>
+</ul>
+<p>任务队列的数据结构：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">runqueue</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="n">spinlock_t</span><span class="w"> </span><span class="n">lock</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">nr_running</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">nr_switches</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">expired_timestamp</span><span class="p">,</span><span class="w"> </span><span class="n">nr_uninterruptible</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">timestamp_last_tick</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="n">task_t</span><span class="w"> </span><span class="o">*</span><span class="n">curr</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">idle</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="k">struct</span><span class="w"> </span><span class="nc">mm_struct</span><span class="w"> </span><span class="o">*</span><span class="n">prev_mm</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="n">prio_array_t</span><span class="w"> </span><span class="o">*</span><span class="n">active</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">expired</span><span class="p">,</span><span class="w"> </span><span class="n">arrays</span><span class="p">[</span><span class="mi">2</span><span class="p">];</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">best_expired_prio</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="n">atomic_t</span><span class="w"> </span><span class="n">nr_iowait</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="p">......</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<ul>
+<li>active和expired是指向<code>prio_array_t</code>的结构体指针</li>
+<li>arrays是元素为<code>prio_array_t</code>的结构体数组</li>
+</ul>
+<p><code>prio_array_t</code>结构体的定义：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#define BITMAP_SIZE ((((MAX_PRIO+1+7)/8)+sizeof(long)-1)/sizeof(long))  </span>
+<span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">prio_array</span><span class="w"> </span><span class="n">prio_array_t</span><span class="p">;</span><span class="w">  </span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">prio_array</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">nr_active</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">bitmap</span><span class="p">[</span><span class="n">BITMAP_SIZE</span><span class="p">];</span><span class="w">  </span>
+<span class="w">        </span><span class="k">struct</span><span class="w"> </span><span class="nc">list_head</span><span class="w"> </span><span class="n">queue</span><span class="p">[</span><span class="n">MAX_PRIO</span><span class="p">];</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-22.png" alt=""></p>
+<p>O(1)调度器对pick-next的实现：</p>
+<ul>
+<li>在runqueue结构中有active和expire两个数组指针，active指向就绪进程的结构，从active-bitmap中寻找优先级最高且非空的数组元素，这个数组是元素是进程链表，找该链表中第1个进程即可。</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">idx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sched_find_first_bit</span><span class="p">(</span><span class="n">array</span><span class="o">-&gt;</span><span class="n">bitmap</span><span class="p">);</span><span class="w">  </span>
+<span class="n">queue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">array</span><span class="o">-&gt;</span><span class="n">queue</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">idx</span><span class="p">;</span><span class="w">  </span>
+<span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">list_entry</span><span class="p">(</span><span class="n">queue</span><span class="o">-&gt;</span><span class="n">next</span><span class="p">,</span><span class="w"> </span><span class="n">task_t</span><span class="p">,</span><span class="w"> </span><span class="n">run_list</span><span class="p">);</span>
+</code></pre></div>
+<ul>
+<li>当active的<code>nr_active=0</code>时表示没有活跃任务，此时进行active和expire双指针互换，速度很快。</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">array</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rq</span><span class="o">-&gt;</span><span class="n">active</span><span class="p">;</span><span class="w">  </span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">unlikely</span><span class="p">(</span><span class="o">!</span><span class="n">array</span><span class="o">-&gt;</span><span class="n">nr_active</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="cm">/*  </span>
+<span class="cm">         * Switch the active and expired arrays.  </span>
+<span class="cm">         */</span><span class="w">  </span>
+<span class="w">        </span><span class="n">rq</span><span class="o">-&gt;</span><span class="n">active</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rq</span><span class="o">-&gt;</span><span class="n">expired</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="n">rq</span><span class="o">-&gt;</span><span class="n">expired</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">array</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="n">array</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rq</span><span class="o">-&gt;</span><span class="n">active</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="n">rq</span><span class="o">-&gt;</span><span class="n">expired_timestamp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="n">rq</span><span class="o">-&gt;</span><span class="n">best_expired_prio</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">MAX_PRIO</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-23.png" alt=""></p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-24.png" alt=""></p>
+<p>O(1)和O(n)调度器确定进程优先级的方法不一样，O(1)借助了<code>sleep_avg</code>变量记录进程的睡眠时间，来识别IO密集型进程，计算bonus值来调整优先
+级：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#define NICE_TO_PRIO(nice)        (MAX_RT_PRIO + (nice) + 20)  </span>
+<span class="cp">#define NS_TO_JIFFIES(TIME)        ((TIME) / (1000000000 / HZ))  </span>
+<span class="cp">#define CURRENT_BONUS(p) \  </span>
+<span class="w">        </span><span class="p">(</span><span class="n">NS_TO_JIFFIES</span><span class="p">((</span><span class="n">p</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">sleep_avg</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">MAX_BONUS</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="err">\</span><span class="w">  </span>
+<span class="w">                </span><span class="n">MAX_SLEEP_AVG</span><span class="p">)</span><span class="w">  </span>
+
+<span class="k">static</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">effective_prio</span><span class="p">(</span><span class="n">task_t</span><span class="w"> </span><span class="o">*</span><span class="n">p</span><span class="p">)</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">bonus</span><span class="p">,</span><span class="w"> </span><span class="n">prio</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">rt_task</span><span class="p">(</span><span class="n">p</span><span class="p">))</span><span class="w">  </span>
+<span class="w">                </span><span class="k">return</span><span class="w"> </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">prio</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">        </span><span class="n">bonus</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">CURRENT_BONUS</span><span class="p">(</span><span class="n">p</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">MAX_BONUS</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">        </span><span class="n">prio</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">static_prio</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">bonus</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">prio</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">MAX_RT_PRIO</span><span class="p">)</span><span class="w">  </span>
+<span class="w">                </span><span class="n">prio</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">MAX_RT_PRIO</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">prio</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">MAX_PRIO</span><span class="mi">-1</span><span class="p">)</span><span class="w">  </span>
+<span class="w">                </span><span class="n">prio</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">MAX_PRIO</span><span class="mi">-1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">prio</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>O(1)调度器为了实现复杂场景IO密集型任务的识别，做了大量的工作仍然无法到达100%的准确，但不可否认O(1)调度器是一款非常优秀的产品。</p>
+<h3>CFS调度器</h3>
+<p>O(1)调度器本质上是MLFQ算法的思想，随着时间的推移也暴露除了很多问题，主要集中在O(1)调度器对进程交互性的判断上积重难返。</p>
+<p>无论是O(n)还是O(1)都需要去根据进程的运行状况判断它属于IO密集型还是CPU密集型，再做优先级奖励和惩罚，这种推测本身就会有误差，而且场景越复杂判断难度越大。</p>
+<p>是继续优化进程交互性算法，还是另辟蹊径呢？一直困扰着Linux社区的大神们。</p>
+<h4>Con Kolivas和RSDL调度器</h4>
+<p>在CFS出现之前，不得不提一位有态度&amp;有实力的麻醉师Con Kolivas，同时也是linux内核开发者，他在进程调度领域有自己独到的见解。</p>
+<p>Con Kolivas针对O(1)调度器存在的维护和优化问题，提出了楼梯调度算法（Staircase Deadline Scheduler）和 基于公平策略RSDL调度器(The Rotating Staircase Deadline Schedule)，遗憾的是Linux之父并没有采纳RDSL调度器。</p>
+<p>对此Con Kolivas感到很愤怒，离开了Linux内核开发社区，但是事实上从后面CFS调度器几个版本的修订来看，Con Kolivas的大方向是正确的，离开之后的Con Kolivas又开发了BFS(Brain Fuck Scheduler)来对抗CFS调度器。</p>
+<blockquote><p>没错，BFS调度器译为脑残调度器，可见Con Kolivas的愤怒和不满。</p>
+</blockquote>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-25.png" alt=""></p>
+<p>Linux之父选择了CFS调度器，它借鉴了Con Kolivas的楼梯调度算法和RSDL调度器的经验，由匈牙利人Ingo Molnar所提出和实现，并在Linux kernel 2.6.23之后取代O(1)调度器，名震江湖。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-26.png" alt=""></p>
+<h4>CFS调度器</h4>
+<p>在2.6.23内核中引入scheduling class的概念，将调度器模块化，系统中可以有多种调度器，使用不同策略调度不同类型的进程：</p>
+<ul>
+<li>DL Scheduler 采用sched_deadline策略</li>
+<li>RT Scheduler  采用sched_rr和sched_fifo策略</li>
+<li>CFS Scheduler  采用sched_normal和sched_batch策略</li>
+<li>IDEL Scheduler  采用sched_idle策略</li>
+</ul>
+<p>这样一来，CFS调度器就不关心实时进程了，专注于普通进程就可以了。</p>
+<p>CFS( Completely Fair Scheduler )完全公平调度器，从实现思想上和之前的O(1)/O(n)很不一样。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-27.png" alt=""></p>
+<p>我的脑海里浮现了这幅漫画，我想右边的应该更好，按需分配&amp;达成共赢。</p>
+<p>这个世界怎么会有绝对的公平呢？为啥这个调度器敢说自己是完全公平呢？</p>
+<p>这一切CFS是如何实现的呢？我们继续看！</p>
+<h5>优先级和权重</h5>
+<p>O(1)和O(n)都将CPU资源划分为时间片，采用了固定额度分配机制，在每个调度周期进程可使用的时间片是确定的，调度周期结束被重新分配。</p>
+<p>CFS摒弃了固定时间片分配，采用动态时间片分配，本次调度中进程可占用的时间与进程总数、总CPU时间、进程权重等均有关系，每个调度周期的值都可能会不一样。</p>
+<p>CFS调度器从进程优先级出发，它建立了优先级prio和权重weight之间的映射关系，把优先级转换为权重来参与后续的计算：</p>
+<div class="highlight"><pre><code><span></span><span class="k">const</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">sched_prio_to_weight</span><span class="p">[</span><span class="mi">40</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="cm">/* -20 */</span><span class="w">     </span><span class="mi">88761</span><span class="p">,</span><span class="w">     </span><span class="mi">71755</span><span class="p">,</span><span class="w">     </span><span class="mi">56483</span><span class="p">,</span><span class="w">     </span><span class="mi">46273</span><span class="p">,</span><span class="w">     </span><span class="mi">36291</span><span class="p">,</span><span class="w">  </span>
+<span class="cm">/* -15 */</span><span class="w">     </span><span class="mi">29154</span><span class="p">,</span><span class="w">     </span><span class="mi">23254</span><span class="p">,</span><span class="w">     </span><span class="mi">18705</span><span class="p">,</span><span class="w">     </span><span class="mi">14949</span><span class="p">,</span><span class="w">     </span><span class="mi">11916</span><span class="p">,</span><span class="w">  </span>
+<span class="cm">/* -10 */</span><span class="w">      </span><span class="mi">9548</span><span class="p">,</span><span class="w">      </span><span class="mi">7620</span><span class="p">,</span><span class="w">      </span><span class="mi">6100</span><span class="p">,</span><span class="w">      </span><span class="mi">4904</span><span class="p">,</span><span class="w">      </span><span class="mi">3906</span><span class="p">,</span><span class="w">  </span>
+<span class="cm">/*  -5 */</span><span class="w">      </span><span class="mi">3121</span><span class="p">,</span><span class="w">      </span><span class="mi">2501</span><span class="p">,</span><span class="w">      </span><span class="mi">1991</span><span class="p">,</span><span class="w">      </span><span class="mi">1586</span><span class="p">,</span><span class="w">      </span><span class="mi">1277</span><span class="p">,</span><span class="w">  </span>
+<span class="cm">/*   0 */</span><span class="w">      </span><span class="mi">1024</span><span class="p">,</span><span class="w">       </span><span class="mi">820</span><span class="p">,</span><span class="w">       </span><span class="mi">655</span><span class="p">,</span><span class="w">       </span><span class="mi">526</span><span class="p">,</span><span class="w">       </span><span class="mi">423</span><span class="p">,</span><span class="w">  </span>
+<span class="cm">/*   5 */</span><span class="w">       </span><span class="mi">335</span><span class="p">,</span><span class="w">       </span><span class="mi">272</span><span class="p">,</span><span class="w">       </span><span class="mi">215</span><span class="p">,</span><span class="w">       </span><span class="mi">172</span><span class="p">,</span><span class="w">       </span><span class="mi">137</span><span class="p">,</span><span class="w">  </span>
+<span class="cm">/*  10 */</span><span class="w">       </span><span class="mi">110</span><span class="p">,</span><span class="w">        </span><span class="mi">87</span><span class="p">,</span><span class="w">        </span><span class="mi">70</span><span class="p">,</span><span class="w">        </span><span class="mi">56</span><span class="p">,</span><span class="w">        </span><span class="mi">45</span><span class="p">,</span><span class="w">  </span>
+<span class="cm">/*  15 */</span><span class="w">        </span><span class="mi">36</span><span class="p">,</span><span class="w">        </span><span class="mi">29</span><span class="p">,</span><span class="w">        </span><span class="mi">23</span><span class="p">,</span><span class="w">        </span><span class="mi">18</span><span class="p">,</span><span class="w">        </span><span class="mi">15</span><span class="p">,</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<blockquote><p>普通进程的优先级范围是[100,139]，prio整体减小120就和代码左边的注释对上了，也就是nice值的范围[-20,19]，因此<code>sched_prio=0</code>相当于<code>static_prio</code>=120。</p>
+</blockquote>
+<p>比如现有进程A <code>sched_prio=0</code>，进程B <code>sched_prio=-5</code>，通过<code>sched_prio_to_weight</code>的映射：</p>
+<ul>
+<li>进程A weight=1024，进程B weight = 3121</li>
+<li>进程A的CPU占比 = 1024/(1024+3121)= 24.7%</li>
+<li>进程B的CPU占比 = 3121/(1024+3121) = 75.3%</li>
+<li>假如CPU总时间是10ms，那么根据A占用2.47ms，B占用7.53ms</li>
+</ul>
+<p>在CFS中引入<code>sysctl_sched_latency</code>(调度延迟)作为一个调度周期，真实的CPU时间表示为：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-28.png" alt=""></p>
+<p>显然这样根据权重计算后的各个进程的运行时间是不等的，也就违背了"完全公平"思想，于是CFS引入了虚拟运行时间(virtual runtime)。</p>
+<h5>虚拟运行时间</h5>
+<p>每个进程的物理运行时间时肯定不能一样的，CFS调度器只要保证的就是进程的虚拟运行时间相等即可。</p>
+<p>那虚拟运行时间该如何计算呢？</p>
+<blockquote><p><code>virtual_time = wall_time * nice_0_weight/sched_prio_to_weigh</code></p>
+</blockquote>
+<p>比如现有进程A sched_prio=0，进程B sched_prio=-5：</p>
+<ul>
+<li>调度延迟=10ms，A的运行时间=2.47ms B的运行时间=7.53ms，也就是<code>wall_time</code></li>
+<li><code>nice_0_weight</code>表示<code>sched_prio=0</code>的权重为1024</li>
+<li>进程A的虚拟时间：<code>2.47*1024/1024=2.47ms</code></li>
+<li>进程B的虚拟时间：<code>7.53*1024/3121=2.47ms</code></li>
+</ul>
+<p>经过这样映射，A和B的虚拟时间就相等了。</p>
+<p>上述公式涉及了除法和浮点数运算，因此需要转换成为乘法来保证数据准确性，再给出虚拟时间计算的变形等价公式：</p>
+<blockquote><p><code>virtual_time = (wall_time * nice_0_weight * 2^32/sched_prio_to_weigh)&gt;&gt;32</code></p>
+<p><code>令 inv_weight = 2^32/sched_prio_to_weigh</code></p>
+<p><code>则 virtual_time = (wall_time * 1024 * inv_weight)&gt;&gt;32</code></p>
+</blockquote>
+<p>由于<code>sched_prio_to_weigh</code>的值存储在数组中，<code>inv_weight</code>同样可以：</p>
+<div class="highlight"><pre><code><span></span><span class="k">const</span><span class="w"> </span><span class="n">u32</span><span class="w"> </span><span class="n">sched_prio_to_wmult</span><span class="p">[</span><span class="mi">40</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="cm">/* -20 */</span><span class="w">     </span><span class="mi">48388</span><span class="p">,</span><span class="w">     </span><span class="mi">59856</span><span class="p">,</span><span class="w">     </span><span class="mi">76040</span><span class="p">,</span><span class="w">     </span><span class="mi">92818</span><span class="p">,</span><span class="w">    </span><span class="mi">118348</span><span class="p">,</span><span class="w">  </span>
+<span class="cm">/* -15 */</span><span class="w">    </span><span class="mi">147320</span><span class="p">,</span><span class="w">    </span><span class="mi">184698</span><span class="p">,</span><span class="w">    </span><span class="mi">229616</span><span class="p">,</span><span class="w">    </span><span class="mi">287308</span><span class="p">,</span><span class="w">    </span><span class="mi">360437</span><span class="p">,</span><span class="w">  </span>
+<span class="cm">/* -10 */</span><span class="w">    </span><span class="mi">449829</span><span class="p">,</span><span class="w">    </span><span class="mi">563644</span><span class="p">,</span><span class="w">    </span><span class="mi">704093</span><span class="p">,</span><span class="w">    </span><span class="mi">875809</span><span class="p">,</span><span class="w">   </span><span class="mi">1099582</span><span class="p">,</span><span class="w">  </span>
+<span class="cm">/*  -5 */</span><span class="w">   </span><span class="mi">1376151</span><span class="p">,</span><span class="w">   </span><span class="mi">1717300</span><span class="p">,</span><span class="w">   </span><span class="mi">2157191</span><span class="p">,</span><span class="w">   </span><span class="mi">2708050</span><span class="p">,</span><span class="w">   </span><span class="mi">3363326</span><span class="p">,</span><span class="w">  </span>
+<span class="cm">/*   0 */</span><span class="w">   </span><span class="mi">4194304</span><span class="p">,</span><span class="w">   </span><span class="mi">5237765</span><span class="p">,</span><span class="w">   </span><span class="mi">6557202</span><span class="p">,</span><span class="w">   </span><span class="mi">8165337</span><span class="p">,</span><span class="w">  </span><span class="mi">10153587</span><span class="p">,</span><span class="w">  </span>
+<span class="cm">/*   5 */</span><span class="w">  </span><span class="mi">12820798</span><span class="p">,</span><span class="w">  </span><span class="mi">15790321</span><span class="p">,</span><span class="w">  </span><span class="mi">19976592</span><span class="p">,</span><span class="w">  </span><span class="mi">24970740</span><span class="p">,</span><span class="w">  </span><span class="mi">31350126</span><span class="p">,</span><span class="w">  </span>
+<span class="cm">/*  10 */</span><span class="w">  </span><span class="mi">39045157</span><span class="p">,</span><span class="w">  </span><span class="mi">49367440</span><span class="p">,</span><span class="w">  </span><span class="mi">61356676</span><span class="p">,</span><span class="w">  </span><span class="mi">76695844</span><span class="p">,</span><span class="w">  </span><span class="mi">95443717</span><span class="p">,</span><span class="w">  </span>
+<span class="cm">/*  15 */</span><span class="w"> </span><span class="mi">119304647</span><span class="p">,</span><span class="w"> </span><span class="mi">148102320</span><span class="p">,</span><span class="w"> </span><span class="mi">186737708</span><span class="p">,</span><span class="w"> </span><span class="mi">238609294</span><span class="p">,</span><span class="w"> </span><span class="mi">286331153</span><span class="p">,</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>经过一番计算，各个进程的虚拟运行时间一致了，似乎我们理解了"完全公平"的思想。</p>
+<p>虚拟运行时间与优先级的衰减因子有关，也就是<code>inv_weight</code>随着nice值增大而增大，同时其作为分母也加速了低优先级进程的衰减。</p>
+<ul>
+<li>nice=0 虚拟运行时间 = 物理运行时间</li>
+<li>nice&gt;0 虚拟运行时间 &gt; 物理运行时间</li>
+<li>nice&lt;0 虚拟运行时间 &lt; 物理运行时间</li>
+</ul>
+<blockquote><p>简言之：CFS将物理运行时间在不同优先级进程中发生了不同的通胀。</p>
+</blockquote>
+<p>摒弃了固定时间片机制也是CFS的亮点，系统负载高时大家都少用一些CPU，系统负载低时大家都多用一些CPU，让调度器有了一定的自适应能力。</p>
+<h5>pick-next和红黑树</h5>
+<p>那么这些进程应该采用哪种数据结构来实现pick-next算法呢？</p>
+<p>CFS调度器采用了红黑树来保存活跃进程任务，红黑树的增删查复杂度是O(logn)，但是CFS引入了一些额外的数据结构，可以免去遍历获得下一个最合适的进程。</p>
+<p>红黑树的key是进程已经使用的虚拟运行时间，并且把虚拟时间数值最小的放到最左的叶子节点，这个节点就是下一个被pick的进程了。</p>
+<p>前面已经论证了，每个进程的虚拟运行时间是一样的，数值越小表示被调度的越少，因此需要更偏爱一些，当虚拟运行时间耗尽则从红黑树中删除，下个调度周期开始后再添加到
+红黑树上。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-29.png" alt=""></p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-30.png" alt=""></p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220108-155000-31.png" alt=""></p>
+<h3>本章重点</h3>
+<ul>
+<li>O(n)调度器采用全局runqueue，导致多cpu加锁问题和cache利用率低的问题</li>
+<li>O(1)调度器为每个cpu设计了一个runqueue，并且采用MLFQ算法思想设置140个优先级链表和active/expire两个双指针结构</li>
+<li>CFS调度器采用红黑树来实现O(logn)复杂度的pick-next算法，摒弃固定时间片机制，采用调度周期内的动态时间机制</li>
+<li>O(1)和O(n)都在交互进程的识别算法上下了功夫，但是无法做的100%准确</li>
+<li>CFS另辟蹊径采用完全公平思想以及虚拟运行时间来实现进行的调度</li>
+<li>CFS调度器也并非银弹，在某些方面可能不如O(1)</li>
+</ul>
+<h3>参考资料</h3>
+<ul>
+<li><a href="https://cs334.cs.vassar.edu/slides/04_Linux_CFS.pdf">https://cs334.cs.vassar.edu/slides/04_Linux_CFS.pdf</a></li>
+<li><a href="http://www.eecs.harvard.edu/~cs161/notes/scheduling-case-studies.pdf">http://www.eecs.harvard.edu/~cs161/notes/scheduling-case-studies.pdf</a></li>
+<li><a href="http://www.wowotech.net/process_management/scheduler-history.html">http://www.wowotech.net/process_management/scheduler-history.html</a></li>
+</ul>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "揭秘Linux进程调度器.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

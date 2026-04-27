@@ -1,0 +1,412 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>PacedSender模块 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="PacedSender模块,C/C++,WebRTC,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="webrtc的PacedSender模块<br/>发送调节器PacedSender代码走读" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>PacedSender模块</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2021-01-04 17:22
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+<a href='../article/tag_webrtc.html' class='article_tag'>WebRTC</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://blog.csdn.net/zhuiyuanqingya/article/details/105994186' target='blank'>webrtc的PacedSender模块</a></p></h4>
+<h2>1.模块结构图</h2>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210104-172200-4.png" alt="在这里插入图片描述"></p>
+<h2>2.模块输入输出</h2>
+<h3>2.1模块输入</h3>
+<h4>1. 目标码率</h4>
+<p>平滑发送模块通过外部设置的目标码率，来决定数据包发送的速度，一般在网络条件发生改变的情况下会更新设置的码率。</p>
+<h4>2. 数据包</h4>
+<p>编码模块在完成编码后会将视频帧数据传递到 rtp_rtcp 模块的 RtpSenderVideo 中进行数据包组装，然后传递到 pacing 模块进行平滑发送处理。</p>
+<h3>2.2模块输出</h3>
+<p>pacing 模块的输出同样是数据包，只是在 pacing 模块对发送速度进行了控制。</p>
+<h2>3.模块处理过程</h2>
+<h3>3.1模块做了什么处理</h3>
+<p>将数据包存入缓冲队列中，根据目标码率计算发送预算，如果在 5ms 周期内可以进行发送处理，就发送数据包，同时将数据包存入 RtpPacketHistory 中。</p>
+<h3>3.2 数据包缓存过程</h3>
+<p>数据包缓存过程从 RtpSenderVideo 开始，因为在此之前还没有产生数据包，编码后的视频帧还是原始未组包的压缩视频数据。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210104-172200-5.png" alt="在这里插入图片描述"></p>
+<p>在 webrtc 中，平滑发送是否开启是可选的，如果不开启平滑发送，那么数据包会到达 NonPacedPacketSender 然后直接通过网络发送出去，否则会发送到 PacedSender 被缓存起来，根据设置的目标码率进行发送。</p>
+<h3>3.3数据包周期处理过程</h3>
+<p>数据包周期处理过程主要涉及两个类，分别是 PacedSender 和 PacingController，PacedSender 是一个 Module 的子类，因此可以实现周期处理。</p>
+<p>这里重点分析周期模式下媒体数据包的发送过程，对于填充包和动态模式暂时不考虑。</p>
+<p>PacingController 有两种数据包处理模式，一种是周期模式，一种是动态模式，周期模式下根据发送预算按照 5ms 间隔处理数据包，动态模式下根据数据包发送债务来决定需要等待多久再进行下一次发送。（发送债务是指当前进行一次 m 字节的数据发送后，就增加了 m 字节的债务，目标发送码率为 v，那么需要等待的时间为 m/v，之后才可以进行下一次发送。）</p>
+<p>在 PacedSender::TimeUntilNextProcess () 函数中，如果是周期发送模式，那么就会在 5ms 后进行下一次数据包发送处理。</p>
+<p>在 PacedSender::Process() 函数中，会调用 PacingController::ProcessPackets() 函数进行具体的数据包处理。</p>
+<p>在 PacingController 中有一个<code>drain_large_queues_</code>变量，从字面上来理解是将大的队列排空，也就是迅速将队列中的数据包发送出去。如果这个变量为真，那么就会根据队列中的数据量和发送时间限制，计算一个发送码率，如果这个计算结果大于根据拥塞控制设置的码率，就用这个较大的码率来指导后续数据包发送过程。</p>
+<p>在周期模式下，当进入 PacingController::ProcessPackets() 时会调用PacingController::UpdateTimeAndGetElapsed() 函数，更新<code>last_process_time_</code>值为 now，也就是当前时间，并返回两次调用的时间间隔 <code>elapsed_time</code>，这个值用于更新周期模式下的发送预算，在周期发送模式下，只有发送预算 <code>bytes_remaining_</code> 为正值，才能发送数据包。</p>
+<p>PacingController::GetPendingPacket() 函数用于从缓存队列里获取数据包，如果 <code>media_budget_</code> 的 <code>bytes_remaining_</code> 大于零，就可以拿到一个有效数据包，否则拿到一个空指针，如果拿到有效数据包就可以调用发送接口进行发送处理，发送完成后就再次判断发送预算和取数据包发送，直到发送预算耗尽。如果因为发送预算耗尽，无法拿到数据包发送就可以退出循环了，等待下一次 PacingController::ProcessPackets() 被调用。</p>
+<h3>3.4数据包发送过程</h3>
+<p>数据包从平滑发送模块的缓存中发送，起点是 PacingController::ProcessPackets()，在这个函数中调用PacedSender::SendRtpPacket() 函数进行发送，用类图来描述发送过程如下：<br>
+<img src="../vender/image/img_loading.gif" data-src="../file/image/20210104-172200-6.png" alt="在这里插入图片描述"></p>
+<p>数据包发送过程基本按照类图从左到右发送，数据包传到 RtpSenderEgress 时，一方面发送到网络，一方面对数据包做缓存，以备响应 nack 模块的重传请求。</p>
+<h2>4.小结</h2>
+<p>平滑发送模块在 webrtc 众多模块中相对比较简单，没有很复杂的算法，理解起来相对比较容易，不过还是有些细节需要仔细揣摩其实现意图。</p>
+<hr>
+
+<h4><p>原文出处：<a href='https://blog.csdn.net/dxpqxb/article/details/102845346' target='blank'>发送调节器PacedSender代码走读</a></p></h4>
+<h2>一、简介</h2>
+<h3>1.1、PacedSender（步长发送器）</h3>
+<p>无线网络最害怕的一个是干扰，一个是突然的大数据量冲击。视频编码后分关键帧I帧和非关键帧P帧，I帧一般是P帧的几十倍大小，比如一个I帧200k，一个p帧10k。如果不加处理的有视频帧就发，就会造成很多瞬间的传输峰值，对网络造成冲击。</p>
+<p>pacedsender的作用就是平缓突发的数据流，让发送数据流整体平坦，避免对无线网络造成冲击。</p>
+<h3>1.2、webrtc中代码位置</h3>
+<p><strong>webrtc/modules/pacing/paced_sender.cc</strong></p>
+<h3>1.3、PacedSender基本工作原理</h3>
+<p>通过Process方法的不断被调用来SendPacket；通过media_budget模块来计算本次理应发送的字节数，即预算，数据包发送后根据本次实际发送的字节数和理应发送的字节数来判断下次是否应该允许继续发送？通过BitrateProbe模块来探测每次SendPacket后要wait多久？</p>
+<h2>二、核心代码走读</h2>
+<h3>2.1、PacedSender 发送速率设置</h3>
+<p>GCC 估测的带宽只会通过 <code>SetEstimatedBitrate</code> 方法设置到 <code>PacedSender</code> 中，<code>pacing_bitrate_kbps_</code> 为 <code>PacedSender</code> 发送媒体包的速率，为GCC估测带宽 乘以了固定系数kDefaultPaceMultiplier(2.5)</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">PacedSender::SetEstimatedBitrate</span><span class="p">(</span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">bitrate_bps</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">bitrate_bps</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">    </span><span class="n">LOG</span><span class="p">(</span><span class="n">LS_ERROR</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;PacedSender is not designed to handle 0 bitrate.&quot;</span><span class="p">;</span>
+<span class="w">  </span><span class="n">CriticalSectionScoped</span><span class="w"> </span><span class="n">cs</span><span class="p">(</span><span class="n">critsect_</span><span class="p">.</span><span class="n">get</span><span class="p">());</span>
+<span class="w">  </span><span class="n">estimated_bitrate_bps_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">bitrate_bps</span><span class="p">;</span>
+<span class="w">  </span><span class="n">padding_budget_</span><span class="o">-&gt;</span><span class="n">set_target_rate_kbps</span><span class="p">(</span><span class="n">estimated_bitrate_bps_</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">1000</span><span class="w"> </span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 更新 pacing 发送速率，为 estimated_bitrate_bps_/1000 * 2.5;</span>
+<span class="w">  </span><span class="n">pacing_bitrate_kbps_</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">max</span><span class="p">(</span><span class="n">min_send_bitrate_kbps_</span><span class="p">,</span><span class="w"> </span><span class="n">estimated_bitrate_bps_</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">1000</span><span class="p">)</span><span class="w"> </span><span class="o">*</span>
+<span class="w">      </span><span class="n">kDefaultPaceMultiplier</span><span class="p">;</span>
+<span class="w">  </span><span class="n">alr_detector_</span><span class="o">-&gt;</span><span class="n">SetEstimatedBitrate</span><span class="p">(</span><span class="n">bitrate_bps</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>2.2、PacedSender 包缓存队列</h3>
+<p>该方法由 <code>rtp_sender</code> 模块调用，将封装好的视频<code>rtp</code>包的元信息，如 <code>ssrc</code>, <code>sequence_number</code>等封装成<code>Packet</code>数据结构存储到队列中，并未缓存真正的媒体数据。发包时，<code>PacedSender</code>会通过这些元信息，在<code>rtp_sender</code>中的缓存队列中找到对应的媒体包数据</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 将视频包元信息，instert到pacer中</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">PacedSender::InsertPacket</span><span class="p">(</span><span class="n">RtpPacketSender</span><span class="o">::</span><span class="n">Priority</span><span class="w"> </span><span class="n">priority</span><span class="p">,</span>
+<span class="w">                                </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">ssrc</span><span class="p">,</span>
+<span class="w">                                </span><span class="kt">uint16_t</span><span class="w"> </span><span class="n">sequence_number</span><span class="p">,</span>
+<span class="w">                                </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">capture_time_ms</span><span class="p">,</span>
+<span class="w">                                </span><span class="kt">size_t</span><span class="w"> </span><span class="n">bytes</span><span class="p">,</span>
+<span class="w">                                </span><span class="kt">bool</span><span class="w"> </span><span class="n">retransmission</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">CriticalSectionScoped</span><span class="w"> </span><span class="n">cs</span><span class="p">(</span><span class="n">critsect_</span><span class="p">.</span><span class="n">get</span><span class="p">());</span>
+<span class="w">  </span><span class="n">DCHECK</span><span class="p">(</span><span class="n">estimated_bitrate_bps_</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">        </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;SetEstimatedBitrate must be called before InsertPacket.&quot;</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">now_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock_</span><span class="o">-&gt;</span><span class="n">TimeInMilliseconds</span><span class="p">();</span>
+<span class="w">  </span><span class="n">prober_</span><span class="o">-&gt;</span><span class="n">OnIncomingPacket</span><span class="p">(</span><span class="n">bytes</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">capture_time_ms</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">    </span><span class="n">capture_time_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">now_ms</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 封装 packet 包，放到list中 packets_</span>
+<span class="w">  </span><span class="n">packets_</span><span class="o">-&gt;</span><span class="n">Push</span><span class="p">(</span><span class="n">paced_sender</span><span class="o">::</span><span class="n">Packet</span><span class="p">(</span><span class="n">priority</span><span class="p">,</span><span class="w"> </span><span class="n">ssrc</span><span class="p">,</span><span class="w"> </span><span class="n">sequence_number</span><span class="p">,</span>
+<span class="w">                                      </span><span class="n">capture_time_ms</span><span class="p">,</span><span class="w"> </span><span class="n">now_ms</span><span class="p">,</span><span class="w"> </span><span class="n">bytes</span><span class="p">,</span>
+<span class="w">                                      </span><span class="n">retransmission</span><span class="p">,</span><span class="w"> </span><span class="n">packet_counter_</span><span class="o">++</span><span class="p">));</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>2.3、发包间隔 5ms 计算</h3>
+<div class="highlight"><pre><code><span></span><span class="c1">// 用于获取下次Process方法被调用的时间间隔，以毫秒计。其内部调用BitrateProber的  </span>
+<span class="c1">// TimeUntilNextProbe方法来计算。</span>
+<span class="kt">int64_t</span><span class="w"> </span><span class="nf">PacedSender::TimeUntilNextProcess</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">rtc</span><span class="o">::</span><span class="n">CritScope</span><span class="w"> </span><span class="n">cs</span><span class="p">(</span><span class="o">&amp;</span><span class="n">critsect_</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">//当前时间减去上次Process调用时间点来计算出elapsed_time_us,单位为微秒</span>
+<span class="w">  </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">elapsed_time_us</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">clock_</span><span class="o">-&gt;</span><span class="n">TimeInMicroseconds</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">time_last_process_us_</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">elapsed_time_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">elapsed_time_us</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">500</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">1000</span><span class="p">;</span><span class="w"> </span><span class="c1">//求整</span>
+<span class="w">  </span><span class="c1">// When paused we wake up every 500 ms to send a padding packet to ensure</span>
+<span class="w">  </span><span class="c1">// we won&#39;t get stuck in the paused state due to no feedback being received.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">paused_</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="o">&lt;</span><span class="kt">int64_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">kPausedProcessIntervalMs</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">elapsed_time_ms</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">prober_</span><span class="o">-&gt;</span><span class="n">IsProbing</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 通过BitrateProber获得下次执行Process的时机,详见BitrateProbe</span>
+<span class="w">    </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">prober_</span><span class="o">-&gt;</span><span class="n">TimeUntilNextProbe</span><span class="p">(</span><span class="n">clock_</span><span class="o">-&gt;</span><span class="n">TimeInMilliseconds</span><span class="p">());</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">ret</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">(</span><span class="n">ret</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="n">probing_send_failure_</span><span class="p">))</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">ret</span><span class="p">;</span><span class="w"> </span><span class="c1">//返回下次执行Process的需等待时间间隔</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// 若当前没有开启探测，则使用默认值，最小等待间隔kMinPacketLimitMs减去已消逝</span>
+<span class="w">  </span><span class="c1">// 时间间隔。</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="o">&lt;</span><span class="kt">int64_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">kMinPacketLimitMs</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">elapsed_time_ms</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>2.4、线程处理方法 process()</h3>
+<div class="highlight"><pre><code><span></span><span class="cm">/**  </span>
+<span class="cm"> * Process方法是PacedSender的主发送线程，在Process方法内没有while循环和wait机制  </span>
+<span class="cm"> * ，其是由其他模块在外部驱动的。具体可参考call/rtp_transport_controller_send.cc  </span>
+<span class="cm"> * 中有关PacedSender是如何作为一个module注册到process thread中的，以及是如何在  </span>
+<span class="cm"> * ProcessThread中对各module的Process方法进行驱动的。因为PacedSender继承于Pacer，  </span>
+<span class="cm"> * 而Pacer类又继承于module.  </span>
+<span class="cm"> * 调用Process的模块每次都会等待一个时间间隔，此时间间隔是由BitrateProbe模块来  </span>
+<span class="cm"> * 探测出来的。具体可参考BitrateProbe代码走读部分.  </span>
+<span class="cm"> * Process方法的主要功能就是SendPacket及更新预算。具体在下面代码中讲解。  </span>
+<span class="cm"> */</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">PacedSender::Process</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">now_us</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock_</span><span class="o">-&gt;</span><span class="n">TimeInMicroseconds</span><span class="p">();</span>
+<span class="w">  </span><span class="n">rtc</span><span class="o">::</span><span class="n">CritScope</span><span class="w"> </span><span class="n">cs</span><span class="p">(</span><span class="o">&amp;</span><span class="n">critsect_</span><span class="p">);</span>
+<span class="w">  </span><span class="n">time_last_process_us_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">now_us</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// last_send_time_us_是上次Process方法被执行时的时间点，elapsed_time_ms是上次</span>
+<span class="w">  </span><span class="c1">// Process方法调用与本次调用的时间间隔，以毫秒计。</span>
+<span class="w">  </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">elapsed_time_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">now_us</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">last_send_time_us_</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">500</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">1000</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">elapsed_time_ms</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">kMaxElapsedTimeMs</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_WARNING</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Elapsed time (&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">elapsed_time_ms</span>
+<span class="w">                        </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot; ms) longer than expected, limiting to &quot;</span>
+<span class="w">                        </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">kMaxElapsedTimeMs</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot; ms&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="n">elapsed_time_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kMaxElapsedTimeMs</span><span class="p">;</span><span class="c1">// 最大不能超过2秒，否则作修正。</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// When congested we send a padding packet every 500 ms to ensure we won&#39;t get</span>
+<span class="w">  </span><span class="c1">// stuck in the congested state due to no feedback being received.</span>
+<span class="w">  </span><span class="c1">// TODO(srte): Stop sending packet in paused state when pause is no longer</span>
+<span class="w">  </span><span class="c1">// used for congestion windows.</span>
+<span class="w">  </span><span class="c1">// 先忽略。。</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">paused_</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">Congested</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// We can not send padding unless a normal packet has first been sent. If we</span>
+<span class="w">    </span><span class="c1">// do, timestamps get messed up.</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">elapsed_time_ms</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">kCongestedPacketIntervalMs</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">packet_counter_</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">PacedPacketInfo</span><span class="w"> </span><span class="n">pacing_info</span><span class="p">;</span>
+<span class="w">      </span><span class="kt">size_t</span><span class="w"> </span><span class="n">bytes_sent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">SendPadding</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">pacing_info</span><span class="p">);</span>
+<span class="w">      </span><span class="n">alr_detector_</span><span class="o">-&gt;</span><span class="n">OnBytesSent</span><span class="p">(</span><span class="n">bytes_sent</span><span class="p">,</span><span class="w"> </span><span class="n">elapsed_time_ms</span><span class="p">);</span>
+<span class="w">      </span><span class="n">last_send_time_us_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock_</span><span class="o">-&gt;</span><span class="n">TimeInMicroseconds</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">target_bitrate_kbps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pacing_bitrate_kbps_</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">elapsed_time_ms</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">size_t</span><span class="w"> </span><span class="n">queue_size_bytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packets_</span><span class="o">-&gt;</span><span class="n">SizeInBytes</span><span class="p">();</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">queue_size_bytes</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">// 有数据包待发送</span>
+<span class="w">      </span><span class="c1">// Assuming equal size packets and input/output rate, the average packet</span>
+<span class="w">      </span><span class="c1">// has avg_time_left_ms left to get queue_size_bytes out of the queue, if</span>
+<span class="w">      </span><span class="c1">// time constraint shall be met. Determine bitrate needed for that.</span>
+<span class="w">      </span><span class="n">packets_</span><span class="o">-&gt;</span><span class="n">UpdateQueueTime</span><span class="p">(</span><span class="n">clock_</span><span class="o">-&gt;</span><span class="n">TimeInMilliseconds</span><span class="p">());</span>
+<span class="w">      </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">avg_time_left_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="o">&lt;</span><span class="kt">int64_t</span><span class="o">&gt;</span><span class="p">(</span>
+<span class="w">          </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">queue_time_limit</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">packets_</span><span class="o">-&gt;</span><span class="n">AverageQueueTimeMs</span><span class="p">());</span>
+<span class="w">      </span><span class="kt">int</span><span class="w"> </span><span class="n">min_bitrate_needed_kbps</span><span class="w"> </span><span class="o">=</span>
+<span class="w">          </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">queue_size_bytes</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">avg_time_left_ms</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">min_bitrate_needed_kbps</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">target_bitrate_kbps</span><span class="p">)</span>
+<span class="w">        </span><span class="n">target_bitrate_kbps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">min_bitrate_needed_kbps</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// 更新media_budget的目标带宽</span>
+<span class="w">    </span><span class="n">media_budget_</span><span class="o">-&gt;</span><span class="n">set_target_rate_kbps</span><span class="p">(</span><span class="n">target_bitrate_kbps</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// 更新预算</span>
+<span class="w">    </span><span class="n">UpdateBudgetWithElapsedTime</span><span class="p">(</span><span class="n">elapsed_time_ms</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">last_send_time_us_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock_</span><span class="o">-&gt;</span><span class="n">TimeInMicroseconds</span><span class="p">();</span>
+
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">is_probing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">prober_</span><span class="o">-&gt;</span><span class="n">IsProbing</span><span class="p">();</span>
+<span class="w">  </span><span class="n">PacedPacketInfo</span><span class="w"> </span><span class="n">pacing_info</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">bytes_sent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">recommended_probe_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_probing</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 若当前间隔探测器有效，获取第一个cluster的pacing_info信息，每一个带宽值</span>
+<span class="w">    </span><span class="c1">// 的探测对应一个Cluster,详见BitrateProber相关代码走读。</span>
+<span class="w">    </span><span class="n">pacing_info</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">prober_</span><span class="o">-&gt;</span><span class="n">CurrentCluster</span><span class="p">();</span>
+<span class="w">    </span><span class="c1">// 推荐的最小探测间隔是2ms， recommended_probe_size是2ms的依当前带宽的数据量</span>
+<span class="w">    </span><span class="c1">// 用法见下面while循环</span>
+<span class="w">    </span><span class="n">recommended_probe_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">prober_</span><span class="o">-&gt;</span><span class="n">RecommendedMinProbeSize</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// The paused state is checked in the loop since SendPacket leaves the</span>
+<span class="w">  </span><span class="c1">// critical section allowing the paused state to be changed from other code.</span>
+<span class="w">  </span><span class="c1">// 循环发送packets_队列中的RTP包，直到探测结束或bytes_sent &gt;</span>
+<span class="w">  </span><span class="c1">// recommended_probe_size,</span>
+<span class="w">  </span><span class="c1">// 即本轮发送的字节总数超过了推荐探测间隔对应的字节数，因recommended_probe_size</span>
+<span class="w">  </span><span class="c1">// 值代表2ms的数据量，此值比较小，所以一般while循环内只发送一次packet就会停止。</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">packets_</span><span class="o">-&gt;</span><span class="n">Empty</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="n">paused_</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="n">Congested</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Since we need to release the lock in order to send, we first pop the</span>
+<span class="w">    </span><span class="c1">// element from the priority queue but keep it in storage, so that we can</span>
+<span class="w">    </span><span class="c1">// reinsert it if send fails.</span>
+<span class="w">    </span><span class="c1">// 从packets_队列中取出一个待发送RTP包(此时仅取出但不从队列中移除)</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">PacketQueueInterface</span><span class="o">::</span><span class="n">Packet</span><span class="o">&amp;</span><span class="w"> </span><span class="n">packet</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packets_</span><span class="o">-&gt;</span><span class="n">BeginPop</span><span class="p">();</span>
+<span class="w">    </span><span class="c1">// 发送pop出来的RTP数据包，其内由media_budget模块的bytes_remaining变量值来</span>
+<span class="w">    </span><span class="c1">// 决定是否应该发送此RTP数据包，bytes_remaining用于表示本次剩余或理应发送的</span>
+<span class="w">    </span><span class="c1">// 数据量。详见IntervalBudget相关代码</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">SendPacket</span><span class="p">(</span><span class="n">packet</span><span class="p">,</span><span class="w"> </span><span class="n">pacing_info</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">bytes_sent</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">bytes</span><span class="p">;</span>
+<span class="w">      </span><span class="c1">// Send succeeded, remove it from the queue.</span>
+<span class="w">      </span><span class="c1">// 数据真正发送成功后，才将其从队列中移出。</span>
+<span class="w">      </span><span class="n">packets_</span><span class="o">-&gt;</span><span class="n">FinalizePop</span><span class="p">(</span><span class="n">packet</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_probing</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">bytes_sent</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">recommended_probe_size</span><span class="p">)</span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Send failed, put it back into the queue.</span>
+<span class="w">      </span><span class="c1">// 当发送数据失败，如上次发送数据量过多，本轮不应发送，则取消从队列中pop</span>
+<span class="w">      </span><span class="n">packets_</span><span class="o">-&gt;</span><span class="n">CancelPop</span><span class="p">(</span><span class="n">packet</span><span class="p">);</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 依需要发送填充包，暂时忽略。。。</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">packets_</span><span class="o">-&gt;</span><span class="n">Empty</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="n">Congested</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// We can not send padding unless a normal packet has first been sent. If we</span>
+<span class="w">    </span><span class="c1">// do, timestamps get messed up.</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">packet_counter_</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kt">int</span><span class="w"> </span><span class="n">padding_needed</span><span class="w"> </span><span class="o">=</span>
+<span class="w">          </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">is_probing</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="p">(</span><span class="n">recommended_probe_size</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">bytes_sent</span><span class="p">)</span>
+<span class="w">                                      </span><span class="o">:</span><span class="w"> </span><span class="n">padding_budget_</span><span class="o">-&gt;</span><span class="n">bytes_remaining</span><span class="p">());</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">padding_needed</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">bytes_sent</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">SendPadding</span><span class="p">(</span><span class="n">padding_needed</span><span class="p">,</span><span class="w"> </span><span class="n">pacing_info</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// 通过已发送数据字节数bytes_sent和当前时间来更新bitrate probe以计算出下次</span>
+<span class="w">  </span><span class="c1">// Process方法调用时间点</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_probing</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">probing_send_failure_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">bytes_sent</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">probing_send_failure_</span><span class="p">)</span>
+<span class="w">      </span><span class="c1">// 详见BitrateProbe中的ProbeSent代码走读，主要用于探测下次Process方法的调</span>
+<span class="w">      </span><span class="c1">// 用时间点</span>
+<span class="w">      </span><span class="n">prober_</span><span class="o">-&gt;</span><span class="n">ProbeSent</span><span class="p">(</span><span class="n">clock_</span><span class="o">-&gt;</span><span class="n">TimeInMilliseconds</span><span class="p">(),</span><span class="w"> </span><span class="n">bytes_sent</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// 忽略...</span>
+<span class="w">  </span><span class="n">alr_detector_</span><span class="o">-&gt;</span><span class="n">OnBytesSent</span><span class="p">(</span><span class="n">bytes_sent</span><span class="p">,</span><span class="w"> </span><span class="n">elapsed_time_ms</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>2.5、发包方法SendPacket()</h3>
+<p>该方法由上面的while发包循环调用，发包后会调用 <code>UpdateBudgetWithBytesSent(packet.bytes)</code> 从<code>media_budget_</code> 减去<code>packet.bytes</code>长度的发包预算,
+当发博包循环走几次之后，<code>media_budget</code>中的预算长度被消耗完，即 &lt;= 0， 此时<code>media_budget_-&gt;bytes_remaining()</code> 方法会做 <code>max(0, bytes_remaining_)</code> 处理，即返回0，而发包前会判断 <code>media_budget_-&gt;bytes_remaining() == 0</code> ,满足条件就<code>return false</code>不发了。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">bool</span><span class="w"> </span><span class="nf">PacedSender::SendPacket</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">paced_sender</span><span class="o">::</span><span class="n">Packet</span><span class="o">&amp;</span><span class="w"> </span><span class="n">packet</span><span class="p">,</span>
+<span class="w">                              </span><span class="k">const</span><span class="w"> </span><span class="n">PacedPacketInfo</span><span class="o">&amp;</span><span class="w"> </span><span class="n">pacing_info</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 是否暂停发包</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">paused_</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">//  media  budget 剩余预算字节数为 0，停止发包</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">media_budget_</span><span class="o">-&gt;</span><span class="n">bytes_remaining</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">      </span><span class="n">pacing_info</span><span class="p">.</span><span class="n">probe_cluster_id</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">PacedPacketInfo</span><span class="o">::</span><span class="n">kNotAProbe</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">critsect_</span><span class="o">-&gt;</span><span class="n">Enter</span><span class="p">();</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">success</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packet_sender_</span><span class="o">-&gt;</span><span class="n">TimeToSendPacket</span><span class="p">(</span>
+<span class="w">      </span><span class="n">packet</span><span class="p">.</span><span class="n">ssrc</span><span class="p">,</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">sequence_number</span><span class="p">,</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">capture_time_ms</span><span class="p">,</span>
+<span class="w">      </span><span class="n">packet</span><span class="p">.</span><span class="n">retransmission</span><span class="p">,</span><span class="w"> </span><span class="n">pacing_info</span><span class="p">);</span>
+<span class="w">  </span><span class="n">critsect_</span><span class="o">-&gt;</span><span class="n">Leave</span><span class="p">();</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">success</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// TODO(holmer): High priority packets should only be accounted for if we</span>
+<span class="w">    </span><span class="c1">// are allocating bandwidth for audio.</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">packet</span><span class="p">.</span><span class="n">priority</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">kHighPriority</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">// 包的优先级不为最高优先级，更新发送的字节数</span>
+<span class="w">      </span><span class="c1">// Update media bytes sent.</span>
+<span class="w">      </span><span class="n">UpdateBudgetWithBytesSent</span><span class="p">(</span><span class="n">packet</span><span class="p">.</span><span class="n">bytes</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">success</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>SendPacket</code> 方法最终会调用 <code>rtp_sender</code>中的方法，将<code>ssrc</code>，<code>sequence_number</code>等参数传递过去，<code>rtp_sender</code>通过这些值找到真正的视频媒体包，最终发送到到网络上。</p>
+<h3>2.6、media_budget简介</h3>
+<p><code>media_budget</code> 是在 <code>PacedSender</code>中封装的一个类，全部代码如下，注释做了解释：</p>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">IntervalBudget</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">public</span><span class="o">:</span>
+<span class="w">  </span><span class="k">explicit</span><span class="w"> </span><span class="n">IntervalBudget</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">initial_target_rate_kbps</span><span class="p">)</span>
+<span class="w">      </span><span class="o">:</span><span class="w"> </span><span class="n">target_rate_kbps_</span><span class="p">(</span><span class="n">initial_target_rate_kbps</span><span class="p">),</span>
+<span class="w">        </span><span class="n">bytes_remaining_</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{}</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="n">set_target_rate_kbps</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">target_rate_kbps</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">//更新发送速率</span>
+<span class="w">    </span><span class="n">target_rate_kbps_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">target_rate_kbps</span><span class="p">;</span>
+<span class="w">      </span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">max</span><span class="p">(</span><span class="o">-</span><span class="n">kWindowMs</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">target_rate_kbps_</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">8</span><span class="p">,</span><span class="w"> </span><span class="n">bytes_remaining_</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="n">IncreaseBudget</span><span class="p">(</span><span class="kt">int64_t</span><span class="w"> </span><span class="n">delta_time_ms</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 估计在 delta 时间， 在带宽为 target_rate_kbps 的情况可以发送出去多少字节</span>
+<span class="w">    </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">bytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">target_rate_kbps_</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">delta_time_ms</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">8</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// We overused last interval, compensate this interval.</span>
+<span class="w">      </span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">bytes</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// If we underused last interval we can&#39;t use it this interval.</span>
+<span class="w">      </span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">bytes</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">//更新实际发送的字节数， 从bytes_remaining_减去</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="n">UseBudget</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">bytes</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">max</span><span class="p">(</span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">bytes</span><span class="p">),</span>
+<span class="w">                                </span><span class="o">-</span><span class="n">kWindowMs</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">target_rate_kbps_</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">8</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// 几次发送循环后，发送的总字节数大于开始的 bytes_remaining_，bytes_remaining_ &lt;= 0，改方法返回0</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">bytes_remaining</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">max</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">bytes_remaining_</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">target_rate_kbps</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">target_rate_kbps_</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="k">private</span><span class="o">:</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">kWindowMs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">500</span><span class="p">;</span><span class="w"> </span><span class="c1">// window 500 ms</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">target_rate_kbps_</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">bytes_remaining_</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<h2>三、总结</h2>
+<p><code>PacedSender</code>工作原理是，每次发包前会更新<code>media_budget</code>中预算<code>bytes_remaining_</code>的大小，而每次发送时间(&lt;= 5ms)内最多发送 <code>bytes_remaining_</code> 字节数，从而达到限制和平滑带宽的目的，<code>PacedSender</code> 中<code>padding</code>发送的原理和此类似。</p>
+<p>在PacedSender.cc中最重要的就是Process和TimeUntilNextProcess方法，Process是主发送线程，其由外部其他逻辑驱动进行定时调用，每次调用Process的时间间隔是从TimeUntilNextProcess方法中获取的。此间隔值依带宽变化和本轮探测中已发送数据包的字节数来估算。</p>
+<p>在Process内部分2部分，发送数据前和发送数据后，发送前要依当前带宽和本轮Process和上次Process的时间间隔值来更新media_budget预算，以决定是否允许本轮发送数据。发送成功后要调用BitrateProber的ProbeSent方法来更新下次Process调用等待时间间隔。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "PacedSender模块.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

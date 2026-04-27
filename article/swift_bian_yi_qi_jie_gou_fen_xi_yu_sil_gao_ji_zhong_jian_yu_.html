@@ -1,0 +1,757 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>Swift编译器结构分析与SIL高级中间语言 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="Swift编译器结构分析与SIL高级中间语言,C/C++,Swift,iOS,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="Swift编译器结构分析<br/>Swift的高级中间语言：SIL" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>Swift编译器结构分析与SIL高级中间语言</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2020-11-25 15:00
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+<a href='../article/tag_swift.html' class='article_tag'>Swift</a>
+
+<a href='../article/tag_ios.html' class='article_tag'>iOS</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://www.jianshu.com/p/7c894f9b7b02' target='blank'>Swift编译器结构分析</a></p></h4>
+<h3>Swift介绍</h3>
+<p>Swift是一种高性能的语言，拥有整洁现代的语法。swift可以和C、OC的代码和框架无缝衔接，并且swift默认是内存安全的。 Swift的<a href="https://github.com/apple/swift">代码仓库</a>包含了Swift编译器和标准库的源码，还有例如用于IDE集成的SourceKit等相关组件。</p>
+<h3>Swift编译器</h3>
+<p>概况来说，Swift编译器负责将Swift源码转成高效的可执行机器码。下面我们对Swift编译器的几个主要组件进行说明。</p>
+<h3>编译器基本知识</h3>
+<h4>构建过程</h4>
+<p>构建过程分为</p>
+<ul>
+<li><strong>预处理(pre-process)</strong> 用于导入文件和展开宏.纯文本操作,不考虑语言语法含义</li>
+<li>(狭义的)<strong>编译</strong> 对预处理器的输出进行编译，生成汇编语言(<code>assemble language</code>)。一般汇编语言代码的文件扩展名<code>.s</code></li>
+<li><strong>汇编</strong> 汇编器转为机器语言，这个过程称为汇编(<code>assemble</code>),输出为目标文件(object file),一般扩展名为<code>.o</code></li>
+<li><strong>链接</strong> 目标文件本身不能使用。将目标文件转换为最终可以使用的形式的过程,称为链接(<code>link</code>)。可执行文件默认名为<code>a.out</code></li>
+</ul>
+<h3>Swift编译器结构</h3>
+<p>我们下面分析的Swift编译器，负责的流程是上面构建过程中的第二步：（狭义的）<strong>编译</strong>。</p>
+<p>Swift的编译器主要组件包含以下几部分：</p>
+<h4>Parsing：语法分析</h4>
+<p>Swift的语法分析器是一个简单的，对整体通过递归向下的方式进行语法分析的手工编码词法分析器，他是在<a href="https://github.com/apple/swift/tree/master/lib/Parse">lib/Parse</a>内实现的。该分析器负责生成不包含语义和类型信息的<strong>抽象语法树</strong>，简称<code>AST</code>(Abstract Syntax Tree)。这个阶段生成的<code>AST</code>也不包含警告和错误的注入。</p>
+<h5>lib/Parse</h5>
+<p>我们分析一下<code>lib/Parse</code>内的文件结构</p>
+<p><strong>文件管理：CMakeLists.txt</strong> 内部包含一个CMakeLists.txt文件和多个以cpp为后缀名的C++文件。 CMakeLists.txt是<code>CMake</code>的管理文件，想了解CMake可以在文末查看。CMakeLists.txt内容为</p>
+<div class="highlight"><pre><code><span></span><span class="n">add_swift_library</span><span class="p">(</span><span class="n">swiftParse</span><span class="w"> </span><span class="n">STATIC</span>
+<span class="w">  </span><span class="n">xxx</span><span class="p">.</span><span class="n">cpp</span>
+<span class="w">  </span><span class="p">...</span>
+<span class="w">  </span><span class="n">LINK_LIBRARIES</span>
+<span class="w">  </span><span class="n">swiftAST</span>
+<span class="w">  </span><span class="n">swiftSyntax</span>
+<span class="err">）</span>
+</code></pre></div>
+<p><strong>源码分析文件：ParseXXX.cpp</strong> 内部的cpp文件是用于对代码进行语法分析的，例如<code>Lexer.cpp</code>，<code>ParseDecl.cpp</code>，<code>ParseGeneric.cpp</code>，<code>ParseStmt.cpp</code>等文件，从命名我们就能知道他们的功能是对声明，表达式或者泛型等进行语法分析。 语法分析是将代码逐字分析，通过特定的正则表达式匹配，在词的层面上拆分成多个token，之后生成<code>AST</code>,想了解具体的知识可以查看之前整理的<a href="https://www.jianshu.com/nb/16730099">编译器学习</a>系列，这里不展开细节。</p>
+<p><strong>流程管理文件</strong> 除了用于对源码进行具体分析的文件外，<code>lib/Parse</code>内部还包含一些流程控制文件。 通过文件<code>PersistentParserState.cpp</code>，<code>SyntaxParsingCache.cpp</code>，<code>SyntaxParsingContext.cpp</code>的命名和描述我们可以推断他们是用于对语法分析状态进行存储，缓存以及通过编译器不同条件的指令执行或者略过某些步骤的。</p>
+<h5>语法分析总结</h5>
+<p>语法分析使用以上的几种文件，对Swift源码进行逐字分析，并且可以通过编译器指令控制分析的流程和细节，词法分析生成的<code>AST</code>是不包含语义和类型信息的，也不
+包含警告和错误等信息。</p>
+<h4>Senmantic analysis：语义分析</h4>
+<p>语义分析负责接收语法分析生成的<code>AST</code>，并将其转换成格式正确，进行了全面类型检查的<code>AST</code>，并且在源码中嵌入警告和错误等信息。这些功能是在<a href="https://github.com/apple/swift/tree/master/lib/Sema">lib/Sema</a>内实现的。语义分析包含类型推断，确保可以从进行了类型检查的<code>AST</code>安全的生成代码。</p>
+<h5>lib/Sema</h5>
+<p>我们对<code>lib/Sema</code>内的结构进行一下分析：</p>
+<p><strong>CMakeLists.txt</strong></p>
+<p>语义分析的CMakeLists.txt内容如下</p>
+<div class="highlight"><pre><code><span></span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">SWIFT_FORCE_OPTIMIZED_TYPECHECKER</span><span class="p">)</span>
+<span class="w">  </span><span class="n">set</span><span class="p">(</span><span class="n">EXTRA_TYPECHECKER_FLAGS</span><span class="w"> </span><span class="s">&quot;FORCE_BUILD_OPTIMIZED&quot;</span><span class="p">)</span>
+<span class="n">endif</span><span class="p">()</span>
+<span class="err">​</span>
+<span class="n">add_swift_library</span><span class="p">(</span><span class="n">swiftSema</span><span class="w"> </span><span class="n">STATIC</span>
+<span class="w">  </span><span class="n">xxx</span><span class="p">.</span><span class="n">cpp</span>
+<span class="w">  </span><span class="p">...</span>
+<span class="w">  </span><span class="n">LINK_LIBRARIES</span>
+<span class="w">  </span><span class="n">swiftParse</span>
+<span class="w">  </span><span class="n">swiftAST</span>
+<span class="w">  </span><span class="n">swiftSerialization</span>
+<span class="w">  </span><span class="n">$</span><span class="p">{</span><span class="n">EXTRA_TYPECHECKER_FLAGS</span><span class="p">}</span>
+<span class="p">)</span>
+</code></pre></div>
+<p>和语法分析不同的是，</p>
+<ol>
+<li><p>对条件<code>SWIFT_FORCE_OPTIMIZED_TYPECHECKER</code>是否进行强制类型检查优化进行了判断，这些条件可以在终端调试时通过指令进行控制，之后我们会在<a href="https://www.jianshu.com/p/e39bd29e84c2">调试Swift编译器</a>内进行说明。</p>
+</li>
+<li><p>链接库为<code>AST</code>库，语法分析库和<code>Serialization</code>库，以及是否增加额外类型检查的标记</p>
+</li>
+</ol>
+<p><strong>语义分析文件</strong></p>
+<p><code>lib/Sema</code>内部有大量使用C和C++语言编写的分析类，语义分析因为要进行符合当前语言规则对应的检查，所以相比语法分析，文件量要大很多。</p>
+<p>我们进行粗略的归纳，可以划分为：</p>
+<h6>1. CSxxx.cpp/.h</h6>
+<p>约束系统的解决文件(solution to constraint system)</p>
+<h6>2.  xxxDiag.cpp/.h</h6>
+<p>生成诊断的文件，我们在编译过程中的诊断，用于静态代码检查的诊断都是在语义分析阶段，通过这些诊断类去管理的。</p>
+<h6>3. CodeSyncxxx.cpp/.h</h6>
+<p>用于对表达式，声明等各种类型进行语义分析的文件。</p>
+<h6>4. Constraintxxx.cpp/.h</h6>
+<p>各种约束类</p>
+<h6>5. Debugxxx.cpp/.h &amp; Instrumenterxxx.cpp/.h</h6>
+<p>用于支持调试的类</p>
+<h6>6. Derivedxxx.cpp/.h</h6>
+<p>各种协议的隐式派生实现</p>
+<h6>7. NameBinding.cpp</h6>
+<p>实现Swift的name binding</p>
+<h6>8. TypeCheckxxx.cpp/.h</h6>
+<p>对各种类型进行检查和语义分析，以及检查修正</p>
+<h6>9. 略</h6>
+<h5>语义分析总结</h5>
+<p>语义分析生成经过了类型检查的<code>AST</code>,嵌入警告和错误，以及进行类型推断。这一阶段将语法分析生成的不带有语义内容的<code>AST</code>转换成符合Swift语义规则的<code>AST</code>，这些推断和类型检查为后续的优化提供了基础。</p>
+<h4>Clang importer</h4>
+<p>这个模块用于导入Clang组件<a href="http://clang.llvm.org/docs/Modules.html">Clang modules</a>，并且将C和Objective-C输出的API对应到正确的Swift API。导入的<code>AST</code>的结果也会传递给语义分析。<a href="https://github.com/apple/swift/tree/master/lib/ClangImporter">lib/ClangImporter</a>内实现的。</p>
+<h5>lib/ClangImporter</h5>
+<p>我们分析一下lib/ClangImporter内的结构</p>
+<p><strong>CMakeLists.txt</strong></p>
+<div class="highlight"><pre><code><span></span><span class="n">set</span><span class="p">(</span><span class="n">SWIFT_GYB_FLAGS</span>
+<span class="w">  </span><span class="s">&quot;-DCFDatabaseFile=${SWIFT_SOURCE_DIR}/lib/ClangImporter/CFDatabase.def&quot;</span><span class="p">)</span>
+<span class="err">​</span>
+<span class="n">add_gyb_target</span><span class="p">(</span><span class="n">generated_sorted_cf_database</span>
+<span class="w">  </span><span class="n">SortedCFDatabase</span><span class="p">.</span><span class="n">def</span><span class="p">.</span><span class="n">gyb</span><span class="p">)</span>
+<span class="err">​</span>
+<span class="n">add_swift_library</span><span class="p">(</span><span class="n">swiftClangImporter</span><span class="w"> </span><span class="n">STATIC</span>
+<span class="w">  </span><span class="n">xxx</span><span class="p">.</span><span class="n">cpp</span>
+<span class="w">  </span><span class="n">LINK_LIBRARIES</span>
+<span class="w">  </span><span class="n">swiftAST</span>
+<span class="w">  </span><span class="n">swiftParse</span>
+<span class="p">)</span>
+<span class="err">​</span>
+<span class="cp">## This property is only set by calls to clang_tablegen. It will not be set on</span>
+<span class="cp">## standalone builds, so it can always be safely passed.</span>
+<span class="n">get_property</span><span class="p">(</span><span class="n">CLANG_TABLEGEN_TARGETS</span><span class="w"> </span><span class="n">GLOBAL</span><span class="w"> </span><span class="n">PROPERTY</span><span class="w"> </span><span class="n">CLANG_TABLEGEN_TARGETS</span><span class="p">)</span>
+<span class="n">add_dependencies</span><span class="p">(</span><span class="n">swiftClangImporter</span>
+<span class="w">  </span><span class="n">generated_sorted_cf_database</span>
+<span class="w">  </span><span class="n">$</span><span class="p">{</span><span class="n">CLANG_TABLEGEN_TARGETS</span><span class="p">})</span>
+</code></pre></div>
+<p><code>GYB</code>（Generate Your Boilerplate）指模板生成,用于添加数据库模块。</p>
+<p>链接库为<code>swiftAST</code>和<code>swiftParse</code>，<code>AST</code>和语法分析。</p>
+<p><strong>工具类</strong></p>
+<p>内容还有使用C和C++语言编写的工具类，用于方便的导入Clang实体提供正式的接口。内部的类有<code>ImportEnumInfo.cpp/.h</code>，<code>ImportName.cpp/.h</code>，<code>ImportType.cpp/.h</code>等，通过查看这些类的内容，我们发现包含<code>#include "swift/AST/ASTContext.h"</code>，<code>#include "clang/AST/ASTContext.h"</code>等内容。</p>
+<p>由此我们可以知道，Swift在使用Objective-C的代码时，通过lib/ClangImporter导入的不是Objective-C的源码，而是OC通过Clang编译器生成的<code>AST</code>.</p>
+<h5>Swfit不能使用Objective-C的宏</h5>
+<p>Swift是不同使用OC的宏的，原因如下：</p>
+<p>上面的编译器基本知识说到了，宏的展开是在编译的前一个阶段，预处理阶段进行的。在预处理阶段将宏展开之后，Clang才对代码进行编译。Swift导入的是OC代码通过Clang生成的抽象语法树，OC内的宏是未经处理的代码段，所以Swift不能使用OC的宏。</p>
+<h4>SIL generation：SIL生成</h4>
+<p><code>SIL</code>(Swift Intermediate Language)，Swift的中间语言是一个Swift特定的用于进一步分析和优化Swift代码的高级的中间语言。</p>
+<p><code>SIL</code>的生成阶段将类型检查的<code>AST</code>降级为"raw"<code>SIL</code>。这些内容是在<a href="https://github.com/apple/swift/tree/master/lib/SILGen">lib/SILGen</a>内实现的。<code>SIL</code>的设计文档为<a href="https://github.com/apple/swift/blob/master/docs/SIL.rst">docs/SIL.rst</a>。</p>
+<h5>lib/SILGen</h5>
+<p>分析组件结构：</p>
+<p><strong>CMakeLists.txt</strong></p>
+<div class="highlight"><pre><code><span></span><span class="n">add_swift_library</span><span class="p">(</span><span class="n">swiftSILGen</span><span class="w"> </span><span class="n">STATIC</span>
+<span class="w">  </span><span class="n">xxx</span><span class="p">.</span><span class="n">cpp</span>
+<span class="w">  </span><span class="p">...</span>
+<span class="w">  </span><span class="n">LINK_LIBRARIES</span>
+<span class="w">  </span><span class="n">swiftSIL</span>
+<span class="p">)</span>
+</code></pre></div>
+<p>链接库只有<code>swiftSIL</code></p>
+<p><strong>生成SIL的工具类</strong></p>
+<p>其他的<code>SILGenxxx.cpp</code>是用于生成<code>SIL</code>的工具类。</p>
+<h5>SIL详细分析</h5>
+<p><code>SIL</code>是Swift定制的中间语言，针对Swift进行了大量的优化，使得Swift性能得到提升。<code>SIL</code>也是Swift编译器的精髓所在。这一部分内容我们在<a href="https://www.jianshu.com/p/c2880460c6cd">SIL详解</a>内进行专项说明。</p>
+<h4>SIL guaranteed transformations：确保转换</h4>
+<p>该模块负责对影响程序准确性的数据流进行额外的诊断，例如使用未初始化的变量。转换的结果是生成"正式"(canonical)<code>SIL</code>。这些内容在<a href="https://github.com/apple/swift/tree/master/lib/SILOptimizer/Analysis">lib/Analysis</a>，<a href="https://github.com/apple/swift/tree/master/lib/SILOptimizer/ARC">lib/ARC</a>， <a href="https://github.com/apple/swift/tree/master/lib/SILOptimizer/LoopTransforms">lib/LoopTransforms</a>，<a href="https://github.com/apple/swift/tree/master/lib/SILOptimizer/Transforms">lib/Transforms</a>内实现。</p>
+<h4>LLVM IR Generation：生成LLVM的中间语言</h4>
+<p>该模块将<code>SIL</code>降级为<a href="http://llvm.org/docs/LangRef.html">LLVM IR</a>，LLVM的中间语言，使得<a href="http://llvm.org/">LLVM</a>在此基础上可以进行进一步的优化，并且生成机器码。这些内容是在<a href="https://github.com/apple/swift/tree/master/lib/IRGen">lib/IRGen</a>内实现的。</p>
+<h2>信息补充</h2>
+<h4>Cmake和Ninja介绍</h4>
+<p>我们这里介绍一下<a href="https://cmake.org/">CMake</a> 和 <a href="https://ninja-build.org/">Ninja</a>,对它们有个基本的认识.
+<code>CMake</code>是一个开源,跨平台的用于构建,测试和打包的软件工具.<code>CMake</code>使用简单的平台和编译器单独配置文件来控制软件的编译流程,通过生成本地makefiles文件和workspace,之后用于用户选择编译环境.</p>
+<p><code>Ninja</code>是一个小而快的构建系统.它和其他构建系统的区别主要有两点: 1.它旨在将输入文件通过高级别的构建系统来生成.2.致力于快速构建,极致的追求速度.<code>Ninja</code>意在取代在执行增量构建时非常慢的<code>Make</code>.<code>Make</code>在处理类似于Google Chrome这种单次就会编译超过30,000个输入文件的大型项目时,速度缓慢会体现的更加明显.Google Chrome是<code>Ninja</code>的主要用户,<code>Ninja</code>还支持安卓编译,也支持大部分使用LLVM的项目.</p>
+<h2>参考资料</h2>
+<ul>
+<li><a href="https://github.com/apple/swift/tree/master/docs">swift docs</a></li>
+<li><a href="https://github.com/apple/swift/blob/master/docs/CompilerPerformance.md">swift compiler performance</a></li>
+<li><a href="https://github.com/apple/swift/blob/master/docs/DebuggingTheCompiler.rst">debugging the compiler</a></li>
+<li><a href="https://zh.wikipedia.org/wiki/Make">Make</a></li>
+<li><a href="https://en.wikipedia.org/wiki/Ninja_\(build_system\">Ninja wiki</a>)</li>
+<li><a href="https://llvm.org/devmtg/2015-10/slides/GroffLattner-SILHighLevelIR.pdf">SILHighLevelIR</a></li>
+<li><a href="https://cmake.org/">CMake</a></li>
+<li><a href="https://cmake.org/cmake-tutorial/">CMake Tutorial</a></li>
+<li><a href="https://nshipster.com/swift-gyb/">nshipster gyb</a></li>
+<li><a href="https://github.com/apple/swift/blob/master/utils/gyb.py">swift gyb.py</a></li>
+</ul>
+<p><hr></p>
+<h4><p>原文出处：<a href='https://www.jianshu.com/p/c2880460c6cd' target='blank'>Swift的高级中间语言：SIL</a></p></h4>
+<h3>简介</h3>
+<p>在LLVM的<a href="https://llvm.org/devmtg/2015-10/">官方文档</a>中对Swift的编译器设计描述如下： Swift编程语言是在LLVM上构建，并且使用LLVM IR和LLVM的后端去生成代码。但是Swift编译器还包含新的高级别的中间语言，称为SIL。SIL会对Swift进行较高级别的语义分析和优化。 我们下面分析一下SIL设计的动机和SIL的应用，包括高级别的语义分析，诊断转换，<a href="http://blog.llvm.org/2017/03/devirtualization-in-llvm-and-clang.html">去虚拟化</a>，特化，引用计数优化，TBAA(<a href="https://llvm.org/docs/LangRef.html">Type Based Alias Analysis</a>)等。并且会在某些流程中加入对SIL和LLVM IR对比。</p>
+<h3>SIL介绍</h3>
+<p><code>SIL</code>是为了实现swift编程语言而设计的,包含高级语义信息的SSA格式的<a href="https://zh.wikipedia.org/zh/%E4%B8%AD%E9%96%93%E8%AA%9E%E8%A8%80">中间语言</a>.<code>SIL</code>包含以下功能:</p>
+<ul>
+<li>一系列的高级别<strong>优化保障</strong>，用于对运行时和诊断行为提供可预测的底线</li>
+<li>对swift语言<strong>数据流分析强制要求</strong>，对不满足强制要求的问题产生诊断。例如变量和结构体必须明确初始化，代码可达性即方法return的检测，switch的覆盖率</li>
+<li>确保<strong>高级别优化</strong>。包含retain/release优化，动态方法的去虚拟化(<a href="http://blog.llvm.org/2017/03/devirtualization-in-llvm-and-clang.html">devirtualization</a>，不了解虚函数可以查看之前文章<a href="https://www.jianshu.com/p/e0659093eaac">static vs dynamic dispatch</a>)，闭包内联，内存初始化提升和泛型方法实例 化.</li>
+<li>可用于分配"脆弱"<strong>内联</strong>的稳定分配格式，将Swift库组件的<strong>泛型优化</strong>为二进制。</li>
+</ul>
+<p>和LLVM IR不同,<code>SIL</code>一般是target无关的独立格式的表示,可用于代码分发.但是也可以和LLVM一样表达具体target概念. 如果想查看更多<code>SIL</code>的实现和<code>SIL</code>通道的开发信息,可以查看<a href="https://www.jianshu.com/p/8c3331e9e68a">SIL开发手册</a>（原英文文档为<a href="https://github.com/apple/swift/blob/master/docs/SILProgrammersManual.md">SILProgrammersManual.md</a>）。</p>
+<p>我们下面对Clang的Swift编译器的传递流程进行对比：</p>
+<h3>编译流程对比</h3>
+<h4>Clang编译器流程</h4>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20201125-152000-0.png" alt=""></p>
+<p>Clang编译流程存在以下问题：</p>
+<ul>
+<li>在源码和LLVM IR直接存在非常大的抽象鸿沟</li>
+<li>IR不适用对源码进行分析和检查 使用了Analysis通过CFG进行分析，分析和代码生成是两部分</li>
+<li>CFG(<a href="https://baike.baidu.com/item/CFG">控制流图</a>)不够精确</li>
+<li>CFG不是主道（hot path）</li>
+<li>在CFG和IR降级中会出现重复分析，做无用功</li>
+</ul>
+<h4>Swift编译器流程</h4>
+<p>Swift作为一个高级别和安全的语言具有以下特点：</p>
+<p><strong>高级别语言</strong></p>
+<ul>
+<li>通过代码充分的展示语言的特性</li>
+<li>支持基于协议的泛型</li>
+</ul>
+<p><strong>安全语言</strong></p>
+<ul>
+<li>充分的数据流检查：未初始化变量，函数返回处理检测，这些项在检测不合格时会产生对应的编译错误</li>
+<li>边界和溢出的检测</li>
+</ul>
+<p>Swift编译流程图如下：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20201125-152000-1.png" alt=""></p>
+<p>Swift编译器提供的<code>SIL</code>具有以下优势：</p>
+<ul>
+<li>对程序语义信息重复表示</li>
+<li>可以用于代码生成和分析 Clang不可以</li>
+<li>处于编译器的主道</li>
+<li>可以连接源码和LLVM的抽象鸿沟</li>
+</ul>
+<h3>SIL的设计</h3>
+<h4>SIL流程分析</h4>
+<p>Swift编译器作为高级编译器，具有以下严格的传递流程结构。 <strong>Swift编译器的流程如下</strong></p>
+<ul>
+<li><strong>Parse: 语法分析</strong>组件从Swift源码构成AST</li>
+<li><strong>语义分析</strong>组件对AST进行类型检查，并对其进行类型信息注释。</li>
+<li><strong>SILGen</strong>组件从AST形成"生的(raw)"SIL</li>
+<li>一系列在 <em>生</em> SIL上运行的,用于<strong>确定优化</strong>和<strong>诊断合格</strong>，对不合格的代码嵌入特定的语言诊断。这些操作一定会执行,即使在<code>-Onone</code>选项下也不例外。之后产生 <em>正式(canonical)</em> SIL.</li>
+<li>一般情况下,是否在正式<code>SIL</code>上运行<code>SIL</code>优化是可选的,这个检测可以提升结果可执行文件的性能.可以通过优化级别来控制,在<code>-Onone</code>模式下不会执行.</li>
+<li><strong>IRGen</strong>会将<code>正式SIL</code>降级为LLVM IR.</li>
+<li>LLVM后端提供LLVM优化,执行LLVM代码生成器并产生二进制码.</li>
+</ul>
+<h4>SIL操作流程分析</h4>
+<h5>SILGen</h5>
+<p><code>SILGen</code>遍历Swift进行了类型检查的AST，产生 <em>raw</em> SIL.<code>SILGen</code>产生的<code>SIL</code>格式具有如下属性:</p>
+<ul>
+<li>属性会被加载和存储在可变内存地址,而不是使用严格的<a href="https://zh.wikipedia.org/wiki/%E9%9D%99%E6%80%81%E5%8D%95%E8%B5%8B%E5%80%BC%E5%BD%A2%E5%BC%8F">SSA</a>(静态单赋值形式:每个变量仅被赋值一次)。这和Clang前端产生的繁重的LLVM IR(例如初始化<code>alloca</code>)类似。但是Swift的变量在大多数情况下使用了引用计数器,使得变量可以被retained,release和被闭包引用。</li>
+<li>数据流检测。例如明确的内存分配,方法return检查,switch覆盖等.此环节目前不是强制执行的</li>
+<li><code>transparent</code>函数优化目前未实现.</li>
+</ul>
+<p>这些特性会被接下来的<strong>确保优化</strong>和<strong>诊断检查</strong>使用，这两项在 <code>raw SIL</code>上一定会运行。</p>
+<h5>确保优化和诊断检查</h5>
+<p>在<code>SILGen</code>之后,会在<code>raw SIL</code>上运行确定顺序的优化。我们并不希望编译器产生的诊断改变编译器的进展，所以这些优化的设计是简单和可预测.</p>
+<ul>
+<li><strong>Mandatory inlining: 强制内联</strong>对于<a href="https://en.wikipedia.org/wiki/Referential_transparency">transparent</a>函数进行内联。</li>
+</ul>
+<p>透明函数即，如果一个函数只会受到入参的变化，那么这个函数每次的调用都会是相同的，同样的入参一定会返回一样的返回值，在确定入参的时候，返回值是可预测的。这样的
+函数，就可以进行内联优化。</p>
+<ul>
+<li><strong>内存提升</strong>实现分为两个优化阶段：</li>
+</ul>
+<p>将<code>alloc_box</code>结构优化为<code>alloc_stack</code></p>
+<p>提升无暴露地址(<code>non_address-exposed</code>)的<code>alloc_stack</code>说明到SSA注册.</p>
+<ul>
+<li><p><strong><a href="https://zh.wikipedia.org/wiki/%E5%B8%B8%E6%95%B8%E6%8A%98%E7%96%8A">常数传播</a>: Constant propagation</strong>折叠常量表达,繁殖常量值.如果在计算常量表达式时出现算术溢出,就会产生警告.</p>
+</li>
+<li><p><strong>返回分析</strong>查证每个方法在每个代码路径只返回一个值,并且不会在定义的末端出现无返回值的错误.如果不需要返回值的函数return了也会报错.</p>
+</li>
+<li><p><strong>临界拆分: critical edge splitting</strong>不支持任意的基础block参数通过终端进行临界拆分. 在 _Advanced Compiler Design &amp; Implementation_的第13.3章节,第407,408页这样描述临界分裂</p>
+</li>
+</ul>
+<blockquote><p>这个算法的核心作用体现为:流程图中的临界如果在流分析前被拆分的话,会使得运算更近高效. 原文: A key point in the algorithm is that it can be much more effective if the critical edges in the flowgraph have been split before the flow analysis is performed.</p>
+</blockquote>
+<p>如果诊断通道完成后,会产生<strong>规范SIL</strong>.</p>
+<ul>
+<li>泛型特化: Generic specialization</li>
+<li>在<code>-Onone</code>模式下的ARC性能优化.</li>
+</ul>
+<p>说完了处理<code>raw SIL</code>的特定流程,我们对上面提到的优化通道: <code>optimization passes</code>进行下说明.</p>
+<h5>泛型优化</h5>
+<p><code>SIL</code>获取语言特定的类型信息,使得无法在LLVM IR实现的高级优化在swift编译器中得以实现.</p>
+<ul>
+<li><strong>泛型特化</strong>分析泛型函数的特定调用,并生成新的特定版本的函数.然后将泛型的特定用法全部重写为对应的特定函数的指甲调用. 例如</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kd">func</span> <span class="nf">min</span><span class="p">&lt;</span><span class="n">T</span><span class="p">:</span> <span class="nb">Comparable</span><span class="p">&gt;(</span><span class="n">x</span><span class="p">:</span> <span class="n">T</span><span class="p">,</span> <span class="n">y</span><span class="p">:</span> <span class="n">T</span><span class="p">)</span> <span class="p">-&gt;</span> <span class="n">T</span> <span class="p">{</span>
+  <span class="k">return</span> <span class="n">y</span> <span class="o">&lt;</span> <span class="n">x</span> <span class="p">?</span> <span class="n">y</span> <span class="p">:</span> <span class="n">x</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>从普通的泛型展开</p>
+<div class="highlight"><pre><code><span></span><span class="kd">func</span> <span class="nf">min</span><span class="p">&lt;</span><span class="n">T</span><span class="p">:</span> <span class="nb">Comparable</span><span class="p">&gt;(</span><span class="n">x</span><span class="p">:</span> <span class="n">T</span><span class="p">,</span> <span class="n">y</span><span class="p">:</span> <span class="n">T</span><span class="p">,</span> <span class="n">FTable</span><span class="p">:</span> <span class="n">FunctionTable</span><span class="p">)</span> <span class="p">-&gt;</span> <span class="n">T</span> <span class="p">{</span>
+  <span class="kd">let</span> <span class="nv">xCopy</span> <span class="p">=</span> <span class="n">FTable</span><span class="p">.</span><span class="n">copy</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+  <span class="kd">let</span> <span class="nv">yCopy</span> <span class="p">=</span> <span class="n">FTable</span><span class="p">.</span><span class="n">copy</span><span class="p">(</span><span class="n">y</span><span class="p">)</span>
+  <span class="kd">let</span> <span class="nv">m</span> <span class="p">=</span> <span class="n">FTable</span><span class="p">.</span><span class="n">lessThan</span><span class="p">(</span><span class="n">yCopy</span><span class="p">,</span> <span class="n">xCopy</span><span class="p">)</span> <span class="p">?</span> <span class="n">y</span> <span class="p">:</span> <span class="n">x</span>
+  <span class="n">FTable</span><span class="p">.</span><span class="n">release</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+  <span class="n">FTable</span><span class="p">.</span><span class="n">release</span><span class="p">(</span><span class="n">y</span><span class="p">)</span>
+  <span class="k">return</span> <span class="n">m</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在确定入参类型时,比如Int,可以优化为</p>
+<div class="highlight"><pre><code><span></span><span class="kd">func</span> <span class="nf">min</span><span class="p">&lt;</span><span class="nb">Int</span><span class="p">&gt;(</span><span class="n">x</span><span class="p">:</span> <span class="nb">Int</span><span class="p">,</span> <span class="n">y</span><span class="p">:</span> <span class="nb">Int</span><span class="p">)</span> <span class="p">-&gt;</span> <span class="nb">Int</span> <span class="p">{</span>
+  <span class="k">return</span> <span class="n">y</span> <span class="o">&lt;</span> <span class="n">x</span> <span class="p">?</span> <span class="n">y</span> <span class="p">:</span> <span class="n">x</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>从而减少泛型调用的开销</p>
+<ul>
+<li><strong>witness和虚函数表的去虚拟化优化</strong>通过给定类型去查找关联的类的虚函数表或者类型的witness表,并将虚函数调用替换为调用函数映射</li>
+<li><strong>性能内联</strong></li>
+<li><strong>引用计数优化</strong></li>
+<li><strong>内存提升/优化</strong></li>
+<li><strong>高级领域特定优化</strong>swift编译器对基础的swift类型容器(类似Array或String)实现了高级优化.领域特定优化需要在标准库和优化器之间定义交互.详情可以参考 <a href="https://github.com/apple/swift/blob/master/docs/SIL.rst#id1">:ref:<code>HighLevelSILOptimizations</code></a></li>
+</ul>
+<h3>SIL语法</h3>
+<p><code>SIL</code>依赖于swift的类型系统和声明,所以<code>SIL</code>语法是swift的延伸.一个<code>.sil</code>文件是一个增加了<code>SIL</code>定义的swift源文件.swift源文件只会针对声明进行语法分析.swift的<code>func</code>方法体(除了嵌套声明)和最高阶的代码会被<code>SIL</code>语法分析器忽略.在<code>.sil</code>文件中没有隐式import.如果使用<code>swift</code>或者<code>Buildin</code>标准组件的话必须明确的引入. 以下是一个<code>.sil</code>文件的示例</p>
+<div class="highlight"><pre><code><span></span><span class="n">sil_stage</span> <span class="n">canonical</span>
+<span class="err">​</span>
+<span class="kd">import</span> <span class="nc">Swift</span>
+<span class="err">​</span>
+<span class="c1">// 定义用于SIL函数的类型</span>
+<span class="err">​</span>
+<span class="kd">struct</span> <span class="nc">Point</span> <span class="p">{</span>
+  <span class="kd">var</span> <span class="nv">x</span> <span class="p">:</span> <span class="nb">Double</span>
+  <span class="kd">var</span> <span class="nv">y</span> <span class="p">:</span> <span class="nb">Double</span>
+<span class="p">}</span>
+<span class="err">​</span>
+<span class="kd">class</span> <span class="nc">Button</span> <span class="p">{</span>
+  <span class="kd">func</span> <span class="nf">onClick</span><span class="p">()</span>
+  <span class="kd">func</span> <span class="nf">onMouseDown</span><span class="p">()</span>
+  <span class="kd">func</span> <span class="nf">onMouseUp</span><span class="p">()</span>
+<span class="p">}</span>
+<span class="err">​</span>
+<span class="c1">// 定义一个swift函数,函数体会被SIL忽略</span>
+<span class="kd">func</span> <span class="nf">taxicabNorm</span><span class="p">(</span><span class="kc">_</span> <span class="n">a</span><span class="p">:</span><span class="n">Point</span><span class="p">)</span> <span class="p">-&gt;</span> <span class="nb">Double</span> <span class="p">{</span>
+  <span class="k">return</span> <span class="n">a</span><span class="p">.</span><span class="n">x</span> <span class="o">+</span> <span class="n">a</span><span class="p">.</span><span class="n">y</span>
+<span class="p">}</span>
+<span class="err">​</span>
+<span class="c1">// 定义一个SIL函数</span>
+<span class="c1">// @_T5norms11taxicabNormfT1aV5norms5Point_Sd 是swift函数名taxicabNorm重整之后的命名</span>
+<span class="n">sil</span> <span class="p">@</span><span class="n">_T5norms11taxicabNormfT1aV5norms5Point_Sd</span> <span class="p">:</span> <span class="err">$</span><span class="p">(</span><span class="n">Point</span><span class="p">)</span> <span class="p">-&gt;</span> <span class="nb">Double</span> <span class="p">{</span>
+<span class="n">bb0</span><span class="p">(</span><span class="o">%</span><span class="mi">0</span> <span class="p">:</span> <span class="err">$</span><span class="n">Point</span><span class="p">):</span>
+  <span class="c1">// func Swift.+(Double, Double) -&gt; Double</span>
+  <span class="o">%</span><span class="mi">1</span> <span class="p">=</span> <span class="n">function_ref</span> <span class="p">@</span><span class="n">_Tsoi1pfTSdSd_Sd</span>
+  <span class="o">%</span><span class="mi">2</span> <span class="p">=</span> <span class="n">struct_extract</span> <span class="o">%</span><span class="mi">0</span> <span class="p">:</span> <span class="err">$</span><span class="n">Point</span><span class="p">,</span> <span class="p">#</span><span class="n">Point</span><span class="p">.</span><span class="n">x</span>    <span class="c1">//萃取Point结构体内的x</span>
+  <span class="o">%</span><span class="mi">3</span> <span class="p">=</span> <span class="n">struct_extract</span> <span class="o">%</span><span class="mi">0</span> <span class="p">:</span> <span class="err">$</span><span class="n">Point</span><span class="p">,</span> <span class="p">#</span><span class="n">Point</span><span class="p">.</span><span class="n">y</span>    <span class="c1">////萃取Point结构体内的y</span>
+  <span class="o">%</span><span class="mi">4</span> <span class="p">=</span> <span class="n">apply</span> <span class="o">%</span><span class="mi">1</span><span class="p">(</span><span class="o">%</span><span class="mi">2</span><span class="p">,</span> <span class="o">%</span><span class="mi">3</span><span class="p">)</span> <span class="p">:</span> <span class="err">$</span><span class="p">(</span><span class="nb">Double</span><span class="p">,</span> <span class="nb">Double</span><span class="p">)</span> <span class="p">-&gt;</span> <span class="nb">Double</span>  <span class="c1">//冒号前为计算体实现通过引用的展开,冒号后为类型说明</span>
+  <span class="k">return</span> <span class="o">%</span><span class="mi">4</span> <span class="p">:</span> <span class="nb">Double</span>  <span class="c1">//返回值</span>
+<span class="p">}</span>
+<span class="err">​</span>
+<span class="c1">// 定义一个SIL虚函数表,匹配的是动态分派中函数实现的id,这个动态分派是在已知的静态类的类型虚函数表中</span>
+<span class="n">sil_vtable</span> <span class="n">Button</span> <span class="p">{</span>
+  <span class="p">#</span><span class="n">Button</span><span class="p">.</span><span class="n">onClick</span><span class="p">!</span><span class="mi">1</span><span class="p">:</span> <span class="p">@</span><span class="n">_TC5norms6Button7onClickfS0_FT_T_</span>
+  <span class="p">#</span><span class="n">Button</span><span class="p">.</span><span class="n">onMouseDown</span><span class="p">!</span><span class="mi">1</span><span class="p">:</span> <span class="p">@</span><span class="n">_TC5norms6Button11onMouseDownfS0_FT_T_</span>
+  <span class="p">#</span><span class="n">Button</span><span class="p">.</span><span class="n">onMouseUp</span><span class="p">!</span><span class="mi">1</span><span class="p">:</span> <span class="p">@</span><span class="n">_TC5norms6Button9onMouseUpfS0_FT_T_</span>
+<span class="p">}</span>
+</code></pre></div>
+<h4>SIL阶段</h4>
+<div class="highlight"><pre><code><span></span><span class="n">decl</span> <span class="p">::=</span> <span class="n">sil</span><span class="o">-</span><span class="n">stage</span><span class="o">-</span><span class="n">decl</span>
+<span class="n">sil</span><span class="o">-</span><span class="n">stage</span><span class="o">-</span><span class="n">decl</span> <span class="p">::=</span> <span class="err">&#39;</span><span class="n">sil_stage</span><span class="err">&#39;</span> <span class="n">sil</span><span class="o">-</span><span class="n">stage</span>
+<span class="err">​</span>
+<span class="n">sil</span><span class="o">-</span><span class="n">stage</span> <span class="p">::=</span> <span class="err">&#39;</span><span class="n">raw</span><span class="err">&#39;</span>
+<span class="n">sil</span><span class="o">-</span><span class="n">stage</span> <span class="p">::=</span> <span class="err">&#39;</span><span class="n">canonical</span><span class="err">&#39;</span>
+</code></pre></div>
+<p>基于操作的不同阶段,<code>SIL</code>拥有不同的声明.</p>
+<ul>
+<li><strong>Raw SIL</strong>, _生的SIL_是通过<code>SILGen</code>产生的,并未经过保证优化或者诊断通道.<code>Raw SIL</code>可能没有完善结构的SSA图表.可能会包含数据流错误.一些说明可能会以非规范的方式展示,例如无地址的<code>assign</code>和<code>destory_addr</code>的数值.<code>Raw SIL</code>不应该用于本地代码的生成或分发.</li>
+<li><strong>Canonical SIL</strong>,规范SIL是在保证优化和诊断之后的<code>SIL</code>.数据流错误必须被消除掉,肯定说明也必须被规范化为更简单的形式.性能优化和本地代码是生成都是从这种格式衍生的.包含这种格式<code>SIL</code>的组件可以被分发. <code>SIL</code>文件通过在顶部声明<code>sil_stage raw</code> 或 <code>sil_stage canonical</code>来说明当前的操作阶段.一个文件之后出现一种阶段的声明.</li>
+</ul>
+<h4>SIL类型</h4>
+<div class="highlight"><pre><code><span></span><span class="n">sil</span><span class="o">-</span><span class="n">type</span> <span class="p">::=</span> <span class="err">&#39;</span><span class="o">/</span><span class="n">pre</span><span class="p">&gt;</span> <span class="err">&#39;</span><span class="o">*</span><span class="err">&#39;</span><span class="p">?</span> <span class="n">generic</span><span class="o">-</span><span class="n">parameter</span><span class="o">-</span><span class="n">list</span><span class="p">?</span> <span class="n">type</span>
+</code></pre></div>
+<p><code>SIL</code>的类型是通过<code>$</code>符号进行标记的。<code>SIL</code>的类型系统和swift的密切相关.所以<code>$</code>之后的类型会根据swift的类型语法进行语法分析。</p>
+<h5>类型降级: type lowering</h5>
+<p>swift的正式类型系统,倾向于对大量的类型信息进行抽象概括.但是<code>SIL</code>目标是展示更多的实现细节,这个区别也体现在<code>SIL</code>的类型系统中.所以把正式类型降级为较低类型的操作称为类型降级。</p>
+<h5>提取区别:Abstraction Difference</h5>
+<p>包含未约束类型的通用函数一定会被非直接调用.比如分配充足内存和创建地址指针指向这块地址。如下的泛型函数</p>
+<div class="highlight"><pre><code><span></span><span class="kd">func</span> <span class="nf">generateArray</span><span class="p">&lt;</span><span class="n">T</span><span class="p">&gt;(</span><span class="n">n</span> <span class="p">:</span> <span class="nb">Int</span><span class="p">,</span> <span class="n">generator</span> <span class="p">:</span> <span class="p">()</span> <span class="p">-&gt;</span> <span class="n">T</span><span class="p">)</span> <span class="p">-&gt;</span> <span class="p">[</span><span class="n">T</span><span class="p">]</span>
+</code></pre></div>
+<p>函数<code>generator</code>会通过一个隐式指针,指向存储在一个非直接调用的地址中,(可以参考之前<a href="https://www.jianshu.com/p/e0659093eaac">static vs dynamic dispatch</a>中虚函数表的设计和实现).在处理任意类型值时操作都是一样的.</p>
+<ul>
+<li>我们不希望对<code>generateArray</code>的每个<code>T</code>的类型去产生一个新的拷贝</li>
+<li>我们不希望对每个类型进行普遍声明</li>
+<li>我们不希望通过<code>T</code>的类型动态的去构造对于<code>genetator</code>的调用</li>
+</ul>
+<p>但是我们也不希望现有的通用系统对我们的非通用代码进行低效处理。例如，我们希望<code>()-&gt;Int</code>可以直接返回结果。但是<code>()-&gt;Int</code>是<code>()-&gt;T</code>的代替(subsitution)，对于<code>generateArray&lt;Int&gt;</code>的调用应该向generator传递<code>()-&gt;Int</code>。所以一个正式类型在通用上下文中的表现可能会因为正式类型的的代替而不同.我们将这种不同成为提取区别.</p>
+<p><code>SIL</code>对于类型的提取区别的设计是，在每个级别的代替中，提取数值都可以被使用。</p>
+<p>为了可以实现如上设计,泛型实例的正式类型应该一直使用非替换正式类型的提取方式进行降级.例如</p>
+<div class="highlight"><pre><code><span></span><span class="kd">struct</span> <span class="nc">Generator</span><span class="p">&lt;</span><span class="n">T</span><span class="p">&gt;</span> <span class="p">{</span>
+  <span class="kd">var</span> <span class="nv">fn</span> <span class="p">:</span> <span class="p">()</span> <span class="p">-&gt;</span> <span class="n">T</span>
+<span class="p">}</span>
+<span class="kd">var</span> <span class="nv">intGen</span> <span class="p">:</span> <span class="n">Generator</span><span class="p">&lt;</span><span class="nb">Int</span><span class="p">&gt;</span>
+</code></pre></div>
+<p>其中<code>intGen.fn</code>拥有代替类型<code>()-&gt;Int</code>，可以被降级为<code>@callee_owned () -&gt; Int</code>，可以直接返回结果.但是如果更恰当的使用非代替方式，<code>()-&gt;T</code>就会变成<code>@callee_owned () -&gt; @out Int</code></p>
+<p>当使用非代替的提取方式进行类型降级时，可以看做将拥有相同构造的类型中的具体类型替换为现有类型,以此来实现类型降级. 对于<code>g</code>
+的<code>Generator&lt;(Int, Int) -&gt; Float&gt;</code>,<code>g.fn</code>是使用<code>()-&gt;T</code>进行降级的，简单理解就是,类型是否是具体类型,如果是,才能进行提取方式进行降级,不然只能产生</p>
+<div class="highlight"><pre><code><span></span><span class="p">@</span><span class="n">callee_owned</span> <span class="p">()</span> <span class="p">-&gt;</span> <span class="p">@</span><span class="n">owned</span> <span class="p">@</span><span class="n">callee_owned</span> <span class="p">(@</span><span class="k">in</span> <span class="p">(</span><span class="nb">Int</span><span class="p">,</span> <span class="nb">Int</span><span class="p">))</span> <span class="p">-&gt;</span> <span class="p">@</span><span class="n">out</span> <span class="nb">Float</span><span class="p">.</span>
+</code></pre></div>
+<p>所以提取区别来代替通用函数中类型的标准是:是否是具体类型.<code>is materializable or not</code>这个系统具有通过重复代替的方式实现提取方式的属性.所以可以把降级的类型看做提取方式的编码. <code>SILGen</code>已经拥有了使用提取方式转换类型的工序. 目前只有函数和元祖类型会通过提取区别进行改变.</p>
+<h4>合法的SIL类型</h4>
+<p><code>SIL</code>类型的值应该是这样的:</p>
+<ul>
+<li>可被加载的SIL类型,<code>$T</code></li>
+<li>合法SIL类型的地址<code>$*T</code> 或者如果<code>T</code>是一个合法的SIL类型需要满足以下条件 不展开,需要查看<a href="https://github.com/apple/swift/blob/master/docs/SIL.rst#syntax">SIL语法</a>中的<code>Legal SIL Types</code></li>
+</ul>
+<p>类型<code>T</code>满足一下条件才是一个合法的_SIL_类型</p>
+<ul>
+<li>函数类型符合<code>SIL</code>的约束条件</li>
+<li>metatype可以描述功能</li>
+<li>原组的内部元素，类型也是合法的<code>SIL</code>类型</li>
+<li>可选<code>Optional&lt;U&gt;</code>,<code>U</code>也是合法类型</li>
+<li>非函数，原组，可选类型，metatype,或者l-value类型的合法的Swift类型</li>
+<li>包含合法类型的<code>@box</code></li>
+</ul>
+<p>注意，在递归条件内的类型，还需要是正式类型。例如泛型内的参数，仍然是Swift类型，而不是<code>SIL</code>降级类型。</p>
+<h5>地址类型</h5>
+<p>地址类型<code>$*T</code>指针指向的是任意引用的值或者<code>$T</code>。<br>
+地址不是引用计数指针，不能被retained或released。</p>
+<h5>Box类型</h5>
+<p>本地变量和非直接的数值类型都是存储在堆上的，<code>@box T</code>是一个引用计数类型，指向的是包含了多种<code>T</code>的盒子。盒子使用的是Swift的原生引用计数。</p>
+<h5>Metatype类型</h5>
+<p><code>SIL</code>内的metatype类型必须描述自身表示：</p>
+<ul>
+<li><code>@thin</code> 意思是不需要内存</li>
+<li><code>@thick</code> 指存储的是类型的引用或类型子类的引用</li>
+<li><code>@objc</code> 指存储的是一个OC类对象的表示而不是Swift类型对象。</li>
+</ul>
+<h5>函数类型</h5>
+<p><code>SIL</code>中的函数类型和Swift中的函数类型有以下区别：</p>
+<ul>
+<li><code>SIL</code>函数可能是泛型。例如，通过<code>function_ref</code>返回一个泛型函数类型。</li>
+<li><code>SIL</code>函数可以声明为<code>@noescape</code>。<code>@noescape</code>函数类型必须是<code>convention(thin)</code>或者<code>@callee_guatanteed</code>。</li>
+<li><code>SIL</code>函数类型声明了以下几种处理上下文的情景：<ul>
+<li><code>@convention(thin)</code>不要求上下文。这种类型也可以通过<code>@noescape</code>声明。</li>
+<li><code>@callee_guatanteed</code>会被认为直接参数。也意味着<code>convention(thick)</code>。</li>
+<li><code>@callee_owned</code>上下文值被认为是不拥有的直接参数。也意味着<code>convention(thick)</code>。</li>
+<li><code>@convention(block)</code>上下文值被认为是不拥有的直接参数。</li>
+<li>其他函数类型会被描述为<code>Properties of Types</code> 和 <code>Calling Convention</code></li>
+</ul>
+</li>
+<li><code>SIL</code>函数必须声明参数的协议。非直接的参数类型是<code>*T</code>,直接参数类型是<code>T</code><ul>
+<li><code>@in</code>是非直接参数。地址必须是已经初始化的对象，函数负责销毁内部持有的值。</li>
+<li><code>@inout</code>是非直接参数。内存必须是已经初始化的对象。在函数返回之前，必须保证内存是被初始化的。</li>
+</ul>
+</li>
+<li><code>SIL</code>函数需要声明返回值的协议。<ul>
+<li><code>@out</code>是非直接的结果。地址必须是未初始化的对象。</li>
+</ul>
+</li>
+</ul>
+<h4>VTables</h4>
+<div class="highlight"><pre><code><span></span><span class="p">&lt;</span><span class="n">pre</span> <span class="n">spellcheck</span><span class="p">=</span><span class="s">&quot;false&quot;</span> <span class="kd">class</span><span class="p">=</span><span class="s">&quot;md-fences md-end-block ty-contain-cm decl ::= sil-vtable</span>
+<span class="s">sil-vtable ::= &#39;sil_vtable&#39; identifier &#39;{&#39; sil-vtable-entry* &#39;}&#39;</span>
+<span class="s">​</span>
+<span class="s">sil-vtable-entry ::= sil-decl-ref &#39;:&#39; sil-linkage? sil-function-name</span>
+</code></pre></div>
+<p><code>SIL</code>使用<a href="https://github.com/apple/swift/blob/2ddc92a51a4c6d216a9b2dc3a2e41e9b592afbdf/docs/SIL.rst#class-method">class_method</a>, <a href="https://github.com/apple/swift/blob/2ddc92a51a4c6d216a9b2dc3a2e41e9b592afbdf/docs/SIL.rst#super-method">super_method</a>, <a href="https://github.com/apple/swift/blob/2ddc92a51a4c6d216a9b2dc3a2e41e9b592afbdf/docs/SIL.rst#objc-method">objc_method</a>,和 <a href="https://github.com/apple/swift/blob/2ddc92a51a4c6d216a9b2dc3a2e41e9b592afbdf/docs/SIL.rst#objc-super-method">objc_super_method</a>来表示类方法的动态分派<code>dynamic dispatch</code> <a href="https://github.com/apple/swift/blob/2ddc92a51a4c6d216a9b2dc3a2e41e9b592afbdf/docs/SIL.rst#class-method">class_method</a> 和 <a href="https://github.com/apple/swift/blob/2ddc92a51a4c6d216a9b2dc3a2e41e9b592afbdf/docs/SIL.rst#super-method">super_method</a>的实现是通过<code>sil_vtable</code>进行追踪的.<code>sil_vtable</code>的声明包含一个类的所有方法.</p>
+<div class="highlight"><pre><code><span></span><span class="kd">class</span> <span class="nc">A</span> <span class="p">{</span>
+  <span class="kd">func</span> <span class="nf">foo</span><span class="p">()</span>
+  <span class="kd">func</span> <span class="nf">bar</span><span class="p">()</span>
+  <span class="kd">func</span> <span class="nf">bas</span><span class="p">()</span>
+<span class="p">}</span>
+<span class="err">​</span>
+<span class="n">sil</span> <span class="p">@</span><span class="n">A_foo</span> <span class="p">:</span> <span class="err">$</span><span class="p">@</span><span class="n">convention</span><span class="p">(</span><span class="n">thin</span><span class="p">)</span> <span class="p">(@</span><span class="n">owned</span> <span class="n">A</span><span class="p">)</span> <span class="p">-&gt;</span> <span class="p">()</span>
+<span class="n">sil</span> <span class="p">@</span><span class="n">A_bar</span> <span class="p">:</span> <span class="err">$</span><span class="p">@</span><span class="n">convention</span><span class="p">(</span><span class="n">thin</span><span class="p">)</span> <span class="p">(@</span><span class="n">owned</span> <span class="n">A</span><span class="p">)</span> <span class="p">-&gt;</span> <span class="p">()</span>
+<span class="n">sil</span> <span class="p">@</span><span class="n">A_bas</span> <span class="p">:</span> <span class="err">$</span><span class="p">@</span><span class="n">convention</span><span class="p">(</span><span class="n">thin</span><span class="p">)</span> <span class="p">(@</span><span class="n">owned</span> <span class="n">A</span><span class="p">)</span> <span class="p">-&gt;</span> <span class="p">()</span>
+<span class="err">​</span>
+<span class="n">sil_vtable</span> <span class="n">A</span> <span class="p">{</span>
+  <span class="p">#</span><span class="n">A</span><span class="p">.</span><span class="n">foo</span><span class="p">!</span><span class="mi">1</span><span class="p">:</span> <span class="p">@</span><span class="n">A_foo</span>
+  <span class="p">#</span><span class="n">A</span><span class="p">.</span><span class="n">bar</span><span class="p">!</span><span class="mi">1</span><span class="p">:</span> <span class="p">@</span><span class="n">A_bar</span>
+  <span class="p">#</span><span class="n">A</span><span class="p">.</span><span class="n">bas</span><span class="p">!</span><span class="mi">1</span><span class="p">:</span> <span class="p">@</span><span class="n">A_bas</span>
+<span class="p">}</span>
+<span class="err">​</span>
+<span class="kd">class</span> <span class="nc">B</span> <span class="p">:</span> <span class="n">A</span> <span class="p">{</span>
+  <span class="kd">func</span> <span class="nf">bar</span><span class="p">()</span>
+<span class="p">}</span>
+<span class="err">​</span>
+<span class="n">sil</span> <span class="p">@</span><span class="n">B_bar</span> <span class="p">:</span> <span class="err">$</span><span class="p">@</span><span class="n">convention</span><span class="p">(</span><span class="n">thin</span><span class="p">)</span> <span class="p">(@</span><span class="n">owned</span> <span class="n">B</span><span class="p">)</span> <span class="p">-&gt;</span> <span class="p">()</span>
+<span class="err">​</span>
+<span class="n">sil_vtable</span> <span class="n">B</span> <span class="p">{</span>
+  <span class="p">#</span><span class="n">A</span><span class="p">.</span><span class="n">foo</span><span class="p">!</span><span class="mi">1</span><span class="p">:</span> <span class="p">@</span><span class="n">A_foo</span>
+  <span class="p">#</span><span class="n">A</span><span class="p">.</span><span class="n">bar</span><span class="p">!</span><span class="mi">1</span><span class="p">:</span> <span class="p">@</span><span class="n">B_bar</span>
+  <span class="p">#</span><span class="n">A</span><span class="p">.</span><span class="n">bas</span><span class="p">!</span><span class="mi">1</span><span class="p">:</span> <span class="p">@</span><span class="n">A_bas</span>
+<span class="p">}</span>
+<span class="err">​</span>
+<span class="kd">class</span> <span class="nc">C</span> <span class="p">:</span> <span class="n">B</span> <span class="p">{</span>
+  <span class="kd">func</span> <span class="nf">bas</span><span class="p">()</span>
+<span class="p">}</span>
+<span class="err">​</span>
+<span class="n">sil</span> <span class="p">@</span><span class="n">C_bas</span> <span class="p">:</span> <span class="err">$</span><span class="p">@</span><span class="n">convention</span><span class="p">(</span><span class="n">thin</span><span class="p">)</span> <span class="p">(@</span><span class="n">owned</span> <span class="n">C</span><span class="p">)</span> <span class="p">-&gt;</span> <span class="p">()</span>
+<span class="err">​</span>
+<span class="n">sil_vtable</span> <span class="n">C</span> <span class="p">{</span>
+  <span class="p">#</span><span class="n">A</span><span class="p">.</span><span class="n">foo</span><span class="p">!</span><span class="mi">1</span><span class="p">:</span> <span class="p">@</span><span class="n">A_foo</span>
+  <span class="p">#</span><span class="n">A</span><span class="p">.</span><span class="n">bar</span><span class="p">!</span><span class="mi">1</span><span class="p">:</span> <span class="p">@</span><span class="n">B_bar</span>
+  <span class="p">#</span><span class="n">A</span><span class="p">.</span><span class="n">bas</span><span class="p">!</span><span class="mi">1</span><span class="p">:</span> <span class="p">@</span><span class="n">C_bas</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>swift的AST包含重载关系,可以用于在<code>SIL</code>的虚函数表中查找衍生类重载方法. 为了避免<code>SIL</code>方法是<a href="https://en.wikipedia.org/wiki/Thunk_\(programming\">thunks</a>),方法名是连接在原始方法实现之前.</p>
+<h4>Witness Tables</h4>
+<div class="highlight"><pre><code><span></span><span class="n">decl</span> <span class="p">::=</span> <span class="n">sil</span><span class="o">-</span><span class="n">witness</span><span class="o">-</span><span class="n">table</span>
+<span class="n">sil</span><span class="o">-</span><span class="n">witness</span><span class="o">-</span><span class="n">table</span> <span class="p">::=</span> <span class="err">&#39;</span><span class="n">sil_witness_table</span><span class="err">&#39;</span> <span class="n">sil</span><span class="o">-</span><span class="n">linkage</span><span class="p">?</span>
+  <span class="n">normal</span><span class="o">-</span><span class="kd">protocol</span><span class="o">-</span><span class="n">conformance</span> <span class="err">&#39;</span><span class="p">{</span><span class="err">&#39;</span> <span class="n">sil</span><span class="o">-</span><span class="n">witness</span><span class="o">-</span><span class="n">entry</span><span class="o">*</span> <span class="err">&#39;</span><span class="p">}</span><span class="err">&#39;</span>
+</code></pre></div>
+<p><code>SIL</code>将通用类型动态分派所需的信息编码为witness表.这些信息用于在生成二进制码时产生运行时分配表(runtime dispatch table).也可以用于对特定通用函数的<code>SIL</code>优化.每个明确的一致性声明都会产生witness表.通用类型的所有实例共享一个通用witness表.衍生类会继承基类的witness表.</p>
+<div class="highlight"><pre><code><span></span><span class="kd">protocol</span><span class="o">-</span><span class="n">conformance</span> <span class="p">::=</span> <span class="n">normal</span><span class="o">-</span><span class="kd">protocol</span><span class="o">-</span><span class="n">conformance</span>
+<span class="kd">protocol</span><span class="o">-</span><span class="n">conformance</span> <span class="p">::=</span> <span class="err">&#39;</span><span class="n">inherit</span><span class="err">&#39;</span> <span class="err">&#39;</span><span class="p">(</span><span class="err">&#39;</span> <span class="kd">protocol</span><span class="o">-</span><span class="n">conformance</span> <span class="err">&#39;</span><span class="p">)</span><span class="err">&#39;</span>
+<span class="kd">protocol</span><span class="o">-</span><span class="n">conformance</span> <span class="p">::=</span> <span class="err">&#39;</span><span class="n">specialize</span><span class="err">&#39;</span> <span class="err">&#39;</span><span class="o">&lt;</span><span class="err">&#39;</span> <span class="n">substitution</span><span class="o">*</span> <span class="err">&#39;</span><span class="o">&gt;</span><span class="err">&#39;</span>
+  <span class="err">&#39;</span><span class="p">(</span><span class="err">&#39;</span> <span class="kd">protocol</span><span class="o">-</span><span class="n">conformance</span> <span class="err">&#39;</span><span class="p">)</span><span class="err">&#39;</span>
+<span class="kd">protocol</span><span class="o">-</span><span class="n">conformance</span> <span class="p">::=</span> <span class="err">&#39;</span><span class="n">dependent</span><span class="err">&#39;</span>
+<span class="n">normal</span><span class="o">-</span><span class="kd">protocol</span><span class="o">-</span><span class="n">conformance</span> <span class="p">::=</span> <span class="n">identifier</span> <span class="err">&#39;</span><span class="p">:</span><span class="err">&#39;</span> <span class="n">identifier</span> <span class="err">&#39;</span><span class="n">module</span><span class="err">&#39;</span> <span class="n">identifier</span>
+</code></pre></div>
+<p>witness的关键在于协议一致性.它是对于具体类型协议一致性的唯一标识.</p>
+<ul>
+<li>标准的协议一致性命名了一种协议方法需要遵守的类型.属于该类型或扩展的组件,需要提供遵守协议方法的声明</li>
+<li>如果派生类实现了基类遵守的协议,会体现为继承协议一致性,简单引用基类的协议一致性即可.</li>
+<li>如果通用类型的实例遵守一个协议,是通过特定遵守的方式去实现的.这种方式向标准一致性提供了用于通用类型的通用参数构建. <code>witness table</code>只会直接关联标准一致性.继承和特定一致性是在标准一致性下的间接引用.</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">sil</span><span class="o">-</span><span class="n">witness</span><span class="o">-</span><span class="n">entry</span> <span class="p">::=</span> <span class="err">&#39;</span><span class="n">base_protocol</span><span class="err">&#39;</span> <span class="n">identifier</span> <span class="err">&#39;</span><span class="p">:</span><span class="err">&#39;</span> <span class="kd">protocol</span><span class="o">-</span><span class="n">conformance</span>
+<span class="n">sil</span><span class="o">-</span><span class="n">witness</span><span class="o">-</span><span class="n">entry</span> <span class="p">::=</span> <span class="err">&#39;</span><span class="n">method</span><span class="err">&#39;</span> <span class="n">sil</span><span class="o">-</span><span class="n">decl</span><span class="o">-</span><span class="n">ref</span> <span class="err">&#39;</span><span class="p">:</span><span class="err">&#39;</span> <span class="n">sil</span><span class="o">-</span><span class="n">function</span><span class="o">-</span><span class="n">name</span>
+<span class="n">sil</span><span class="o">-</span><span class="n">witness</span><span class="o">-</span><span class="n">entry</span> <span class="p">::=</span> <span class="err">&#39;</span><span class="n">associated_type</span><span class="err">&#39;</span> <span class="n">identifier</span>
+<span class="n">sil</span><span class="o">-</span><span class="n">witness</span><span class="o">-</span><span class="n">entry</span> <span class="p">::=</span> <span class="err">&#39;</span><span class="n">associated_type_protocol</span><span class="err">&#39;</span>
+  <span class="err">&#39;</span><span class="p">(</span><span class="err">&#39;</span> <span class="n">identifier</span> <span class="err">&#39;</span><span class="p">:</span><span class="err">&#39;</span> <span class="n">identifier</span> <span class="err">&#39;</span><span class="p">)</span><span class="err">&#39;</span> <span class="err">&#39;</span><span class="p">:</span><span class="err">&#39;</span> <span class="kd">protocol</span><span class="o">-</span><span class="n">conformance</span>
+</code></pre></div>
+<p><code>witness table</code>由以下内容构成</p>
+<ul>
+<li>基协议项提供的对于协议一致性的引用,可以用于witness协议的继承协议</li>
+<li>方法项将协议中要求方法映射为<code>SIL</code>中实现了witness类型的方法.每个方法项必须对应witness协议中的要求方法</li>
+<li>_associate type_关联类型项将必须实现的协议方法中的关联类型映射为符合witness的类型.注意witness类似是一个资源级别的swift类型,不是<code>SIL</code>类型(上面分析过<code>SIL</code>类型和swift类型的区别).关联类型项必须覆盖witness协议中的所有强制关联项.</li>
+<li>关联类型协议项将关联类型中的协议映射为关联类型的协议一致性.</li>
+</ul>
+<h6>witness table作用</h6>
+<p>swift中的协议是通过结构体实现的,可以支持交互.例如参数,属性都可以是结构体.当将结构体传递给协议参数时,结构体特定的部分可能会丢失(在编译期).协议的witness table就可以发挥作用(在运行时).</p>
+<h4>Default Witness Tables</h4>
+<div class="highlight"><pre><code><span></span><span class="n">decl</span> <span class="p">::=</span> <span class="n">sil</span><span class="o">-</span><span class="k">default</span><span class="o">-</span><span class="n">witness</span><span class="o">-</span><span class="n">table</span>
+<span class="n">sil</span><span class="o">-</span><span class="k">default</span><span class="o">-</span><span class="n">witness</span><span class="o">-</span><span class="n">table</span> <span class="p">::=</span> <span class="err">&#39;</span><span class="n">sil_default_witness_table</span><span class="err">&#39;</span>
+  <span class="n">identifier</span> <span class="n">minimum</span><span class="o">-</span><span class="n">witness</span><span class="o">-</span><span class="n">table</span><span class="o">-</span><span class="n">size</span>
+  <span class="err">&#39;</span><span class="p">{</span><span class="err">&#39;</span> <span class="n">sil</span><span class="o">-</span><span class="k">default</span><span class="o">-</span><span class="n">witness</span><span class="o">-</span><span class="n">entry</span><span class="o">*</span> <span class="err">&#39;</span><span class="p">}</span><span class="err">&#39;</span>
+<span class="n">minimum</span><span class="o">-</span><span class="n">witness</span><span class="o">-</span><span class="n">table</span><span class="o">-</span><span class="n">size</span> <span class="p">::=</span> <span class="n">integer</span>
+</code></pre></div>
+<p><code>SIL</code>编码要求默认witness table有开放(resilient)的默认实现.包含以下条件</p>
+<ul>
+<li>强制方法有默认实现</li>
+<li>不是协议中最后一个默认方法或继承的强制方法,都有开放的默认实现.</li>
+</ul>
+<p>强制方法的开放的默认实现,存储在协议的元数据中. 默认witness表关键在在自身协议.只有公共可见协议才需要默认witness表.私有协议和内部协议是对外部组件不可见的,所以他们没有增加新的强制方法的开放性问题.</p>
+<div class="highlight"><pre><code><span></span><span class="n">sil</span><span class="o">-</span><span class="k">default</span><span class="o">-</span><span class="n">witness</span><span class="o">-</span><span class="n">entry</span> <span class="p">::=</span> <span class="err">&#39;</span><span class="n">method</span><span class="err">&#39;</span> <span class="n">sil</span><span class="o">-</span><span class="n">decl</span><span class="o">-</span><span class="n">ref</span> <span class="err">&#39;</span><span class="p">:</span><span class="err">&#39;</span> <span class="n">sil</span><span class="o">-</span><span class="n">function</span><span class="o">-</span><span class="n">name</span>
+</code></pre></div>
+<p>默认witness表目前只包含一项内容</p>
+<ul>
+<li>方法像,将协议中的要求方法映射到<code>SIL</code>中实现了管理所有witness类型的方法.</li>
+</ul>
+<h4>全局变量</h4>
+<h3>数据流错误</h3>
+<p>数据流错误可能存在于<code>Raw SIL</code>中,swift从语义上将那些条件定义为错误,所以他们必须使用诊断通道进行诊断,并且不能存在于规范SIL中.<strong>定义初始化</strong> swift要求所有的本地变量在使用前必须被初始化.在构造函数中,结构体,枚举或类类型的实例变量必须在对象被使用前初始化.<strong>未全面覆盖(unreachable)的控制流</strong> <code>unreachable</code>在<code>raw SIL</code>中生成,标记错误的控制流.例如对于非<code>Void</code>的函数没有返回值,或者<code>switch</code>没有完全覆盖所有的条件.这种<code>dead code</code>消解的保证,可以避免<code>unreachable</code>的基础block,也可以避免方法返回不合法的空类型.</p>
+<h3>运行时错误</h3>
+<p>一些操作,比如无条件的<a href="https://github.com/apple/swift/blob/master/docs/SIL.rst#checked-conversions">检查转换次数</a>失败或者编译器<code>Buildin.trap</code>.都会引起运行时错误,这种错误会无条件的终止当前操作.如果可以检验运行时错误会发生或者已经发生.只要将它们排列到程序操作之后就可以将这些运行时错误重新安排.例如对于没有确定开始和结尾的for循环代码</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// Given unknown start and end values, this loop may overflow</span>
+<span class="k">for</span> <span class="kd">var</span> <span class="nv">i</span> <span class="p">=</span> <span class="n">unknownStartValue</span><span class="p">;</span> <span class="n">i</span> <span class="o">!=</span> <span class="n">unknownEndValue</span><span class="p">;</span> <span class="o">++</span><span class="n">i</span> <span class="p">{</span>
+  <span class="p">...</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>会将内存溢出挂起,产生loop的关联运行时错误,之后检测循环的起始和结束点.只要循环体对于当前的操作没有可见影响即可.</p>
+<h3>未定义的行为</h3>
+<p>某些操作的错误使用成为未定义行为.例如对于<code>Buildin.RawPointer</code>的不可用未检测的类型转换.或者使用低于LLVM说明的编译器内建函数,调用当前LLVM不支持的行为.<code>SIL</code>程序中的未定义行为是无意义的,就像C中的未定义行为一样,没有语义对其进行预测.未定义行为不应该被合法的SIL文件触发,但是在<code>SIL</code>级别不一定会被检测和证实.</p>
+<h3>调用协议</h3>
+<p>以下内容讨论swift函数是如何生成<code>SIL</code>的.</p>
+<p><strong>swift调用协议 @convention(swift)</strong> swift本地方法默认使用siwft调用协议是. 入参为原组的函数被递归解构为单独的参数,即包含被调用的基础块的入口,也包含调用者的<code>apply</code>说明</p>
+<div class="highlight"><pre><code><span></span><span class="kd">func</span> <span class="nf">foo</span><span class="p">(</span><span class="kc">_</span> <span class="n">x</span><span class="p">:</span><span class="nb">Int</span><span class="p">,</span> <span class="n">y</span><span class="p">:</span><span class="nb">Int</span><span class="p">)</span>
+<span class="err">​</span>
+<span class="n">sil</span> <span class="p">@</span><span class="n">foo</span> <span class="p">:</span> <span class="err">$</span><span class="p">(</span><span class="n">x</span><span class="p">:</span><span class="nb">Int</span><span class="p">,</span> <span class="n">y</span><span class="p">:</span><span class="nb">Int</span><span class="p">)</span> <span class="p">-&gt;</span> <span class="p">()</span> <span class="p">{</span>
+<span class="n">entry</span><span class="p">(</span><span class="o">%</span><span class="n">x</span> <span class="p">:</span> <span class="err">$</span><span class="nb">Int</span><span class="p">,</span> <span class="o">%</span><span class="n">y</span> <span class="p">:</span> <span class="err">$</span><span class="nb">Int</span><span class="p">):</span>
+  <span class="p">...</span>
+<span class="p">}</span>
+<span class="err">​</span>
+<span class="kd">func</span> <span class="nf">bar</span><span class="p">(</span><span class="kc">_</span> <span class="n">x</span><span class="p">:</span><span class="nb">Int</span><span class="p">,</span> <span class="n">y</span><span class="p">:(</span><span class="nb">Int</span><span class="p">,</span> <span class="nb">Int</span><span class="p">))</span>
+<span class="err">​</span>
+<span class="n">sil</span> <span class="p">@</span><span class="n">bar</span> <span class="p">:</span> <span class="err">$</span><span class="p">(</span><span class="n">x</span><span class="p">:</span><span class="nb">Int</span><span class="p">,</span> <span class="n">y</span><span class="p">:(</span><span class="nb">Int</span><span class="p">,</span> <span class="nb">Int</span><span class="p">))</span> <span class="p">-&gt;</span> <span class="p">()</span> <span class="p">{</span>
+<span class="n">entry</span><span class="p">(</span><span class="o">%</span><span class="n">x</span> <span class="p">:</span> <span class="err">$</span><span class="nb">Int</span><span class="p">,</span> <span class="o">%</span><span class="n">y0</span> <span class="p">:</span> <span class="err">$</span><span class="nb">Int</span><span class="p">,</span> <span class="o">%</span><span class="n">y1</span> <span class="p">:</span> <span class="err">$</span><span class="nb">Int</span><span class="p">):</span>
+  <span class="p">...</span>
+<span class="p">}</span>
+<span class="err">​</span>
+<span class="kd">func</span> <span class="nf">call_foo_and_bar</span><span class="p">()</span> <span class="p">{</span>
+  <span class="n">foo</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+  <span class="n">bar</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span> <span class="p">(</span><span class="mi">5</span><span class="p">,</span> <span class="mi">6</span><span class="p">))</span>
+<span class="p">}</span>
+<span class="err">​</span>
+<span class="n">sil</span> <span class="p">@</span><span class="n">call_foo_and_bar</span> <span class="p">:</span> <span class="err">$</span><span class="p">()</span> <span class="p">-&gt;</span> <span class="p">()</span> <span class="p">{</span>
+<span class="n">entry</span><span class="p">:</span>
+  <span class="p">...</span>
+  <span class="o">%</span><span class="n">foo</span> <span class="p">=</span> <span class="n">function_ref</span> <span class="p">@</span><span class="n">foo</span> <span class="p">:</span> <span class="err">$</span><span class="p">(</span><span class="n">x</span><span class="p">:</span><span class="nb">Int</span><span class="p">,</span> <span class="n">y</span><span class="p">:</span><span class="nb">Int</span><span class="p">)</span> <span class="p">-&gt;</span> <span class="p">()</span>
+  <span class="o">%</span><span class="n">foo_result</span> <span class="p">=</span> <span class="n">apply</span> <span class="o">%</span><span class="n">foo</span><span class="p">(</span><span class="o">%</span><span class="mi">1</span><span class="p">,</span> <span class="o">%</span><span class="mi">2</span><span class="p">)</span> <span class="p">:</span> <span class="err">$</span><span class="p">(</span><span class="n">x</span><span class="p">:</span><span class="nb">Int</span><span class="p">,</span> <span class="n">y</span><span class="p">:</span><span class="nb">Int</span><span class="p">)</span> <span class="p">-&gt;</span> <span class="p">()</span>
+  <span class="p">...</span>
+  <span class="o">%</span><span class="n">bar</span> <span class="p">=</span> <span class="n">function_ref</span> <span class="p">@</span><span class="n">bar</span> <span class="p">:</span> <span class="err">$</span><span class="p">(</span><span class="n">x</span><span class="p">:</span><span class="nb">Int</span><span class="p">,</span> <span class="n">y</span><span class="p">:(</span><span class="nb">Int</span><span class="p">,</span> <span class="nb">Int</span><span class="p">))</span> <span class="p">-&gt;</span> <span class="p">()</span>
+  <span class="o">%</span><span class="n">bar_result</span> <span class="p">=</span> <span class="n">apply</span> <span class="o">%</span><span class="n">bar</span><span class="p">(</span><span class="o">%</span><span class="mi">4</span><span class="p">,</span> <span class="o">%</span><span class="mi">5</span><span class="p">,</span> <span class="o">%</span><span class="mi">6</span><span class="p">)</span> <span class="p">:</span> <span class="err">$</span><span class="p">(</span><span class="n">x</span><span class="p">:</span><span class="nb">Int</span><span class="p">,</span> <span class="n">y</span><span class="p">:(</span><span class="nb">Int</span><span class="p">,</span> <span class="nb">Int</span><span class="p">))</span> <span class="p">-&gt;</span> <span class="p">()</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>调用以繁琐数据类型作为入参和输出值的函数时</p>
+<div class="highlight"><pre><code><span></span><span class="kd">func</span> <span class="nf">foo</span><span class="p">(</span><span class="kc">_</span> <span class="n">x</span><span class="p">:</span><span class="nb">Int</span><span class="p">,</span> <span class="n">y</span><span class="p">:</span><span class="nb">Float</span><span class="p">)</span> <span class="p">-&gt;</span> <span class="nb">UnicodeScalar</span>
+<span class="err">​</span>
+<span class="n">foo</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">)</span>
+</code></pre></div>
+<p>在<code>SIL</code>内如下体现</p>
+<div class="highlight"><pre><code><span></span><span class="o">%</span><span class="n">foo</span> <span class="p">=</span> <span class="n">constant_ref</span> <span class="err">$</span><span class="p">(</span><span class="nb">Int</span><span class="p">,</span> <span class="nb">Float</span><span class="p">)</span> <span class="p">-&gt;</span> <span class="nb">UnicodeScalar</span><span class="p">,</span> <span class="p">@</span><span class="n">foo</span>
+<span class="o">%</span><span class="n">z</span> <span class="p">=</span> <span class="n">apply</span> <span class="o">%</span><span class="n">foo</span><span class="p">(</span><span class="o">%</span><span class="n">x</span><span class="p">,</span> <span class="o">%</span><span class="n">y</span><span class="p">)</span> <span class="p">:</span> <span class="err">$</span><span class="p">(</span><span class="nb">Int</span><span class="p">,</span> <span class="nb">Float</span><span class="p">)</span> <span class="p">-&gt;</span> <span class="nb">UnicodeScalar</span>
+</code></pre></div>
+<p><strong>swift方法调用协议@convention(method)</strong> 方法调用协议用于独立方法的调用协议.<a href="https://zh.wikipedia.org/zh/%E6%9F%AF%E9%87%8C%E5%8C%96">柯里化</a>method,使用<code>self</code>作为内部和外部参数.如果是非柯里化函数,self会在最后被传入</p>
+<div class="highlight"><pre><code><span></span><span class="kd">struct</span> <span class="nc">Foo</span> <span class="p">{</span>
+  <span class="kd">func</span> <span class="nf">method</span><span class="p">(</span><span class="kc">_</span> <span class="n">x</span><span class="p">:</span><span class="nb">Int</span><span class="p">)</span> <span class="p">-&gt;</span> <span class="nb">Int</span> <span class="p">{}</span>
+<span class="p">}</span>
+<span class="err">​</span>
+<span class="n">sil</span> <span class="p">@</span><span class="n">Foo_method_1</span> <span class="p">:</span> <span class="err">$</span><span class="p">((</span><span class="n">x</span> <span class="p">:</span> <span class="nb">Int</span><span class="p">),</span> <span class="p">@</span><span class="kr">inout</span> <span class="n">Foo</span><span class="p">)</span> <span class="p">-&gt;</span> <span class="nb">Int</span> <span class="p">{</span> <span class="p">...</span> <span class="p">}</span>
+</code></pre></div>
+<p><strong>witness方法调用协议@convention(witness_method)</strong> witness方法调用协议是用于<a href="https://github.com/apple/swift/blob/master/docs/SIL.rst#witness-tables">witness tables</a>中的协议witness方法.它几乎等同于方法调用协议,只有对通用类型参数处理方面不同.对于非witness方法来说,机器协议可能会通过方法类型将方法签名进行静态转换.但是因为witness必须在<code>Self</code>类型下进行多态分配,所以<code>Self</code>相关的元数据必须通过最大化的提取规则传输.</p>
+<p><strong>C调用协议@convention(c)</strong> 在swift的C组件编译器中,C类型会被<code>SIL</code>对照到swift类型.C的函数入参和返回值,都会被<code>SIL</code>平台调用协议忽略. <code>SIL</code>和swift目前都不能调用包含可变参数的C的方法.</p>
+<p><strong>OC调用协议@convention(objc_method)</strong> <code>SIL</code>中的OC方法使用规范和ARC内一致.也可以从OC定义中引入属性. 使用<code>@convention(block)</code>并不会影响block的引用计数.</p>
+<p>在<code>SIL</code>中OC方法的self参数是非柯里化的最后一个参数.就像原生swift方法</p>
+<div class="highlight"><pre><code><span></span><span class="kr">@objc</span> <span class="kd">class</span> <span class="bp">NSString</span> <span class="p">{</span>
+  <span class="kd">func</span> <span class="nf">stringByPaddingToLength</span><span class="p">(</span><span class="nb">Int</span><span class="p">)</span> <span class="n">withString</span><span class="p">(</span><span class="bp">NSString</span><span class="p">)</span> <span class="n">startingAtIndex</span><span class="p">(</span><span class="nb">Int</span><span class="p">)</span>
+<span class="p">}</span>
+<span class="err">​</span>
+<span class="n">sil</span> <span class="p">@</span><span class="n">NSString_stringByPaddingToLength_withString_startingAtIndex</span> <span class="err">\</span>
+  <span class="p">:</span> <span class="err">$</span><span class="p">((</span><span class="nb">Int</span><span class="p">,</span> <span class="bp">NSString</span><span class="p">,</span> <span class="nb">Int</span><span class="p">),</span> <span class="bp">NSString</span><span class="p">)</span>
+</code></pre></div>
+<p>IR级别的将<code>self</code>作为第一个参数的行为在<code>SIL</code>中提取了的.比如现存的<code>_cmd</code>方法参数.</p>
+<h3>基于类型的别名分析: type based alias analysis</h3>
+<p><code>SIL</code>提供了两种类型别名分析(<code>TBAA</code>: Type Based Alias Analysis):类TBAA和类型访问TBAA</p>
+<h3>指令集</h3>
+<p>感兴趣可以自行查看<a href="https://github.com/apple/swift/blob/2ddc92a51a4c6d216a9b2dc3a2e41e9b592afbdf/docs/SIL.rst#instruction-set">SIL指令集</a></p>
+<h4>初始化和销毁</h4>
+<h5>alloc_stack</h5>
+<div class="highlight"><pre><code><span></span><span class="n">sil</span><span class="o">-</span><span class="n">instruction</span> <span class="p">::=</span> <span class="err">&#39;</span><span class="n">alloc_stack</span><span class="err">&#39;</span> <span class="n">sil</span><span class="o">-</span><span class="n">type</span> <span class="p">(</span><span class="err">&#39;</span><span class="p">,</span><span class="err">&#39;</span> <span class="n">debug</span><span class="o">-</span><span class="kd">var</span><span class="o">-</span><span class="n">attr</span><span class="p">)</span><span class="o">*</span>
+<span class="err">​</span>
+<span class="o">%</span><span class="mi">1</span> <span class="p">=</span> <span class="n">alloc_stack</span> <span class="err">$</span><span class="n">T</span>
+<span class="c1">// %1 has type $*T</span>
+</code></pre></div>
+<p>在栈区开辟充分符合<code>T</code>类型的内存空间。指令的返回结果是初始化的内存地址。</p>
+<p>如果类型的尺寸在运行时才能确定，编译器必须动态初始化内存。所以并不能确保内存一定是初始化在栈区，例如如果是特别大的数值，可能会在堆区初始化，栈区持有指针。</p>
+<p><code>alloc_stack</code>标记了值声明周期的开始。在结束时必须使用<code>dealloc_stack</code>销毁。</p>
+<p>内存不能被retain，如果想初始化可retain的类型，使用<code>alloc_box</code>。</p>
+<p><strong>总结</strong>：<code>alloc_stack</code>在栈区为值类型开辟内存。不使用引用计数。</p>
+<h5>alloc_box</h5>
+<div class="highlight"><pre><code><span></span><span class="n">sil</span><span class="o">-</span><span class="n">instruction</span> <span class="p">::=</span> <span class="err">&#39;</span><span class="n">alloc_box</span><span class="err">&#39;</span> <span class="n">sil</span><span class="o">-</span><span class="n">type</span> <span class="p">(</span><span class="err">&#39;</span><span class="p">,</span><span class="err">&#39;</span> <span class="n">debug</span><span class="o">-</span><span class="kd">var</span><span class="o">-</span><span class="n">attr</span><span class="p">)</span><span class="o">*</span>
+<span class="err">​</span>
+<span class="o">%</span><span class="mi">1</span> <span class="p">=</span> <span class="n">alloc_box</span> <span class="err">$</span><span class="n">T</span>
+<span class="c1">//   %1 has type $@box T</span>
+</code></pre></div>
+<p>在堆上开辟足够大的内存来支持各种类型的<code>T</code>，以<code>@box</code>持有引用计数。这个指令的结果是<code>@box</code>的引用计数持有的box，<code>project_box</code>是要来过去box内部的值的地址的。</p>
+<p>box初始化时引用计数为1，但是内存并不会被初始化。box持有内部的值，在引用计数为0时使用<code>destory_addr</code>对内部值进行释放，无法释放box的值
+没有被初始化的情况。这时候需要用到<code>dealloc_box</code>。</p>
+<p><strong>总结</strong>：<code>alloc_box</code>在堆上初始化指针类型的值，并且需要手动管理内存。</p>
+<h5>alloc_box和alloc_stack对比</h5>
+<p><code>alloc_box</code>和<code>alloc_stack</code>最大的区别在于值的生命周期。举例，如果在闭包之外有一个变量声明，在闭包内使用了该变量。变量的值是可以被修改的，所以需要使用<code>alloc_box</code>来引用变量。</p>
+<p>对于<code>var</code>声明的变量，因为可以多次修改它的值，甚至在作用域外也可以修改。所以使用<code>alloc_box</code>管理引用计数。</p>
+<h5>优化：Alloc box to stack</h5>
+<p>在SILGen阶段，会对闭包内使用变量的情况，通过<code>alloc_box</code>进行管理。</p>
+<p>在SIL guaranteed transformations阶段，即生成正式SIL的阶段，会对于在闭包内没有进行值修改的变量内存分配进行优化，将<code>alloc_box</code>替换为<code>alloc_stack</code>。这个功能是在<a href="https://github.com/apple/swift/blob/master/lib/SILOptimizer/Transforms/AllocBoxToStack.cpp">AllocBoxToStack</a>组件内实现的。内部实现是将堆区不必要的初始化移动到栈区。</p>
+<h3>参考资料</h3>
+<ul>
+<li><a href="https://github.com/apple/swift/blob/master/docs/SIL.rst">Swift intermediate language</a></li>
+<li><a href="http://blog.llvm.org/2017/03/devirtualization-in-llvm-and-clang.html">devirtualization</a></li>
+<li><a href="http://m.manew.com/thread-112223-1-1.html">译:IL2CPP的优化 : Devirtualization</a></li>
+<li><a href="https://blogs.unity3d.com/cn/2016/07/26/il2cpp-optimizations-devirtualization/">il2cpp optimizations devirtualization原文</a></li>
+<li><a href="https://zh.wikipedia.org/wiki/%E9%9D%99%E6%80%81%E5%8D%95%E8%B5%8B%E5%80%BC%E5%BD%A2%E5%BC%8F">SSA</a></li>
+<li><a href="http://llvm.org/doxygen/BreakCriticalEdges_8cpp_source.html">break critical edges</a></li>
+<li><a href="https://reviews.llvm.org/D29916">Split some critical edges coming out of indirect branches</a></li>
+<li><a href="https://cs.stackexchange.com/questions/64724/when-is-it-useful-to-split-critical-edges">what is it useful to split critical edges</a></li>
+<li><a href="https://www.jianshu.com/p/aaaa6e1a97ef">swift泛型特化</a></li>
+<li><a href="https://zh.wikipedia.org/wiki/%E5%B8%B8%E6%95%B8%E6%8A%98%E7%96%8A">常数传播</a></li>
+<li><a href="https://groups.csail.mit.edu/cag/streamit/talks/pact03tutorial/pact03dsl.pdf">领域特定优化: domain specific optimizations</a></li>
+<li><a href="https://link.springer.com/chapter/10.1007/978-3-540-45069-6_31">book: domain-specific optimization in automata learning</a></li>
+<li><a href="https://zh.wikipedia.org/zh/%E6%9F%AF%E9%87%8C%E5%8C%96">柯里化</a></li>
+<li><a href="https://en.wikipedia.org/wiki/Alias_analysis">alias analysis</a></li>
+<li><a href="https://docs.swift.org/swift-book/LanguageGuide/Protocols.html">swift Protocols</a></li>
+<li><a href="https://github.com/apple/swift/blob/master/docs/SILProgrammersManual.md">SIL Programmers' Manual</a></li>
+<li><a href="https://softwareengineering.stackexchange.com/questions/331971/why-does-swift-need-witness-tables">why dose swift need witness tables</a></li>
+<li><a href="https://llvm.org/devmtg/2015-10/slides/GroffLattner-SILHighLevelIR.pdf">llvm doc: SILHightLevelIR</a></li>
+<li><a href="http://blog.llvm.org/2017/03/devirtualization-in-llvm-and-clang.html">LLVM blog: devirtualization in LLVM and Clang</a></li>
+<li><a href="https://llvm.org/docs/LangRef.html">llvm tbaa</a></li>
+<li><a href="https://the-ravi-programming-language.readthedocs.io/en/latest/llvm-tbaa.html">tbaa</a></li>
+<li><a href="https://www.youtube.com/watch?v=Ntj8ab-5cvE&index=12&list=PL_R5A0lGi1AA4Lv2bBFSwhgDaHvvpVU21">SILHighLevelIR video</a></li>
+<li><a href="https://www.slideshare.net/kitasuke/sil-allocboxtostack">sil-allocboxtostach</a></li>
+<li><a href="https://medium.com/swift-in-sil/var-vs-let-in-sil-6476ccccfa02">var vs let in SIL</a></li>
+<li><a href="https://medium.com/swift-in-sil">Swift type in SIL</a></li>
+<li><a href="https://yq.aliyun.com/articles/227458">Swift结构体的循环引用</a></li>
+<li><a href="http://www.cocoawithlove.com/blog/2016/03/27/on-delete.html">breaking swift with reference counted structs</a></li>
+</ul>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "Swift编译器结构分析与SIL高级中间语言.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

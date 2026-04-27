@@ -1,0 +1,1069 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>彻底理解react中任务调度和时间分片 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="彻底理解react中任务调度和时间分片,Web,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="彻底理解react中任务调度和时间分片" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>彻底理解react中任务调度和时间分片</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2024-05-21 19:55
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_web.html' class='article_tag'>Web</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://km.woa.com/articles/show/605286' target='blank'>【万字长文】彻底理解react中任务调度和时间分片</a></p></h4>
+<h2>前置知识</h2>
+<p>在讲述硬核内容之前，我们先来点简单的复习。</p>
+<h3>vdom</h3>
+<p>我们知道<code>react</code>和<code>vue</code>都是基于<code>vdom</code>实现的。可能大家都想过为什么要基于 <code>vdom</code> 呢？直接操作真实<code>dom</code>不行么？</p>
+<p>确实是可以的。但是在复杂的页面，如果涉及到的<code>dom</code>操作非常多，势必会引起大量的浏览器重排和重绘。同时，每一次的<code>dom</code>操作也会带来一定的性能消耗，这显然不是我们所期望的结果。这时候聪明的开发者就想到了能不能通过对象来表示一个<code>dom</code>节点呢，所有的<code>dom</code>操作都在内存中进行，只在最后真正渲染的时候才一次性提交到真实的<code>dom</code>中去。</p>
+<p>因此<code>vdom</code>应运而生，<code>vdom</code>其实就是在<code>dom</code>之上的一个中间层，将真实的<code>dom</code>操作转到了<code>vdom</code>上。不同框架的<code>vdom</code>表示形式不同，但大体结构如下所示：</p>
+<div class="highlight"><pre><code><span></span><span class="p">{</span>
+<span class="w">    </span><span class="kc">t</span><span class="err">ype</span><span class="p">:</span><span class="w"> </span><span class="err">&#39;div&#39;</span><span class="p">,</span><span class="w"> </span><span class="c1">// 节点类型</span>
+<span class="w">    </span><span class="err">props</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">// 节点属性</span>
+<span class="w">        </span><span class="err">id</span><span class="p">:</span><span class="w"> </span><span class="err">&#39;xxx&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="err">className</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="err">&#39;xxx&#39;</span><span class="p">],</span>
+<span class="w">        </span><span class="err">o</span><span class="kc">n</span><span class="err">Click</span><span class="p">:</span><span class="w"> </span><span class="kc">fun</span><span class="err">c</span><span class="kc">t</span><span class="err">io</span><span class="kc">n</span><span class="err">()</span><span class="w"> </span><span class="p">{}</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="err">childre</span><span class="kc">n</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="c1">// 孩子节点</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>但是要让开发去写这样的<code>vdom</code>么？那肯定不行，这样太麻烦了，大家熟悉的是 html 那种方式，所以我们要引入编译的手段。</p>
+<h3>JSX</h3>
+<p>直接写<code>vdom</code>太麻烦了，所以各种前端框架都会设计一套自己的<code>DSL</code>，然后编译产生 vdom。在<code>react</code>中，这个<code>DSL</code>也就是大家熟悉的<code>JSX</code>，编译函数也就是大家熟知的<code>createElement</code>（17后已废弃改用<code>jsx.runtimer</code>）</p>
+<p>所以这里我们也顺势弄清楚了<code>JSX</code>和<code>vdom</code>的关系。<code>JSX</code>会通过编译函数生成<code>vdom</code>，最后被提交到页面上。</p>
+<h3>浏览器渲染</h3>
+<p>在浏览器的每一帧渲染过程中（按 60fps来计算，大概有16.6ms），要执行包括 “<strong>执行 JS -&gt; requestAnimationFrame -&gt; paint -&gt; requestIdelCallback</strong>”。在执行 JS 的过程中，浏览器会执行一次事件循环 <code>eventloop</code>。每一次事件循环会执行一次宏任务和多次微任务。</p>
+<p>所以如果我们的<code>js</code>执行时间过长，超过了一帧的时间（16.6ms），就会阻碍渲染引起卡顿。这也是为什么我们需要关注项目中长任务的原因。</p>
+<h3>react15的性能瓶颈</h3>
+<p>要了解为什么<code>React</code>要引入时间分片和任务调度技术。我们就需要知道之前的<code>react</code>版本所存在的问题。</p>
+<p>在大型应用程序中，组件树通常会变得非常庞大，导致更新操作变得非常耗时。在这种情况下，如果没有合适的优化措施，放任<code>js</code>一直占用主线程，就会导致用户界面出现卡顿，影响用户体验。例如我们用过没有开启同步模式的<code>react</code>，我们会发现在更新的过程中<code>js</code>会一直占用主线程，当组件多，计算量大的时候界面的卡顿会变得非常严重。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240521-1955-0.png" alt=""></p>
+<p>上图可以看到当<code>react</code>进行渲染的时候，整个阶段都是不可中断，一直执行的，整整占用了主线程207ms，也就是说这207ms我们操作界面将不会有任何反应。如果电脑性能再差点，页面组件再复杂点，这个占用的时间只会更多。</p>
+<p><code>react15</code>架构通常可以分为两层：</p>
+<ul>
+<li><p><code>Reconciler</code>（协调器）—— 负责找出变化的组件</p>
+</li>
+<li><p><code>Renderer</code>（渲染器）—— 负责将变化的组件渲染到页面上</p>
+</li>
+</ul>
+<p>在<code>react15</code>中，<code>Reconciler</code>会从根节点开始递归的更新所有子节点。由于递归执行，所以更新一旦开始，中途就无法中断。这样就会带来两个非常大的问题：</p>
+<ul>
+<li><p>如果递归更新一直占用主线程，当超过了16ms的时候用户的交互就会变得非常卡顿</p>
+</li>
+<li><p>如果所有的更新都按照顺序依次更新，会导致像用户输入这种对系统反馈时效性高的更新滞后，从而造成不好的用户体验</p>
+</li>
+</ul>
+<p>所以为了优化这些问题，<code>react16</code>之后对整个架构进行了升级，大体可以分为三层：</p>
+<ul>
+<li><p>Scheduler（调度器）—— 调度任务的优先级，高优任务优先进入<strong>Reconciler</strong></p>
+</li>
+<li><p>Reconciler（协调器）—— 负责找出变化的组件</p>
+</li>
+<li><p>Renderer（渲染器）—— 负责将变化的组件渲染到页面上</p>
+</li>
+</ul>
+<p>可以看到整个架构最大的变化就是引入了调度器，可以实现对不同优先级的任务进行调度。这样就保证了对时效性高的任务可以快速响应。另外，在渲染阶段<code>react</code>还引入了时间分片的概念(<code>react</code>定义的时间为5ms)，把一个大的任务拆解成一个个小的任务，这样就可以保证每一帧都留出时间供浏览器渲染，降低卡顿。这两个概念也是我们本篇文章重点。如下图，单个任务占用主线程的时间基本在5ms左右，不会长时间占用主线程了。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240521-1955-1.png" alt=""></p>
+<h2>react-sheduler</h2>
+<p>上面提到，<code>react16</code>之后的版本引入了调度器<code>sheduler</code>，接下来我们就从它入手揭开<code>react</code>的神秘面纱。</p>
+<h3>react-sheduler介绍</h3>
+<p><strong>Scheduler设计之初的定位就是一个独立的包，不仅仅在React中可以使用。</strong>从名字可以看出，Scheduler 的主要功能就是进行任务的调度。</p>
+<ul>
+<li><p><code>Scheduler</code>可以实现对不同优先级的任务进行调度，优先执行高优先级的任务。</p>
+</li>
+<li><p><code>Scheduler</code>利用时间分片可以实现任务的中断和恢复，如果一个任务执行时间过长，超过了我们Scheduler设置的执行时间，就会中断当前任务，将线程让出进行渲染，避免造成卡顿。中断的任务会在下一次恢复执行。</p>
+</li>
+</ul>
+<h3>Scheduler中核心的概念</h3>
+<h4>Scheduler中的任务是什么</h4>
+<div class="highlight"><pre><code><span></span><span class="kd">var</span><span class="w"> </span><span class="nx">newTask</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">taskIdCounter</span><span class="o">++</span><span class="p">,</span><span class="w">            </span><span class="c1">// 任务id，在 react 中是一个全局变量，每次新增 task 会自增+1</span>
+<span class="w">  </span><span class="nx">callback</span><span class="o">:</span><span class="w"> </span><span class="nx">callback</span><span class="p">,</span><span class="w">             </span><span class="c1">// 在调度事调用的回掉函数，由开发者传进来</span>
+<span class="w">  </span><span class="nx">priorityLevel</span><span class="o">:</span><span class="w"> </span><span class="nx">priorityLevel</span><span class="p">,</span><span class="w">   </span><span class="c1">// 任务优先级</span>
+<span class="w">  </span><span class="nx">startTime</span><span class="o">:</span><span class="w"> </span><span class="nx">startTime</span><span class="p">,</span><span class="w">           </span><span class="c1">// 任务开始时间</span>
+<span class="w">  </span><span class="nx">expirationTime</span><span class="o">:</span><span class="w"> </span><span class="nx">expirationTime</span><span class="p">,</span><span class="w"> </span><span class="c1">// 任务过期时间</span>
+<span class="w">  </span><span class="nx">sortIndex</span><span class="o">:</span><span class="w"> </span><span class="o">-</span><span class="mf">1</span><span class="w">                   </span><span class="c1">// 排序索引, 全等于过期时间/开始时间. 保证过期时间越小/startTime, 越紧急的任务排在最前面</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>可以看到一个任务其实就是一个对象，我们主要关注<code>sortIndex</code>和<code>callback</code>这两个属性。<code>sortIndex</code>决定我们的任务在小顶堆中的位置，
+它由<code>startTime / expirationTime</code>赋值而来，<code>sortIndex</code>越小表示我们任务越早被执行。<code>callback</code>决定我们最终任务执行的时候执行哪个函数</p>
+<h4>Scheduler如何实现任务的管理</h4>
+<p><code>Scheduler</code>使用小顶堆实现了两个队列(<code>packages/scheduler/src/SchedulerMinHeap.js</code>)，底层都是按照任务的<code>sortIndex</code>来排序，只是在不同的队列中会被赋值为不同的变量。</p>
+<ul>
+<li><p>timerQueue：存放未到开始时间的任务。<code>sortIndex</code>会被赋值任务的开始时间（<code>startTime</code>），开始时间越早，说明会越早开始，开始时间小的排在前面。任务进来的时候，开始时间默认是当前时间，如果进入调度的时候传了延迟时间，开始时间则是当前时间与延迟时间的和</p>
+</li>
+<li><p>taskQueue：存放已经到开始时间的任务。<code>sortIndex</code>会被赋值为任务的过期时间（<code>expirationTime</code>）排序，过期时间越早，说明越紧急，过期时间小的排在前面。过期时间根据任务优先级计算得出，优先级越高，过期时间越小。</p>
+</li>
+</ul>
+<p><code>Scheduler</code>在执行的时候都是去<code>taskQueue</code>中读取优先级最高的任务进行执行，在每一次调度和特定的时候都会通过<code>advanceTimers</code>函数判断<code>timerQueue</code>中是否有过期的任务，如有则将其从<code>timerQueue</code>中移到<code>taskQueue</code>中，如果没有则不处理。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 从timer中将快要过期的任务取出来放到taskQueue中去</span>
+<span class="kd">function</span><span class="w"> </span><span class="nx">advanceTimers</span><span class="p">(</span><span class="nx">currentTime</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">timer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">peek</span><span class="p">(</span><span class="nx">timerQueue</span><span class="p">);</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="nx">timer</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="kc">null</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">// 循环遍历timerQueue</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">timer</span><span class="p">.</span><span class="nx">callback</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="kc">null</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">// 没有回调函数说明任务被取消</span>
+<span class="w">      </span><span class="nx">pop</span><span class="p">(</span><span class="nx">timerQueue</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">timer</span><span class="p">.</span><span class="nx">startTime</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="nx">currentTime</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">// 任务已经到了开始时间</span>
+<span class="w">      </span><span class="nx">pop</span><span class="p">(</span><span class="nx">timerQueue</span><span class="p">);</span>
+<span class="w">      </span><span class="nx">timer</span><span class="p">.</span><span class="nx">sortIndex</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">timer</span><span class="p">.</span><span class="nx">expirationTime</span><span class="p">;</span><span class="w"> </span><span class="c1">// 任务开始了就将expirationTime赋值给sortIndex用于taskQueue排序</span>
+<span class="w">      </span><span class="nx">push</span><span class="p">(</span><span class="nx">taskQueue</span><span class="p">,</span><span class="w"> </span><span class="nx">timer</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="p">;</span><span class="w"> </span><span class="c1">// 如果最早开始时间的任务没有过期，后面的肯定都不会过期，直接返回</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="nx">timer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">peek</span><span class="p">(</span><span class="nx">timerQueue</span><span class="p">);</span><span class="w"> </span><span class="c1">// 检查下一个</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<h4>Scheduler中的优先级</h4>
+<p>我们知道了<code>Scheduler</code>可以实现优先级调度，为了实现这个目标，<code>Scheduler</code>实现了一套优先级机制，并且会根据这些优先级设置超时时间，最后作为任务的过期时间，过期时间越早说明任务优先级越高，在排序中就会越靠前，运行时就会优先执行。</p>
+<blockquote><p>注意：这里说的优先级是Scheduler优先级，在渲染流程中还有另外一套优先级机制<code>Lane</code>，这里后续在讲解是如何关联的。</p>
+</blockquote>
+<div class="highlight"><pre><code><span></span><span class="k">export</span><span class="w"> </span><span class="kd">const</span><span class="w"> </span><span class="nx">NoPriority</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="c1">// 没有优先级 </span>
+<span class="k">export</span><span class="w"> </span><span class="kd">const</span><span class="w"> </span><span class="nx">ImmediatePriority</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1</span><span class="p">;</span><span class="w"> </span><span class="c1">// 立即执行的优先级，级别最高 </span>
+<span class="k">export</span><span class="w"> </span><span class="kd">const</span><span class="w"> </span><span class="nx">UserBlockingPriority</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">2</span><span class="p">;</span><span class="w"> </span><span class="c1">// 用户阻塞级别的优先级 </span>
+<span class="k">export</span><span class="w"> </span><span class="kd">const</span><span class="w"> </span><span class="nx">NormalPriority</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">3</span><span class="p">;</span><span class="w"> </span><span class="c1">// 正常优先级 </span>
+<span class="k">export</span><span class="w"> </span><span class="kd">const</span><span class="w"> </span><span class="nx">LowPriority</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">4</span><span class="p">;</span><span class="w"> </span><span class="c1">// 较低优先级 </span>
+<span class="k">export</span><span class="w"> </span><span class="kd">const</span><span class="w"> </span><span class="nx">IdlePriority</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">5</span><span class="p">;</span><span class="w"> </span><span class="c1">// 优先级最低，表示任务闲置</span>
+</code></pre></div>
+<p>Scheduler中主要有以上几种优先级，这些优先级有对应的超时时间，也就是用户最长能忍受系统多长时间没有给出反馈，根据研究得来。</p>
+<div class="highlight"><pre><code><span></span><span class="kd">var</span><span class="w"> </span><span class="nx">maxSigned31BitInt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1073741823</span><span class="p">;</span><span class="w"> </span>
+<span class="kd">var</span><span class="w"> </span><span class="nx">IMMEDIATE_PRIORITY_TIMEOUT</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">-</span><span class="mf">1</span><span class="p">;</span><span class="w"> </span><span class="c1">// ImmediatePriority </span>
+<span class="kd">var</span><span class="w"> </span><span class="nx">USER_BLOCKING_PRIORITY_TIMEOUT</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">250</span><span class="p">;</span><span class="w"> </span><span class="c1">// UserBlockingPriority </span>
+<span class="kd">var</span><span class="w"> </span><span class="nx">NORMAL_PRIORITY_TIMEOUT</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">5000</span><span class="p">;</span><span class="w"> </span><span class="c1">// NormalPriority</span>
+<span class="kd">var</span><span class="w"> </span><span class="nx">LOW_PRIORITY_TIMEOUT</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">10000</span><span class="p">;</span><span class="w"> </span><span class="c1">// LowPriority</span>
+<span class="kd">var</span><span class="w"> </span><span class="nx">IDLE_PRIORITY_TIMEOUT</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">maxSigned31BitInt</span><span class="p">;</span><span class="w"> </span><span class="c1">// IdlePriority</span>
+</code></pre></div>
+<h3>如何实现任务调度</h3>
+<p>有了上面的基础认识，我们接下来看看Scheduler是如何进行任务管理的。主要分为三个部分：创建任务，调度任务，执行任务。</p>
+<h4>创建任务</h4>
+<p><code>Scheduler</code>模块暴露出<code>unstable_scheduleCallback</code>供外部调用者进行任务的创建并且会发起一次任务调度。</p>
+<div class="highlight"><pre><code><span></span><span class="kd">function</span><span class="w"> </span><span class="nx">unstable_scheduleCallback</span><span class="p">(</span><span class="nx">priorityLevel</span><span class="p">,</span><span class="w"> </span><span class="nx">callback</span><span class="p">,</span><span class="w"> </span><span class="nx">options</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">currentTime</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">getCurrentTime</span><span class="p">();</span><span class="w"> </span><span class="c1">// 获取当前时间</span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">startTime</span><span class="p">;</span><span class="w"> </span><span class="c1">// 获取开始时间</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="ow">typeof</span><span class="w"> </span><span class="nx">options</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;object&#39;</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">options</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="kc">null</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">// 做延时用的，我们可以自定义延迟时间</span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">delay</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">options</span><span class="p">.</span><span class="nx">delay</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="ow">typeof</span><span class="w"> </span><span class="nx">delay</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;number&#39;</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">delay</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">startTime</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">currentTime</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">delay</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">startTime</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">currentTime</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">startTime</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">currentTime</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">timeout</span><span class="p">;</span><span class="w"> </span><span class="c1">// 获取超时时间</span>
+<span class="w">  </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="nx">priorityLevel</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">// 不同的schduler优先级对应不同的超时时间</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="nx">ImmediatePriority</span><span class="o">:</span>
+<span class="w">      </span><span class="nx">timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">IMMEDIATE_PRIORITY_TIMEOUT</span><span class="p">;</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="nx">UserBlockingPriority</span><span class="o">:</span>
+<span class="w">      </span><span class="nx">timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">USER_BLOCKING_PRIORITY_TIMEOUT</span><span class="p">;</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="nx">IdlePriority</span><span class="o">:</span>
+<span class="w">      </span><span class="nx">timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">IDLE_PRIORITY_TIMEOUT</span><span class="p">;</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="nx">LowPriority</span><span class="o">:</span>
+<span class="w">      </span><span class="nx">timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">LOW_PRIORITY_TIMEOUT</span><span class="p">;</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="nx">NormalPriority</span><span class="o">:</span>
+<span class="w">    </span><span class="k">default</span><span class="o">:</span>
+<span class="w">      </span><span class="nx">timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">NORMAL_PRIORITY_TIMEOUT</span><span class="p">;</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 过期时间 = 开始时间 + 延迟时间</span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">expirationTime</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">startTime</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">timeout</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">newTask</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">// 创建任务</span>
+<span class="w">    </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="nx">taskIdCounter</span><span class="o">++</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">callback</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">priorityLevel</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">startTime</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">expirationTime</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">sortIndex</span><span class="o">:</span><span class="w"> </span><span class="o">-</span><span class="mf">1</span><span class="p">,</span><span class="w"> </span><span class="c1">// timerQueue和taskQueue会分别被赋值为startTime和expirationTime</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">enableProfiling</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">newTask</span><span class="p">.</span><span class="nx">isQueued</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 当前任务没有到开始时间，放入timerQueue</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">startTime</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nx">currentTime</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">newTask</span><span class="p">.</span><span class="nx">sortIndex</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">startTime</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">push</span><span class="p">(</span><span class="nx">timerQueue</span><span class="p">,</span><span class="w"> </span><span class="nx">newTask</span><span class="p">);</span><span class="w"> </span><span class="c1">// 放到timerQueue队列中</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">peek</span><span class="p">(</span><span class="nx">taskQueue</span><span class="p">)</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="kc">null</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">newTask</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">peek</span><span class="p">(</span><span class="nx">timerQueue</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">isHostTimeoutScheduled</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">cancelHostTimeout</span><span class="p">();</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">isHostTimeoutScheduled</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="nx">image</span><span class="o">/</span><span class="mf">20240521</span><span class="o">-</span><span class="mf">1955</span><span class="o">-</span><span class="mf">2.</span><span class="nx">png</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="c1">// 发起一次延时调度</span>
+<span class="w">      </span><span class="nx">requestHostTimeout</span><span class="p">(</span><span class="nx">handleTimeout</span><span class="p">,</span><span class="w"> </span><span class="nx">startTime</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">currentTime</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 当前任务已经到了开始时间，放入taskQueue中</span>
+<span class="w">    </span><span class="nx">newTask</span><span class="p">.</span><span class="nx">sortIndex</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">expirationTime</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">push</span><span class="p">(</span><span class="nx">taskQueue</span><span class="p">,</span><span class="w"> </span><span class="nx">newTask</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">enableProfiling</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">markTaskStart</span><span class="p">(</span><span class="nx">newTask</span><span class="p">,</span><span class="w"> </span><span class="nx">currentTime</span><span class="p">);</span>
+<span class="w">      </span><span class="nx">newTask</span><span class="p">.</span><span class="nx">isQueued</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="nx">image</span><span class="o">/</span><span class="mf">20240521</span><span class="o">-</span><span class="mf">1955</span><span class="o">-</span><span class="mf">2.</span><span class="nx">png</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// Schedule a host callback, if needed. If we&#39;re already performing work,</span>
+<span class="w">    </span><span class="c1">// wait until the next time we yield.</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">isHostCallbackScheduled</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="nx">isPerformingWork</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">isHostCallbackScheduled</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="nx">image</span><span class="o">/</span><span class="mf">20240521</span><span class="o">-</span><span class="mf">1955</span><span class="o">-</span><span class="mf">2.</span><span class="nx">png</span><span class="p">;</span>
+<span class="w">      </span><span class="c1">// 发起一次即使调度</span>
+<span class="w">      </span><span class="nx">requestHostCallback</span><span class="p">(</span><span class="nx">flushWork</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">newTask</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>从源码中可以看出任务的创建流程还是比较简单的，整个过程分为三个步骤</p>
+<ol>
+<li><p>计算任务的开始时间<code>startTime</code></p>
+</li>
+<li><p>计算任务的超时时间<code>timeout</code>，超时时间也就是我们在<code>Scheduler</code>优先级中提到的，根据不同的优先级获取不同的超时时间。</p>
+</li>
+<li><p>创建任务，任务的过期时间<code>expirationTime</code>为开始时间<code>startTime</code>+ 超时时间<code>timeout</code></p>
+</li>
+<li><p>通过任务开始时间<code>startTime</code>和当前时间<code>currentTime</code>判断当前任务是否需要立马开始调度，并会发起不同的调度函数。主要区别是一个是同步立即调用一个是异步调用。</p>
+<ul>
+<li><p>任务没到开始时间会调用<code>requestHostTimeout</code></p>
+</li>
+<li><p>任务到了开始时间会调用<code>requestHostCallback</code></p>
+</li>
+</ul>
+</li>
+</ol>
+<h4>调度任务</h4>
+<p>我们知道创建任务之后会发起一次调度，对应的函数</p>
+<ul>
+<li><p><code>requestHostCallback</code>：即时调度，现在的任务已经到开始时间了，我们需要立马发起调度。</p>
+</li>
+<li><p><code>requestHostTimeout(handleTimeout, startTime - currentTime)</code>：延时调度，我们当前的任务还没到开始时间，我们不需要立马开始调度，可以等到了开始时间(<code>startTime - currentTime</code>)再调度。<code>requestHostTimeout</code>主要是用<code>setTimeout</code>包裹了一层，最终还是会调用到<code>requestHostCallback</code>。</p>
+</li>
+</ul>
+<blockquote><p><code>js &gt; function requestHostTimeout(callback, ms) { &gt; taskTimeoutID = localSetTimeout(() =&gt; { &gt; callback(getCurrentTime()); &gt; }, ms); // 这里的ms就是startTime - currentTime &gt; } &gt;</code></p>
+</blockquote>
+<p>这两个创建任务的函数还分别对应了两个取消函数</p>
+<div class="highlight"><pre><code><span></span><span class="k">export</span><span class="w"> </span><span class="kd">let</span><span class="w"> </span><span class="nx">cancelHostCallback</span><span class="p">;</span><span class="w"> </span><span class="c1">// 取消及时回调: scheduledHostCallback = null</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">let</span><span class="w"> </span><span class="nx">cancelHostTimeout</span><span class="p">;</span><span class="w"> </span><span class="c1">// 取消延时回调: cancelTimeout</span>
+</code></pre></div>
+<p>接下来我们重点看下<code>requestHostCallback</code>函数即可。</p>
+<div class="highlight"><pre><code><span></span><span class="kd">function</span><span class="w"> </span><span class="nx">requestHostCallback</span><span class="p">(</span><span class="nx">callback</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">scheduledHostCallback</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">callback</span><span class="p">;</span><span class="w"> </span><span class="c1">// 注意这个scheduledHostCallback，他是我们后面调度时会执行的函数，也就是flushWork，</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="nx">isMessageLoopRunning</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">// 现在是不是正在调度</span>
+<span class="w">    </span><span class="nx">isMessageLoopRunning</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="nx">image</span><span class="o">/</span><span class="mf">20240521</span><span class="o">-</span><span class="mf">1955</span><span class="o">-</span><span class="mf">2.</span><span class="nx">png</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">schedulePerformWorkUntilDeadline</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>可以看到<code>requestHostCallback</code>函数主要是保存当前的回调函数给<code>scheduledHostCallback</code>，并且调用<code>schedulePerformWorkUntilDeadline</code>进行发起一次任务调度。</p>
+<div class="highlight"><pre><code><span></span><span class="kd">let</span><span class="w"> </span><span class="nx">schedulePerformWorkUntilDeadline</span><span class="p">;</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="ow">typeof</span><span class="w"> </span><span class="nx">localSetImmediate</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;function&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Node.js and 旧版本IE.</span>
+<span class="w">  </span><span class="nx">schedulePerformWorkUntilDeadline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">localSetImmediate</span><span class="p">(</span><span class="nx">performWorkUntilDeadline</span><span class="p">);</span>
+<span class="w">  </span><span class="p">};</span>
+<span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="ow">typeof</span><span class="w"> </span><span class="nx">MessageChannel</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="s1">&#39;undefined&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 浏览器环境</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">channel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">MessageChannel</span><span class="p">();</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">port</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">channel</span><span class="p">.</span><span class="nx">port2</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 监听消息</span>
+<span class="w">  </span><span class="nx">channel</span><span class="p">.</span><span class="nx">port1</span><span class="p">.</span><span class="nx">onmessage</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">performWorkUntilDeadline</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">schedulePerformWorkUntilDeadline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 发送消息</span>
+<span class="w">    </span><span class="nx">port</span><span class="p">.</span><span class="nx">postMessage</span><span class="p">(</span><span class="kc">null</span><span class="p">);</span>
+<span class="w">  </span><span class="p">};</span>
+<span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 低版本浏览器环境</span>
+<span class="w">  </span><span class="nx">schedulePerformWorkUntilDeadline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">localSetTimeout</span><span class="p">(</span><span class="nx">performWorkUntilDeadline</span><span class="p">,</span><span class="w"> </span><span class="mf">0</span><span class="p">);</span>
+<span class="w">  </span><span class="p">};</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这里就是<code>Scheduler</code>如何配合浏览器的事件循环发起调度的精髓所在。我们知道浏览器每一帧会执行一次宏任务和多次微任务，那么我们就很当然的想到是不是每次都发起一次宏任务，这样可以保证每一帧都能进行一次任务调度。<code>Scheduler</code>也是这么做的，只不过为了兼容不同的环境使用了不同的浏览器<code>api</code>进行兼容。最后的目的都是为了在浏览器的每一次事件循环都能发起一次<code>Scheduler</code>调度。</p>
+<h4>为什么选宏任务不选微任务</h4>
+<p>宏任务执行时间可控，一次事件循环宏任务只会执行一次，而微任务会执行多次导致，导致线程被一直占用。</p>
+<h4>为什么不用setTimeout和setInterval</h4>
+<p><code>setTimeout</code>也是宏任务，不过由于4ms延迟的限制，导致我们<code>setTimeout(fn,0)</code>所创建的宏任务，会有至少 4ms 的执行时差，<code>setTimeout</code>也是如此。不过对于不支持<code>MessageChannel</code>的浏览器会降级使用<code>setTimeout</code>。</p>
+<h4>为什么不用requestIdelCallback</h4>
+<p>requestIdelCallback 方法也被 React 尝试过，只是后来因为兼容性、不同机器及浏览器执行效率的问题又被 requestAnimationFrame + setTimeout 的 polyfill 方法替代了。不过很多培训机构写的<code>mini react</code>都是使用<code>requestIdelCallback</code>来实现的哈哈。</p>
+<h4>为什么不用requestAnimationFrame</h4>
+<p>在16.10之前的版本，react还是使用的<code>requestAnimationFrame</code> + <code>setTimeout</code>的方式来处理任务，不过因为效果不理想被放弃。个人觉得主要是因为在浏览器没激活或者其他为了节省性能的地方<code>requestAnimationFrame</code>会停止执行，体验不是很好。</p>
+<p>还有其他的一些方案都被<code>react</code>放弃，所以我们主要看<code>MessageChannel</code>这种方式就行了，具体使用方式可查看<a href="https://developer.mozilla.org/zh-CN/docs/Web/API/MessageChannel">MDN</a>。</p>
+<blockquote><p>此处需要注意: <code>MessageChannel</code>在浏览器事件循环中属于<code>宏任务</code>, 所以这里的调度永远是<code>异步执行</code>的</p>
+</blockquote>
+<p>当我们调用<code>schedulePerformWorkUntilDeadline</code>也就是调用<code>MessageChannel</code>发送消息。然后我们监听到消息就会执行<code>performWorkUntilDeadline</code>函数。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 接收 MessageChannel 消息的处理函数</span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">performWorkUntilDeadline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">scheduledHostCallback</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="kc">null</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">// scheduledHostCallback是我们在requestHostCallback中赋值的flushWork</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">currentTime</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">getCurrentTime</span><span class="p">();</span>
+<span class="w">    </span><span class="nx">startTime</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">currentTime</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">hasTimeRemaining</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="nx">image</span><span class="o">/</span><span class="mf">20240521</span><span class="o">-</span><span class="mf">1955</span><span class="o">-</span><span class="mf">2.</span><span class="nx">png</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">hasMoreWork</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="nx">image</span><span class="o">/</span><span class="mf">20240521</span><span class="o">-</span><span class="mf">1955</span><span class="o">-</span><span class="mf">2.</span><span class="nx">png</span><span class="p">;</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// hasMoreWork的返回值就是workLoop的返回值,如果为../file/image/20240521-1955-2.png就说明任务没执行完还要发起下一次调度</span>
+<span class="w">      </span><span class="nx">hasMoreWork</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">scheduledHostCallback</span><span class="p">(</span><span class="nx">hasTimeRemaining</span><span class="p">,</span><span class="w"> </span><span class="nx">currentTime</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">finally</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">hasMoreWork</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// 如果因为超时造成的中断，那么这里会重新请求调度</span>
+<span class="w">        </span><span class="nx">schedulePerformWorkUntilDeadline</span><span class="p">();</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">isMessageLoopRunning</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">        </span><span class="nx">scheduledHostCallback</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">isMessageLoopRunning</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="nx">needsPaint</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p><code>performWorkUntilDeadline</code>最终会执行<code>scheduledHostCallback</code>，也就是我们<code>requestHostCallback(flushWork);</code>传进去的<code>flushWork</code>，整个任务处理的核心都在<code>flushWork</code>这个函数里。任务处理完成后会根据<code>flushWork</code>的返回值<code>hasMoreWork</code>来判断是不是要发起下一次调度。</p>
+<h4>执行任务</h4>
+<p>当我们发起调度之后最终会执行<code>flushWork</code>函数。</p>
+<div class="highlight"><pre><code><span></span><span class="kd">function</span><span class="w"> </span><span class="nx">flushWork</span><span class="p">(</span><span class="nx">hasTimeRemaining</span><span class="p">,</span><span class="w"> </span><span class="nx">initialTime</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 1. 做好全局标记, 表示现在已经进入调度阶段</span>
+<span class="w">  </span><span class="nx">isHostCallbackScheduled</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">isPerformingWork</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="nx">image</span><span class="o">/</span><span class="mf">20240521</span><span class="o">-</span><span class="mf">1955</span><span class="o">-</span><span class="mf">2.</span><span class="nx">png</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">previousPriorityLevel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">currentPriorityLevel</span><span class="p">;</span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 2. 循环消费队列</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">workLoop</span><span class="p">(</span><span class="nx">hasTimeRemaining</span><span class="p">,</span><span class="w"> </span><span class="nx">initialTime</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">finally</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 3. 还原全局标记</span>
+<span class="w">    </span><span class="nx">currentTask</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">currentPriorityLevel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">previousPriorityLevel</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">isPerformingWork</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>flushWork</code>中调用了<code>workLoop</code>。<code>workLoop</code>函数主要是循环执行我们<code>taskQueue</code>中的任务，它是<code>react</code>中非常重要的一个循环 -- <code>任务调度循环</code>。后面我们讲渲染的时候会讲到另一个循环<code>fiber构建循环</code>。这两个循环紧密配合组成了<code>react</code>现有的架构。</p>
+<div class="highlight"><pre><code><span></span><span class="kd">function</span><span class="w"> </span><span class="nx">workLoop</span><span class="p">(</span><span class="nx">hasTimeRemaining</span><span class="p">,</span><span class="w"> </span><span class="nx">initialTime</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">currentTime</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">initialTime</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">advanceTimers</span><span class="p">(</span><span class="nx">currentTime</span><span class="p">);</span><span class="w"> </span><span class="c1">// 从timerQueue中提取过期任务到taskQueue中</span>
+
+<span class="w">  </span><span class="c1">// 通过小顶堆获取第一个最高优的任务，但是要注意我们并没有从taskQueue中删除</span>
+<span class="w">  </span><span class="nx">currentTask</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">peek</span><span class="p">(</span><span class="nx">taskQueue</span><span class="p">);</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="nx">currentTask</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="kc">null</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">    </span><span class="o">!</span><span class="p">(</span><span class="nx">enableSchedulerDebugging</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">isSchedulerPaused</span><span class="p">)</span>
+<span class="w">  </span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span>
+<span class="w">      </span><span class="nx">currentTask</span><span class="p">.</span><span class="nx">expirationTime</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nx">currentTime</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">      </span><span class="p">(</span><span class="o">!</span><span class="nx">hasTimeRemaining</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">shouldYieldToHost</span><span class="p">())</span><span class="w"> </span><span class="c1">// 判断是不是过期</span>
+<span class="w">    </span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// 任务没有超时并且我们已经的时间分片时间已经到了</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">callback</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">currentTask</span><span class="p">.</span><span class="nx">callback</span><span class="p">;</span><span class="w"> </span><span class="c1">// 获取任务的回调函数</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="ow">typeof</span><span class="w"> </span><span class="nx">callback</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;function&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">// 当前任务被取消了</span>
+<span class="w">      </span><span class="nx">currentTask</span><span class="p">.</span><span class="nx">callback</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span><span class="w"> </span><span class="c1">// 标记当前任务已经执行完</span>
+<span class="w">      </span><span class="nx">currentPriorityLevel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">currentTask</span><span class="p">.</span><span class="nx">priorityLevel</span><span class="p">;</span><span class="w"> </span><span class="c1">// 当前任务的优先级</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">didUserCallbackTimeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">currentTask</span><span class="p">.</span><span class="nx">expirationTime</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="nx">currentTime</span><span class="p">;</span><span class="w"> </span><span class="c1">// 回调是不是已经过期</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">enableProfiling</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">markTaskRun</span><span class="p">(</span><span class="nx">currentTask</span><span class="p">,</span><span class="w"> </span><span class="nx">currentTime</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="c1">// 执行任务，并返回任务是否中断还是已执行完成</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">continuationCallback</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">callback</span><span class="p">(</span><span class="nx">didUserCallbackTimeout</span><span class="p">);</span>
+<span class="w">      </span><span class="nx">currentTime</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">getCurrentTime</span><span class="p">();</span>
+<span class="w">      </span><span class="c1">// 如果callback执行之后的返回类型是function类型就把又赋值给currentTask.callback，说明没执行完。没有执行完就不会执行pop逻辑，下一次返回的还是当前任务</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="ow">typeof</span><span class="w"> </span><span class="nx">continuationCallback</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;function&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">currentTask</span><span class="p">.</span><span class="nx">callback</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">continuationCallback</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// 不是函数说明当前任务执行完，弹出来就行</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">currentTask</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">peek</span><span class="p">(</span><span class="nx">taskQueue</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nx">pop</span><span class="p">(</span><span class="nx">taskQueue</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="nx">advanceTimers</span><span class="p">(</span><span class="nx">currentTime</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// 执行的方法不存在就应该删除</span>
+<span class="w">      </span><span class="nx">pop</span><span class="p">(</span><span class="nx">taskQueue</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="nx">currentTask</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">peek</span><span class="p">(</span><span class="nx">taskQueue</span><span class="p">);</span><span class="w"> </span><span class="c1">// 执行完继续执行下一个任务</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 如果task队列没有清空, 返回../file/image/20240521-1955-2.png. 等待调度中心下一次回调</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">currentTask</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="kc">null</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="nx">image</span><span class="o">/</span><span class="mf">20240521</span><span class="o">-</span><span class="mf">1955</span><span class="o">-</span><span class="mf">2.</span><span class="nx">png</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// task队列已经清空, 返回false.</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">firstTimer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">peek</span><span class="p">(</span><span class="nx">timerQueue</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">firstTimer</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="kc">null</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">requestHostTimeout</span><span class="p">(</span><span class="nx">handleTimeout</span><span class="p">,</span><span class="w"> </span><span class="nx">firstTimer</span><span class="p">.</span><span class="nx">startTime</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">currentTime</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>workLoop</code>就是一个大循环, 虽然代码也不多, 但是非常精髓, 在此处实现了<code>时间切片</code>和<code>fiber树的可中断渲染</code>。这 2 大特性的实现,都集中于这个<code>while</code>循环。</p>
+<p>从代码中可以看到，任务调度循环这个循环的粒度是针对单个任务来实现的。在每一次循环之前我们都会通过<code>shouldYieldToHost</code>来判断这一帧是否还有空闲时间给<code>Scheduler</code>使用（代码中写死了这个时间为5ms）。如果超时了会立马中断当前这一次调度。然后我们会判断当前的任务队列是否被清空，如果没有清空就会返回<code>true</code>，在<code>performWorkUntilDeadline</code>中<code>hasMoreWork</code>这个变量就会被赋值为<code>true</code>，因此会在下一次事件循环重新发起一次新的调度。</p>
+<p>至此，我们对<code>Scheduler</code>的任务调度和时间切片有了初步的认识，下面我们来做一个总结：</p>
+<ul>
+<li><p>任务调度：实际上是在浏览器的每一帧的事件循环中执行一次宏任务，从<code>taskQueue</code>中获取优先级最高的任务进行处理。</p>
+</li>
+<li><p>时间分片：在任务调度的过程中，每执行完一个任务，我们都会判断当前帧是不是有剩余时间。如果没有了就需要立即终止循环，并判断是否有任务没执行完，来判断是不是要发起一次新的任务调度。</p>
+</li>
+</ul>
+<p>可以看出来，时间分片其实并不是我们将一个个任务分成固定的大小然后去执行，而是在执行的过程中到达了一定的时间之后再去分片。就好比切黄瓜，不是把先标记好每一段再切割，而是在切的时候到了一定长度就切。所以你可能会想要是单个任务执行时间超过了5ms，也就是我们的<code>callback</code>一直在执行，没有给循环判断是否超时的机会，这样是不是也会一直占用主线程？你的想法是正确的，如果我们的调度的任务耗时很长，远远的超过了5ms，其实也是会引起掉帧的情况。</p>
+<p>那么我们思考能不能让调度的任务(<code>task.callback</code>)自己也能够检测是否超时呢。为了实现这一目标，<code>react</code>就引入了<code>fiber</code>架构。后面我们会知道，我们在<code>Scheduler</code>中注册的任务其实就是一个构建<code>fiber</code>树的任务。那么在<code>fiber</code>树的构建过程中，每构建一个<code>fiber</code>单元，都会检测当前任务是否超时，如果超时就退出<code>fiber</code>树的构造，并返回一个函数表示当前任务未完成。在<code>workLoop</code>源码中<code>const continuationCallback = callback(didUserCallbackTimeout);</code>这段代码在执行回调函数之后会返回当前任务是否执行完成。</p>
+<p>至此有了可中断的<code>fiber</code>架构之后，我们就可以保证每次调度的任务基本都能在5ms左右的时间完成，大大降低了浏览器卡顿的问题。</p>
+<blockquote><p>要注意，有了可中断的<code>fiber</code>架构之后，<code>Scheduler</code>中的一个任务是有可能被调用很多次的，因为上一次没执行完后面会接着执行。</p>
+</blockquote>
+<h2>fiber</h2>
+<p>通过上面的分析我们得知，在<code>React15</code>及以前，<code>Reconciler</code>采用递归的方式创建虚拟DOM，递归过程是不能中断的。如果组件树的层级很深，递归会占用线程很多时间，造成卡顿。为了解决这个问题，<code>React16</code>将<strong>递归的无法中断的更新</strong>重构为<strong>异步的可中断更新</strong>，由于曾经用于递归的<strong>虚拟DOM</strong>数据结构已经无法满足需要。于是，<code>fiber</code>架构应运而生，配合<code>Scheduler</code>的任务调度，使得<code>react</code>性能大大提升。下面我们就来看看<code>fiber</code>到底是个什么东西。</p>
+<div class="highlight"><pre><code><span></span><span class="kd">function</span><span class="w"> </span><span class="nx">FiberNode</span><span class="p">(</span>
+<span class="w">  </span><span class="nx">tag</span><span class="o">:</span><span class="w"> </span><span class="nx">WorkTag</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">pendingProps</span><span class="o">:</span><span class="w"> </span><span class="nx">mixed</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">key</span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="nx">string</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">mode</span><span class="o">:</span><span class="w"> </span><span class="nx">TypeOfMode</span><span class="p">,</span>
+<span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Instance</span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="nx">tag</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">tag</span><span class="p">;</span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="nx">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">key</span><span class="p">;</span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="nx">elementType</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="nx">type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="nx">stateNode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// Fiber树相关</span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="k">return</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="nx">child</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="nx">sibling</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="nx">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="nx">ref</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="nx">pendingProps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">pendingProps</span><span class="p">;</span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="nx">memoizedProps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="nx">updateQueue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="nx">memoizedState</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="nx">dependencies</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="nx">mode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">mode</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 副作用相关</span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="nx">flags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">NoFlags</span><span class="p">;</span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="nx">subtreeFlags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">NoFlags</span><span class="p">;</span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="nx">deletions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="nx">lanes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">NoLanes</span><span class="p">;</span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="nx">childLanes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">NoLanes</span><span class="p">;</span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="nx">alternate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>省略掉一些不重要的属性，<code>fiber</code>的主要结构如上。一个<code>fiber</code>节点其实就是一个对象。我们实例化一个<code>FiberNode</code>就是创建了一个<code>fiber</code>节点。</p>
+<div class="highlight"><pre><code><span></span><span class="kd">const</span><span class="w"> </span><span class="nx">createFiber</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kd">function</span><span class="p">(</span>
+<span class="w">  </span><span class="nx">tag</span><span class="o">:</span><span class="w"> </span><span class="nx">WorkTag</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">pendingProps</span><span class="o">:</span><span class="w"> </span><span class="nx">mixed</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">key</span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="nx">string</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">mode</span><span class="o">:</span><span class="w"> </span><span class="nx">TypeOfMode</span><span class="p">,</span>
+<span class="p">)</span><span class="o">:</span><span class="w"> </span><span class="nx">Fiber</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">FiberNode</span><span class="p">(</span><span class="nx">tag</span><span class="p">,</span><span class="w"> </span><span class="nx">pendingProps</span><span class="p">,</span><span class="w"> </span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">mode</span><span class="p">);</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>为了实现<strong>异步的可中断更新</strong>，传统的树型结构是没有办法满足的，因为我们没有办法获取中断那一刻的状态。所以<code>fiber</code>中引入了<code>return childsibling</code>三个属性，分别表示当前节点的父节点，孩子节点和兄弟节点。通过这三个属性，我们可以从树中的任意一个节点遍历到整棵树。这样就实现了记录中断那一刻的状态。</p>
+<p>例如对于下面的组件结构</p>
+<div class="highlight"><pre><code><span></span><span class="kd">function</span><span class="w"> </span><span class="nx">App</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="o">&lt;</span><span class="nx">div</span><span class="o">&gt;</span>
+<span class="w">      </span><span class="o">&lt;</span><span class="nx">p</span><span class="o">&gt;</span>
+<span class="w">        </span><span class="o">&lt;</span><span class="nx">span</span><span class="o">&gt;</span><span class="nx">fiber1</span><span class="o">&lt;</span><span class="err">/span&gt;</span>
+<span class="w">      </span><span class="o">&lt;</span><span class="err">/p&gt;</span>
+<span class="w">      </span><span class="o">&lt;</span><span class="nx">p</span><span class="o">&gt;</span>
+<span class="w">        </span><span class="o">&lt;</span><span class="nx">span</span><span class="o">&gt;</span><span class="nx">fiber2</span><span class="o">&lt;</span><span class="err">/span&gt;</span>
+<span class="w">      </span><span class="o">&lt;</span><span class="err">/p&gt;</span>
+<span class="w">    </span><span class="o">&lt;</span><span class="err">/div&gt;</span>
+<span class="w">  </span><span class="p">)</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>构建成<code>fiber</code>树后将会是下面这样子。</p>
+<p>至于为什么<code>fiber1</code>和<code>fiber2</code>不会出现在<code>fiber</code>树中，是因为<code>react</code>为了优化，字符串会直接渲染不产生<code>fiber</code>节点。</p>
+<h2>单个任务如何实现可中断更新</h2>
+<h3>react渲染流程概览</h3>
+<p>在了解到如何实现可中断渲染之前，我们先大概的看下<code>react</code>的整个渲染流程。这里借用网上很流行的一张图(没有找到出处)，但是这张图对于整个<code>react</code>脉络总结的非常到位。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240521-1955-2.png" alt=""></p>
+<p>整个<code>react</code>的渲染大体可以分为两个阶段<code>render</code>阶段和<code>commit</code>阶段</p>
+<ul>
+<li><p>render阶段：生成<code>fiber</code>树，并生成副作用<code>effectList</code>。这个过程可以是异步可中断的，中断的粒度是单个<code>fiber</code>节点。</p>
+</li>
+<li><p>commit阶段：将生成的<code>fiber</code>树提交到浏览器页面上。这个过程是同步的，一旦开始就不可中断，因为在浏览器上断断续续的展示<code>dom</code>节点显然是不可接受的。</p>
+</li>
+</ul>
+<p>在每一次<code>render</code>过程中（代码基本位于<code>/packages/react-reconciler/src/ReactFiberWorkLoop.old.js</code>下），我们都会依次调用<code>updateContainer -&gt; scheduleUpdateOnFiber -&gt; ensureRootIsScheduled</code>。在这个函数里面我们会判断当前更新是要同步更新还是要异步更新。</p>
+<p>如果是异步逻辑，最后会调用到<code>ensureRootIsScheduled -&gt; scheduleCallback -&gt; performConcurrentWorkOnRoot -&gt; renderRootConcurrent -&gt; workLoopConcurrent</code>。</p>
+<div class="highlight"><pre><code><span></span><span class="kd">function</span><span class="w"> </span><span class="nx">workLoopConcurrent</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Perform work until Scheduler asks us to yield</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="nx">workInProgress</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="kc">null</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="nx">shouldYield</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">performUnitOfWork</span><span class="p">(</span><span class="nx">workInProgress</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>如果是同步逻辑最后的调用链路<code>ensureRootIsScheduled -&gt; scheduleSyncCallback -&gt; performSyncWorkOnRoot -&gt; renderRootSync -&gt; workLoopSync</code></p>
+<div class="highlight"><pre><code><span></span><span class="kd">function</span><span class="w"> </span><span class="nx">workLoopSync</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Already timed out, so perform work without checking if we need to yield.</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="nx">workInProgress</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="kc">null</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">performUnitOfWork</span><span class="p">(</span><span class="nx">workInProgress</span><span class="p">);</span><span class="w"> </span><span class="c1">// 参数为workInProgress</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>从这里我们可以看出，<code>workLoopConcurrent</code>其实就比<code>workLoopSync</code>多了一个<code>shouldYield</code>判断。在源码中可以看到<code>shouldYield</code>正是<code>react-sheduler</code>包导出的<code>shouldYieldToHost</code>。这下我们就清楚<code>react</code>是怎么实现对单个任务也能实现超过5ms就中断了，核心就是<code>workLoopConcurrent</code>这个循环里面的<code>shouldYield</code>。每构建完一个<code>fiber</code>节点，我们都会判断当前构建是否超时，超时的话就会中断当前的构建。</p>
+<h3>构建fiber树循环</h3>
+<p><code>workLoopConcurrent和workLoopSync</code>中的循环就是我们提到的另一个循环<code>fiber</code>构建循环，它会不断的将<code>vdom</code>构建成为<code>fiber</code>。这个循环的粒度是单个<code>fiber</code>节点。</p>
+<div class="highlight"><pre><code><span></span><span class="kd">function</span><span class="w"> </span><span class="nx">performUnitOfWork</span><span class="p">(</span><span class="nx">unitOfWork</span><span class="o">:</span><span class="w"> </span><span class="nx">Fiber</span><span class="p">)</span><span class="o">:</span><span class="w"> </span><span class="ow">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">current</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">unitOfWork</span><span class="p">.</span><span class="nx">alternate</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">setCurrentDebugFiberInDEV</span><span class="p">(</span><span class="nx">unitOfWork</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">next</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// beginWork</span>
+<span class="w">  </span><span class="nx">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">beginWork</span><span class="p">(</span><span class="nx">current</span><span class="p">,</span><span class="w"> </span><span class="nx">unitOfWork</span><span class="p">,</span><span class="w"> </span><span class="nx">subtreeRenderLanes</span><span class="p">);</span>
+<span class="w">  </span><span class="nx">unitOfWork</span><span class="p">.</span><span class="nx">memoizedProps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">unitOfWork</span><span class="p">.</span><span class="nx">pendingProps</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">next</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="kc">null</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// completeWork</span>
+<span class="w">    </span><span class="nx">completeUnitOfWork</span><span class="p">(</span><span class="nx">unitOfWork</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">workInProgress</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">next</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="nx">ReactCurrentOwner</span><span class="p">.</span><span class="nx">current</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在构建<code>fiber</code>树的过程中我们会不断的调用<code>beginWork</code>和<code>completeUnitOfWork</code>，这也<code>render</code>阶段最重要的两部分。</p>
+<ul>
+<li><p>beginWork：传入当前<code>fiber</code>节点，根据<code>vdom</code>创建子<code>fiber</code>节点，并将子<code>fiber</code>节点赋值给<code>workInProgress</code>当作下一次循环参数。</p>
+</li>
+<li><p>completeUnitOfWork：完成当前<code>fiber</code>节点，生成副作用<code>flags</code>、真实<code>dom</code>和<code>effectList</code>用于后续<code>commit</code>阶段渲染。</p>
+</li>
+</ul>
+<p>由于篇幅有限，这里不做赘述。我们仅需要知道<code>performUnitOfWork</code>每次执行都会将新生成的<code>fiber</code>节点赋值给一个全局变量<code>workInProgress</code>，并作为下一次循环时调用<code>performUnitOfWork</code>传进来的参数。</p>
+<h3>何时向Scheduler中注册调度任务</h3>
+<p>前面我们知道了当我们调用<code>setState、forceUpdate、render</code>这些会引起页面重新渲染的函数时，<code>react</code>会依次调用<code>updateContainer -&gt; scheduleUpdateOnFiber -&gt; ensureRootIsScheduled</code>。我们来看看<code>ensureRootIsScheduled</code>这个函数，他也是我们渲染流程中和<code>Scheduler</code>关联最多函数：</p>
+<div class="highlight"><pre><code><span></span><span class="kd">function</span><span class="w"> </span><span class="nx">ensureRootIsScheduled</span><span class="p">(</span><span class="nx">root</span><span class="o">:</span><span class="w"> </span><span class="nx">FiberRoot</span><span class="p">,</span><span class="w"> </span><span class="nx">currentTime</span><span class="o">:</span><span class="w"> </span><span class="nx">number</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">   </span><span class="c1">// 省略其他代码....</span>
+<span class="w">  </span><span class="c1">// 找到下一个需要更新的优先级</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">nextLanes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">getNextLanes</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">root</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">root</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">workInProgressRoot</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="nx">workInProgressRootRenderLanes</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="nx">NoLanes</span><span class="p">,</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 省略其他代码....</span>
+<span class="w">  </span><span class="c1">// 开始一个新的回调</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">newCallbackNode</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 同步渲染的模式 执行的是 performSyncWorkOnRoot</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">newCallbackPriority</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">SyncLane</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 省略其他代码....</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 优先级转换  lane优先级 -&gt; event优先级 -&gt; schduler优先级 -&gt; sortIndex</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">schedulerPriorityLevel</span><span class="p">;</span><span class="w"> </span><span class="c1">// schduler优先级</span>
+<span class="w">    </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="nx">lanesToEventPriority</span><span class="p">(</span><span class="nx">nextLanes</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">// 转化为event优先级</span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="nx">DiscreteEventPriority</span><span class="o">:</span>
+<span class="w">        </span><span class="nx">schedulerPriorityLevel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">ImmediateSchedulerPriority</span><span class="p">;</span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="nx">ContinuousEventPriority</span><span class="o">:</span>
+<span class="w">        </span><span class="nx">schedulerPriorityLevel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">UserBlockingSchedulerPriority</span><span class="p">;</span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="nx">DefaultEventPriority</span><span class="o">:</span>
+<span class="w">        </span><span class="nx">schedulerPriorityLevel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">NormalSchedulerPriority</span><span class="p">;</span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="nx">IdleEventPriority</span><span class="o">:</span>
+<span class="w">        </span><span class="nx">schedulerPriorityLevel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">IdleSchedulerPriority</span><span class="p">;</span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span>
+<span class="w">      </span><span class="k">default</span><span class="o">:</span>
+<span class="w">        </span><span class="nx">schedulerPriorityLevel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">NormalSchedulerPriority</span><span class="p">;</span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 调用schduler进行调度，回调函数就是performConcurrentWorkOnRoot，返回一个新的调度任务</span>
+<span class="w">    </span><span class="nx">newCallbackNode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">scheduleCallback</span><span class="p">(</span><span class="w"> </span><span class="c1">// newCallbackNode其实就是schduler中的一个任务</span>
+<span class="w">      </span><span class="nx">schedulerPriorityLevel</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">performConcurrentWorkOnRoot</span><span class="p">.</span><span class="nx">bind</span><span class="p">(</span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="nx">root</span><span class="p">),</span>
+<span class="w">    </span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">   </span><span class="c1">// 省略其他代码....</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>我们可以先不看<code>ensureRootIsScheduled</code>中的其它代码，仅需关注最后调用<code>scheduleCallback</code>这一段。这里就是<code>schduler</code>和渲染流程建立联系的地方。</p>
+<p>我们在<code>ensureRootIsScheduled</code>中会调用<code>scheduleCallback</code>。这个函数也就是我们在<code>Scheduler</code>提到的<code>unstable_scheduleCallback</code>函数。<code>scheduleCallback</code>会在<code>taskQueue</code>中注册一个任务，这个任务的回调函数就是<code>performConcurrentWorkOnRoot.bind(null, root)</code>。然后<code>scheduleCallback</code>会发起一次调度，在下一次事件循环执行任务的时候就会执行<code>performConcurrentWorkOnRoot</code>，从而使两者紧密关联。</p>
+<h3>如何进行fiber构建的中断</h3>
+<p>我们知道<code>fiber</code>架构的核心就是为了实现在<code>Scheduler</code>调度的时候，单个任务内部也可以实现超时中止的判断。这里的核心实现就是我们<code>fiber</code>构建循环中的的<code>shouldYield</code>判断，每当我们构建了一个新<code>fiber</code>节点的时候，我们都会在循环的开始判断当前构建是否超时，如果超时的话就会中断<code>fiber</code>树的构建。这样就实现了单个任务内部也可以超时终止。</p>
+<h3>如何进行fiber构建的恢复</h3>
+<p>那么当我们终止了<code>fiber</code>树的构建之后，<code>react</code>怎么知道从什么地方开始继续构建呢？</p>
+<p>关键点就在于我们前面提到的<code>workInProgress</code>变量，它保存的就是我们当前要构建的<code>fiber</code>节点。由于<code>workInProgress</code>是存储在内存中的，所以当我们任务被中断并重启的时候可以直接读取<code>workInProgress</code>变量，直接从上一次中断的<code>fiber</code>节点开始执行<code>fiber</code>树的构建。</p>
+<p>另外当我们执行任务的回调函数<code>performConcurrentWorkOnRoot</code>时会判断当前任务和上一次任务是否相等，如果相等说明任务没有执行完（任务执行完会在<code>commitRootImpl</code>中将<code>root.callbackNode</code>设置为<code>null</code>），会重新返回函数本身。</p>
+<div class="highlight"><pre><code><span></span><span class="kd">function</span><span class="w"> </span><span class="nx">performConcurrentWorkOnRoot</span><span class="p">(</span><span class="nx">root</span><span class="p">,</span><span class="w"> </span><span class="nx">didTimeout</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">originalCallbackNode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">root</span><span class="p">.</span><span class="nx">callbackNode</span><span class="p">;</span><span class="w"> </span><span class="c1">// 这个callback就是在ensureRootIsScheduled中赋值的,其实就是schduler中的一个task</span>
+<span class="w">  </span><span class="c1">// 中断继续执行,不相等的情况，任务被取消或者任务已经完成</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">root</span><span class="p">.</span><span class="nx">callbackNode</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">originalCallbackNode</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">performConcurrentWorkOnRoot</span><span class="p">.</span><span class="nx">bind</span><span class="p">(</span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="nx">root</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>任务中断的重启+<code>workInProgress</code>保存上一次中断的状态就可以实现我们<code>fiber</code>构建的重启了。</p>
+<h3>fiber vdom jsx之间的关系</h3>
+<p>在搞清楚渲染流程之后，我们顺便总结下<code>fiber vdom jsx</code>这三个常见概念的关系。<code>jsx</code>通过<code>createElement/jsx.runtimer</code>编译成<code>vdom</code>，<code>vdom</code>在<code>render</code>过程中被构建为<code>fiber</code>树。最后在<code>commit</code>阶段将<code>fiber</code>树整个的渲染到浏览器的页面中</p>
+<h3>总结</h3>
+<p>现在我们已经知道了react是如何通过<code>fiber</code>架构来实现单个任务也能实现可中断更新的，</p>
+<h2>任务调度机制</h2>
+<p>前面我们已经知道了<code>react</code>调度和渲染的基本流程，我们也知道<code>sheduler</code>可以实现优先级调度，接下来就从整体来看看究竟是如何实现的。</p>
+<h3>React中的各种优先级</h3>
+<p>在理解优先级调度之前，我们先了解下<code>react</code>中的所有优先级。</p>
+<p>前面提到，除了<code>schduler</code>优先级，在<code>react</code>中还有另外两种优先级。优先级机制最终目的就是为了实现<strong>高优先级任务优先执行，低优先级任务延后执行</strong>。因此，要理解<code>react</code>整套调度流程就必须理解<code>react</code>的优先级机制。为了防止大家搞混，我们在这里对所有的优先级做一个整理。我们先大概看看从一次事件触发到<code>DOM</code>更新大概要经过哪些阶段以及会存在哪些优先级：</p>
+<ol>
+<li><p>用户和界面交互产生用户事件（例如点击）。在这个过程中会根据不同的事件类型执行不同的回调，而不同的回调有不同事件优先级__（源码位于<code>/packages/react-dom/src/events/ReactDOMEventListener.js中getEventPriority</code>函数）</p>
+</li>
+<li><p>事件的回调函数中会调用 setState 改变状态，产生一个带有<code>Lane</code>优先级的 update（一般这个<code>update</code>的优先级由事件优先级转换而来），并从<code>updateContainer</code>开始发起一次渲染。</p>
+</li>
+<li><p><code>react</code>创建渲染任务。并调用<code>scheduleCallback</code>向<code>schduler</code>注册一个调度任务。会实现<code>Lane优先级 -&gt; 事件优先级 -&gt; schduler优先级</code>的转换。</p>
+</li>
+<li><p><code>schduler</code>调度器调度任务执行回调函数<code>performConcurrentWorkOnRoot</code>，<code>performConcurrentWorkOnRoot</code>中构建<code>fiber</code>树又会使用2中产生的<code>Lane</code>优先级</p>
+</li>
+</ol>
+<p>所以在<code>react</code>主要有三种优先级<code>event</code>优先级、<code>Lane</code>优先级和<code>Scheduler</code>优先级。这三种优先级相互转换，贯穿<code>react</code>的整个运行流程。</p>
+<ol>
+<li><code>event</code>优先级：</li>
+</ol>
+<div class="highlight"><pre><code><span></span><span class="k">export</span><span class="w"> </span><span class="kd">const</span><span class="w"> </span><span class="nx">ImmediatePriority</span><span class="o">:</span><span class="w"> </span><span class="nx">ReactPriorityLevel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">99</span><span class="p">;</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">const</span><span class="w"> </span><span class="nx">UserBlockingPriority</span><span class="o">:</span><span class="w"> </span><span class="nx">ReactPriorityLevel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">98</span><span class="p">;</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">const</span><span class="w"> </span><span class="nx">NormalPriority</span><span class="o">:</span><span class="w"> </span><span class="nx">ReactPriorityLevel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">97</span><span class="p">;</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">const</span><span class="w"> </span><span class="nx">LowPriority</span><span class="o">:</span><span class="w"> </span><span class="nx">ReactPriorityLevel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">96</span><span class="p">;</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">const</span><span class="w"> </span><span class="nx">IdlePriority</span><span class="o">:</span><span class="w"> </span><span class="nx">ReactPriorityLevel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">95</span><span class="p">;</span>
+<span class="c1">// NoPriority is the absence of priority. Also React-only.</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">const</span><span class="w"> </span><span class="nx">NoPriority</span><span class="o">:</span><span class="w"> </span><span class="nx">ReactPriorityLevel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">90</span><span class="p">;</span>
+</code></pre></div>
+<p><code>react</code>中的事件都是包装过的合成事件，每种事件都会带有不同的优先级。我们通过点击或者其它事件出发绑定的监听事件的时候就会带上对应的优先级，对应的源码在(packages/react-dom/src/events/ReactDOMEventListener.js)中可以看到：</p>
+<div class="highlight"><pre><code><span></span><span class="k">export</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">createEventListenerWrapperWithPriority</span><span class="p">(</span><span class="w"> </span><span class="c1">// 通过不同的优先级处理函数来包裹我们的事件处理函数</span>
+<span class="w">  </span><span class="nx">targetContainer</span><span class="o">:</span><span class="w"> </span><span class="nx">EventTarget</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">domEventName</span><span class="o">:</span><span class="w"> </span><span class="nx">DOMEventName</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">eventSystemFlags</span><span class="o">:</span><span class="w"> </span><span class="nx">EventSystemFlags</span><span class="p">,</span>
+<span class="p">)</span><span class="o">:</span><span class="w"> </span><span class="nb">Function</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">eventPriority</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">getEventPriority</span><span class="p">(</span><span class="nx">domEventName</span><span class="p">);</span><span class="w"> </span><span class="c1">// 通过事件名获取事件的优先级</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">listenerWrapper</span><span class="p">;</span>
+<span class="w">  </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="nx">eventPriority</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="nx">DiscreteEventPriority</span><span class="o">:</span>
+<span class="w">      </span><span class="nx">listenerWrapper</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">dispatchDiscreteEvent</span><span class="p">;</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="nx">ContinuousEventPriority</span><span class="o">:</span>
+<span class="w">      </span><span class="nx">listenerWrapper</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">dispatchContinuousEvent</span><span class="p">;</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="nx">DefaultEventPriority</span><span class="o">:</span>
+<span class="w">    </span><span class="k">default</span><span class="o">:</span>
+<span class="w">      </span><span class="nx">listenerWrapper</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">dispatchEvent</span><span class="p">;</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">listenerWrapper</span><span class="p">.</span><span class="nx">bind</span><span class="p">(</span>
+<span class="w">    </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">domEventName</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">eventSystemFlags</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">targetContainer</span><span class="p">,</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<ol>
+<li><code>Lane</code>优先级</li>
+</ol>
+<p>在整个渲染过程中与<code>fiber</code>构造过程相关的优先级(如<code>fiber.updateQueue</code>,<code>fiber.lanes</code>)，都是使用的我们熟知的<code>lanes</code>模型。<code>Lanes</code>是一个 32 位的二进制变量，每一位代表不同优先级的任务。设计成二进制的原因也是因为二进制计算性能高，同时通过<code>&amp; ^｜</code>等操作也非常方便我们对优先级做处理。</p>
+<div class="highlight"><pre><code><span></span><span class="k">export</span><span class="w"> </span><span class="kd">const</span><span class="w"> </span><span class="nx">NoLanes</span><span class="o">:</span><span class="w"> </span><span class="nx">Lanes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="cm">/*                        */</span><span class="w"> </span><span class="mb">0b0000000000000000000000000000000</span><span class="p">;</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">const</span><span class="w"> </span><span class="nx">NoLane</span><span class="o">:</span><span class="w"> </span><span class="nx">Lane</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="cm">/*                          */</span><span class="w"> </span><span class="mb">0b0000000000000000000000000000000</span><span class="p">;</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">const</span><span class="w"> </span><span class="nx">SyncLane</span><span class="o">:</span><span class="w"> </span><span class="nx">Lane</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="cm">/*                        */</span><span class="w"> </span><span class="mb">0b0000000000000000000000000000001</span><span class="p">;</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">const</span><span class="w"> </span><span class="nx">InputContinuousHydrationLane</span><span class="o">:</span><span class="w"> </span><span class="nx">Lane</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="cm">/*    */</span><span class="w"> </span><span class="mb">0b0000000000000000000000000000010</span><span class="p">;</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">const</span><span class="w"> </span><span class="nx">InputContinuousLane</span><span class="o">:</span><span class="w"> </span><span class="nx">Lane</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="cm">/*             */</span><span class="w"> </span><span class="mb">0b0000000000000000000000000000100</span><span class="p">;</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">const</span><span class="w"> </span><span class="nx">DefaultHydrationLane</span><span class="o">:</span><span class="w"> </span><span class="nx">Lane</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="cm">/*            */</span><span class="w"> </span><span class="mb">0b0000000000000000000000000001000</span><span class="p">;</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">const</span><span class="w"> </span><span class="nx">DefaultLane</span><span class="o">:</span><span class="w"> </span><span class="nx">Lane</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="cm">/*                     */</span><span class="w"> </span><span class="mb">0b0000000000000000000000000010000</span><span class="p">;</span>
+<span class="c1">// 还有很多，优先级枚举位于packages/react-reconciler/src/ReactFiberLane.old.js</span>
+</code></pre></div>
+<p>一种优先级只有一位会是1，其它位都是0，1越靠右(数字越小)，优先级越高，例如<code>SyncLane</code>代表同步优先级，它的优先级是最高的。</p>
+<p><code>Lane</code>优先级是在<code>updateContainer</code>的<code>requestUpdateLane</code>函数中获取，在<code>requestUpdateLane</code>就有通过触发的事件类型获取当前<code>lane</code>优先级的代码（<code>requestUpdateLane</code>还有很多获取优先级的逻辑，我们本篇文章只关注从事件上获取优先级）。</p>
+<div class="highlight"><pre><code><span></span><span class="k">export</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">requestUpdateLane</span><span class="p">(</span><span class="nx">fiber</span><span class="o">:</span><span class="w"> </span><span class="nx">Fiber</span><span class="p">)</span><span class="o">:</span><span class="w"> </span><span class="nx">Lane</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">// 获取更新优先级 同步 -&gt; transition -&gt; 当前更新 -&gt; 事件优先级</span>
+<span class="w">  </span><span class="c1">// 省略获取其他类型优先级的代码</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">eventLane</span><span class="o">:</span><span class="w"> </span><span class="nx">Lane</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">getCurrentEventPriority</span><span class="p">()</span><span class="o">:</span><span class="w"> </span><span class="nx">any</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">eventLane</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ol>
+<li><code>Scheduler</code>优先级</li>
+</ol>
+<p>Scheduler优先级就是我们上面提到的调度过程中的优先级。在<code>ensureRootIsScheduled</code>中发起调度的时候，我们会通过<code>lanesToEventPriority</code>将<code>Lanes</code>优先级转换为事件优先级，由于事件优先级的个数和<code>schduler</code>个数一致，所以刚好可以将事件优先级转换成调度优先
+级。</p>
+<h4>优先级之间的相互转换</h4>
+<ul>
+<li><code>lane</code>优先级转<code>event</code>优先级  </li>
+</ul>
+<p>传入<code>Lane</code>优先级，判断<code>Lane</code>优先级所在的区间(<code>isHigherEventPriority</code>)，从而返回不同的<code>event</code>优先级。比如传入的优先级不大于 Discrete 优先级，就返回 Discrete 优先级，以此类推。具体实现在<code>lanesToEventPriority</code>函数中</p>
+<ul>
+<li><code>event</code> 优先级转<code>scheduler</code>优先级  </li>
+</ul>
+<p>在<code>ensureRootIsScheduled</code>中通过<code>switch...case</code>进行映射</p>
+<ul>
+<li><code>event</code> 优先级转<code>lane</code>优先级  </li>
+</ul>
+<p>根据不同的<code>event</code>类型，返回不同的<code>lane</code>优先级。具体位于<code>getEventPriority</code>函数中</p>
+<p>在<code>react</code>的每个阶段都会使用不同的优先级。 正是通过对优先级的灵活运用, <code>React</code>实现了<code>可中断渲染</code>,<code>时间切片(timeslicing)</code>,<code>异步渲染(suspense)</code>等特性。所以在学习<code>react</code>源码的时候理解优先级机制是非常重要的。</p>
+<h3>要考虑的问题</h3>
+<p>要实现优先级调度，我们需要考虑如下几个问题。</p>
+<ol>
+<li><p>如何确定不同场景下触发更新的优先级。</p>
+</li>
+<li><p>如何实现高优先级任务打断低优先级任务。也就是如果有更高优先级的任务进来，我们如何取消正在执行的任务，转而执行这个更高优先级的任务</p>
+</li>
+<li><p>如何确保低优先级任务不会一直被跳过从而处于饥饿状态。可以让低优先级任务在达到一定的时间后可以升级为高优先级任务。</p>
+</li>
+</ol>
+<p>如果弄清楚了这些问题，我们对整个优先级机制就有了更全面的认知</p>
+<h3>如何确定不同场景下触发更新的优先级</h3>
+<p>由于用户触发的各种事件上都会预先被设置带有不同的优先级，所以在更新的时候自然可以确认不同更新场景的优先级</p>
+<h3>如何实现高优先级任务打断低优先级任务</h3>
+<div class="highlight"><pre><code><span></span><span class="kd">function</span><span class="w"> </span><span class="nx">ensureRootIsScheduled</span><span class="p">(</span><span class="nx">root</span><span class="o">:</span><span class="w"> </span><span class="nx">FiberRoot</span><span class="p">,</span><span class="w"> </span><span class="nx">currentTime</span><span class="o">:</span><span class="w"> </span><span class="nx">number</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 上一次调度的任务</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">existingCallbackNode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">root</span><span class="p">.</span><span class="nx">callbackNode</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">markStarvedLanesAsExpired</span><span class="p">(</span><span class="nx">root</span><span class="p">,</span><span class="w"> </span><span class="nx">currentTime</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 找到下一个需要更新的优先级</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">nextLanes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">getNextLanes</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">root</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">root</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">workInProgressRoot</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="nx">workInProgressRootRenderLanes</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="nx">NoLanes</span><span class="p">,</span>
+<span class="w">  </span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 如果 nextLanes 为 NoLanes，就证明所有任务都执行完毕了</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">nextLanes</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">NoLanes</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="p">...</span>
+<span class="w">      </span><span class="nx">root</span><span class="p">.</span><span class="nx">callbackNode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">      </span><span class="nx">root</span><span class="p">.</span><span class="nx">callbackPriority</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">NoLane</span><span class="p">;</span>
+<span class="w">      </span><span class="c1">// 只要 nextLanes 为 NoLanes，就可以结束调度了</span>
+<span class="w">      </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 省略其他代码...</span>
+<span class="w">  </span><span class="c1">// 从nextLanes获取最高优先级，也就是本次渲染的优先级</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">newCallbackPriority</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">getHighestPriorityLane</span><span class="p">(</span><span class="nx">nextLanes</span><span class="p">);</span><span class="w"> </span>
+<span class="w">     </span><span class="c1">// 上一次遍历时的优先级</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">existingCallbackPriority</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">root</span><span class="p">.</span><span class="nx">callbackPriority</span><span class="p">;</span>
+<span class="w">   </span><span class="c1">// 相同优先级就停止调度了，不处理，可以在同一批次进行调度</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="nx">existingCallbackPriority</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">newCallbackPriority</span>
+<span class="w">  </span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 前面不相等并且存在已有的任务，说明这次的任务肯定比以前的任务优先级高，取消之前的任务</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">existingCallbackNode</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">null</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">cancelCallback</span><span class="p">(</span><span class="nx">existingCallbackNode</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 开始一个新的回调</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">newCallbackNode</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 同步渲染的模式 执行的是 performSyncWorkOnRoot</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">newCallbackPriority</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">SyncLane</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 省略其他代码</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">schedulerPriorityLevel</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// 省略优先级转换代码</span>
+<span class="w">    </span><span class="c1">// 调用schduler进行调度，回调函数就是performConcurrentWorkOnRoot，返回一个新的调度任务newCallbackNode</span>
+<span class="w">    </span><span class="nx">newCallbackNode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">scheduleCallback</span><span class="p">(</span>
+<span class="w">      </span><span class="nx">schedulerPriorityLevel</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">performConcurrentWorkOnRoot</span><span class="p">.</span><span class="nx">bind</span><span class="p">(</span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="nx">root</span><span class="p">),</span>
+<span class="w">    </span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="nx">root</span><span class="p">.</span><span class="nx">callbackPriority</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">newCallbackPriority</span><span class="p">;</span><span class="w"> </span><span class="c1">// 挂载上现在的回调函数和优先级</span>
+<span class="w">  </span><span class="nx">root</span><span class="p">.</span><span class="nx">callbackNode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">newCallbackNode</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>实现高优先级任务打断低优先级任务的代码都位于<code>ensureRootIsScheduled</code>函数中，我们对代码进行了精简，省略了不需要关注的逻辑。首先我们需要理解以下几个重要的变量</p>
+<ul>
+<li><p><code>root.callbackNode</code>：存储上一次调度调度的任务</p>
+</li>
+<li><p><code>root.callbackPriority</code>：存储上一次调度任务的优先级</p>
+</li>
+<li><p><code>newCallbackPriority</code>：本次调度任务的优先级。这里我们需要理解一个点，由于我们调度的优先级的转换规则为<code>lane优先级 -&gt; event优先级 -&gt; schduler优先级 -&gt; sortIndex</code>。所以我们每次调度的肯定是<code>lane</code>中最高优先级的赛道。</p>
+</li>
+<li><p><code>newCallbackNode</code>：本次调度产生新的任务。</p>
+</li>
+</ul>
+<p>在每一次调度开始，我们都会比较<code>root.callbackPriority</code>和<code>newCallbackPriority</code>。如果两次优先级相当，说明不需要执行高优先级任务打断低优先级任务的逻辑，并且为了优化性能，这两次更新可以进行合并，所以<code>ensureRootIsScheduled</code>会直接<code>return</code>不进行任何处理。</p>
+<p>但是一旦<code>root.callbackPriority</code>和<code>newCallbackPriority</code>不相等，就说明当前的任务优先级更高</p>
+<blockquote><p>这个也很好理解，因为每一次调度我们都是选取的最高优先级的任务，如果当前任务的优先级比上一次优先级还低的话就于我们的调度逻辑相悖了。</p>
+</blockquote>
+<p>所以如果不相等，这里我们就要执行高优先级任务打断低优先级任务的逻辑了。主要有以下几个步骤：</p>
+<ol>
+<li><p>取消上一次调度的任务</p>
+</li>
+<li><p>调度这一次的更高优先级任务</p>
+</li>
+<li><p>重启低优先级任务</p>
+</li>
+</ol>
+<h4>取消上一次调度的任务</h4>
+<div class="highlight"><pre><code><span></span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">existingCallbackNode</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">null</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">// 前面不相等并且存在已有的任务，说明这次的任务肯定比以前的任务优先级高，取消之前的任务</span>
+<span class="w">  </span><span class="nx">cancelCallback</span><span class="p">(</span><span class="nx">existingCallbackNode</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>调用<code>sheduler</code>包中的<code>cancelCallback</code>函数，这个函数很简单，就是将<code>sheduler</code>任务的回调函数置为<code>null</code></p>
+<div class="highlight"><pre><code><span></span><span class="kd">function</span><span class="w"> </span><span class="nx">unstable_cancelCallback</span><span class="p">(</span><span class="nx">task</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">task</span><span class="p">.</span><span class="nx">callback</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>如果一个任务回调函数被设置为<code>null</code>，在<code>sheduler</code>循环中会被跳过，并且从<code>taskQueue</code>中去除。从下面的代码中可以看到<code>currentTask.callback</code>不是函数就不会执行这个任务。</p>
+<div class="highlight"><pre><code><span></span><span class="kd">function</span><span class="w"> </span><span class="nx">workLoop</span><span class="p">(</span><span class="nx">hasTimeRemaining</span><span class="p">,</span><span class="w"> </span><span class="nx">initialTime</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">currentTime</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">initialTime</span><span class="p">;</span>
+<span class="w">  </span><span class="nx">advanceTimers</span><span class="p">(</span><span class="nx">currentTime</span><span class="p">);</span><span class="w"> </span><span class="c1">// 从timerQueue中提取过期任务到taskQueue中</span>
+<span class="w">  </span><span class="c1">// 通过小顶堆获取第一个最高优的任务 *** 但是并没有弹出来噢</span>
+<span class="w">  </span><span class="nx">currentTask</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">peek</span><span class="p">(</span><span class="nx">taskQueue</span><span class="p">);</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="nx">currentTask</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="kc">null</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">    </span><span class="o">!</span><span class="p">(</span><span class="nx">enableSchedulerDebugging</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">isSchedulerPaused</span><span class="p">)</span>
+<span class="w">  </span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 省略其他代码....</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">callback</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">currentTask</span><span class="p">.</span><span class="nx">callback</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="ow">typeof</span><span class="w"> </span><span class="nx">callback</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="s1">&#39;function&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// 省略其他代码....</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// 执行的方法不存在就应该删除</span>
+<span class="w">      </span><span class="nx">pop</span><span class="p">(</span><span class="nx">taskQueue</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// 省略其他代码....</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// 省略其他代码....</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>思考下，为什么我们需要取消掉这个任务，而不是直接执行高优先级任务就行了呢？</p>
+<blockquote><p>由于我们<code>sheduler</code>任务绑定的回调函数为<code>performConcurrentWorkOnRoot.bind(null, root)</code>。这个函数是绑定了<code>fiber</code>树<code>root</code>的。如果先执行高优先级的任务，那么<code>fiber</code>树的状态肯定会发生变化，这时候再用老的<code>fiber</code>树肯定不合适了，所以要舍弃这个任务，后面再开启一个新的任务。</p>
+</blockquote>
+<h4>调度这一次的更高优先级任务</h4>
+<p>调度高优先级任务就比较简单了，我们只需要再调用一次<code>scheduleCallback</code>就可以了。下一个事件循环的时候<code>sheduler</code>就会优先调用我们这个高优先级任务。</p>
+<h4>重启低优先级任务</h4>
+<p>前面提到我们会取消这个低优先级的任务，所以在完成高优先级的任务之后我们需要发起一次新的调度来重新创建这个低优先级的任务。这个逻辑在<code>commit</code>阶段中。</p>
+<div class="highlight"><pre><code><span></span><span class="kd">function</span><span class="w"> </span><span class="nx">commitRootImpl</span><span class="p">(</span>
+<span class="w">  </span><span class="nx">root</span><span class="o">:</span><span class="w"> </span><span class="nx">FiberRoot</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">recoverableErrors</span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="nb">Array</span><span class="o">&lt;</span><span class="nx">CapturedValue</span><span class="o">&lt;</span><span class="nx">mixed</span><span class="o">&gt;&gt;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">transitions</span><span class="o">:</span><span class="w"> </span><span class="nb">Array</span><span class="o">&lt;</span><span class="nx">Transition</span><span class="o">&gt;</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">renderPriorityLevel</span><span class="o">:</span><span class="w"> </span><span class="nx">EventPriority</span><span class="p">,</span>
+<span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// 省略其他代码....</span>
+<span class="w">    </span><span class="nx">root</span><span class="p">.</span><span class="nx">callbackNode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">      </span><span class="nx">root</span><span class="p">.</span><span class="nx">callbackPriority</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">NoLane</span><span class="p">;</span><span class="w"> </span><span class="c1">// 清空回调函数</span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">remainingLanes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">mergeLanes</span><span class="p">(</span><span class="nx">finishedWork</span><span class="p">.</span><span class="nx">lanes</span><span class="p">,</span><span class="w"> </span><span class="nx">finishedWork</span><span class="p">.</span><span class="nx">childLanes</span><span class="p">);</span>
+<span class="w">        </span><span class="nx">markRootFinished</span><span class="p">(</span><span class="nx">root</span><span class="p">,</span><span class="w"> </span><span class="nx">remainingLanes</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// 省略其他代码....</span>
+<span class="w">        </span><span class="nx">ensureRootIsScheduled</span><span class="p">(</span><span class="nx">root</span><span class="p">,</span><span class="w"> </span><span class="nx">now</span><span class="p">());</span>
+<span class="w">      </span><span class="c1">// 省略其他代码....</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>commitRootImpl</code>中会清空<code>root</code>上保存的当前任务和优先级。<code>remainingLanes</code>也就是我们还没有处理完的优先级，这里面就包含了我们被取消的低优先级任务，然后我们会发起一次新的<code>ensureRootIsScheduled</code>。</p>
+<div class="highlight"><pre><code><span></span><span class="kd">function</span><span class="w"> </span><span class="nx">ensureRootIsScheduled</span><span class="p">(</span><span class="nx">root</span><span class="o">:</span><span class="w"> </span><span class="nx">FiberRoot</span><span class="p">,</span><span class="w"> </span><span class="nx">currentTime</span><span class="o">:</span><span class="w"> </span><span class="nx">number</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">nextLanes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">getNextLanes</span><span class="p">(</span>
+<span class="w">    </span><span class="nx">root</span><span class="p">,</span><span class="w"> </span><span class="nx">root</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">workInProgressRoot</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="nx">workInProgressRootRenderLanes</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="nx">NoLanes</span>
+<span class="w">  </span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 如果 nextLanes 为 NoLanes，就证明所有任务都执行完毕了</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">nextLanes</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">NoLanes</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="p">...</span>
+<span class="w">      </span><span class="nx">root</span><span class="p">.</span><span class="nx">callbackNode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">      </span><span class="nx">root</span><span class="p">.</span><span class="nx">callbackPriority</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">NoLane</span><span class="p">;</span>
+<span class="w">      </span><span class="c1">// 只要 nextLanes 为 NoLanes，就可以结束调度了</span>
+<span class="w">      </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// 如果 nextLanes 不为 NoLanes，就代表还有任务未执行完，也就是那些被打断的低优先级任务</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这时候<code>nextLanes</code>肯定不为<code>NoLanes</code>。所以我们会重新发起一次<code>scheduleCallback</code>（不管这一次调度是不是被取消的那一次的优先级，只要<code>nextLanes</code>不为空，最后肯定会调用到我们被取消的那一次优先级）</p>
+<blockquote><p>举个例子：初始状态A为0b00100，来了一个高优先任务B变成了0b00110，之后又来了一个更高优先级C变成了0b00111。最后任务的的调度流程为C -&gt; B -&gt; A</p>
+</blockquote>
+<h3>如何确保低优先级任务不会一直被跳过从而处于饥饿状态</h3>
+<p>按照高优先级打断低优先级的规则，如果一直有高优先级任务过来，那我们的低优先级任务岂不是没有重启之日？所以 react 为了解决低优先级任务的饥饿问题，在<code>ensureRootIsScheduled</code> 函数开始的时候调用<code>markStarvedLanesAsExpired</code>来处理饥饿问题。</p>
+<div class="highlight"><pre><code><span></span><span class="k">export</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">markStarvedLanesAsExpired</span><span class="p">(</span>
+<span class="w">  </span><span class="nx">root</span><span class="o">:</span><span class="w"> </span><span class="nx">FiberRoot</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">currentTime</span><span class="o">:</span><span class="w"> </span><span class="nx">number</span><span class="p">,</span>
+<span class="p">)</span><span class="o">:</span><span class="w"> </span><span class="ow">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">pendingLanes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">root</span><span class="p">.</span><span class="nx">pendingLanes</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">suspendedLanes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">root</span><span class="p">.</span><span class="nx">suspendedLanes</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">pingedLanes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">root</span><span class="p">.</span><span class="nx">pingedLanes</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">expirationTimes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">root</span><span class="p">.</span><span class="nx">expirationTimes</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">lanes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">pendingLanes</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">lanes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">pendingLanes</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="nx">lanes</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">pickArbitraryLaneIndex</span><span class="p">(</span><span class="nx">lanes</span><span class="p">);</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">lane</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="nx">index</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">expirationTime</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">expirationTimes</span><span class="p">[</span><span class="nx">index</span><span class="p">];</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">expirationTime</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">NoTimestamp</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span>
+<span class="w">        </span><span class="p">(</span><span class="nx">lane</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="nx">suspendedLanes</span><span class="p">)</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="nx">NoLanes</span><span class="w"> </span><span class="o">||</span>
+<span class="w">        </span><span class="p">(</span><span class="nx">lane</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="nx">pingedLanes</span><span class="p">)</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="nx">NoLanes</span>
+<span class="w">      </span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nx">expirationTimes</span><span class="p">[</span><span class="nx">index</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">computeExpirationTime</span><span class="p">(</span><span class="nx">lane</span><span class="p">,</span><span class="w"> </span><span class="nx">currentTime</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">expirationTime</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="nx">currentTime</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">root</span><span class="p">.</span><span class="nx">expiredLanes</span><span class="w"> </span><span class="o">|=</span><span class="w"> </span><span class="nx">lane</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="nx">lanes</span><span class="w"> </span><span class="o">&amp;=</span><span class="w"> </span><span class="o">~</span><span class="nx">lane</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>markStarvedLanesAsExpired</code>会遍历判断<code>Lane</code>的每一位，看下对应的优先级的任务是否过期，如果过期的话就添加到<code>root.expiredLanes</code>上面去。后续在<code>performConcurrentWorkOnRoot</code>中会通过<code>includesExpiredLane(root, lanes)</code>来判断当前任务是否过期，如果过期了的话就会使用同步的方式去调度。</p>
+<div class="highlight"><pre><code><span></span><span class="kd">const</span><span class="w"> </span><span class="nx">shouldTimeSlice</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="c1">// 是否启用时间分片</span>
+<span class="w">    </span><span class="o">!</span><span class="nx">includesBlockingLane</span><span class="p">(</span><span class="nx">root</span><span class="p">,</span><span class="w"> </span><span class="nx">lanes</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">    </span><span class="o">!</span><span class="nx">includesExpiredLane</span><span class="p">(</span><span class="nx">root</span><span class="p">,</span><span class="w"> </span><span class="nx">lanes</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">    </span><span class="p">(</span><span class="nx">disableSchedulerTimeoutInWorkLoop</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">!</span><span class="nx">didTimeout</span><span class="p">);</span>
+
+<span class="kd">let</span><span class="w"> </span><span class="nx">exitStatus</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">shouldTimeSlice</span>
+<span class="w">    </span><span class="o">?</span><span class="w"> </span><span class="nx">renderRootConcurrent</span><span class="p">(</span><span class="nx">root</span><span class="p">,</span><span class="w"> </span><span class="nx">lanes</span><span class="p">)</span>
+<span class="w">    </span><span class="o">:</span><span class="w"> </span><span class="nx">renderRootSync</span><span class="p">(</span><span class="nx">root</span><span class="p">,</span><span class="w"> </span><span class="nx">lanes</span><span class="p">);</span>
+</code></pre></div>
+<blockquote><p>不过这里有一个疑问，就算在<code>performConcurrentWorkOnRoot</code>中使用同步的方式去调用，如果一直有高优先级任务进来的话，低优先级任务还是不能得到及时执行。在<code>react17</code>中，<code>ensureRootIsScheduled</code>中获取优先级的函数<code>getNextLanes</code>会优先读取过期的优先级，但是<code>react18</code>中去掉了这个代码。这里原因还在调查中，有知道的大佬还请多多指教。</p>
+</blockquote>
+<h2>实战</h2>
+<p><code>react-sheduler</code>会被导出成单独的<code>npm</code>包，所以在业务中如果遇到耗时高的任务，我们可以利用<code>sheduler</code>的任务调度和时间分片来提高我们系统的性能。例如长列表计算，复杂表单计算等等。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">&lt;!DOCTYPE html&gt;</span>
+<span class="p">&lt;</span><span class="nt">html</span> <span class="na">lang</span><span class="o">=</span><span class="s">&quot;en&quot;</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">head</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">charset</span><span class="o">=</span><span class="s">&quot;UTF-8&quot;</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">name</span><span class="o">=</span><span class="s">&quot;viewport&quot;</span> <span class="na">content</span><span class="o">=</span><span class="s">&quot;width=device-width, initial-scale=1.0&quot;</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">title</span><span class="p">&gt;</span>Scheduler<span class="p">&lt;/</span><span class="nt">title</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">head</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">body</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">script</span> <span class="na">src</span><span class="o">=</span><span class="s">&quot;https://unpkg.com/scheduler@0.23.2/umd/scheduler.production.min.js&quot;</span><span class="p">&gt;&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">script</span> <span class="na">src</span><span class="o">=</span><span class="s">&quot;https://unpkg.com/react@18.3.1/umd/react.development.js&quot;</span><span class="p">&gt;&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">body</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">html</span><span class="p">&gt;</span>
+
+<span class="p">&lt;</span><span class="nt">script</span><span class="p">&gt;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">unstable_scheduleCallback</span><span class="o">:</span><span class="w"> </span><span class="nx">scheduleCallback</span><span class="p">,</span><span class="w"> </span><span class="nx">unstable_shouldYield</span><span class="o">:</span><span class="w"> </span><span class="nx">shouldYield</span><span class="p">,</span><span class="w"> </span><span class="nx">unstable_NormalPriority</span><span class="o">:</span><span class="w"> </span><span class="nx">normalPriority</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">Scheduler</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">list</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Array</span><span class="p">.</span><span class="kr">from</span><span class="p">({</span><span class="w"> </span><span class="nx">length</span><span class="o">:</span><span class="w"> </span><span class="mf">3000</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">(</span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">i</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">i</span><span class="p">);</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">doTask</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">list</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span>
+<span class="w">    </span><span class="k">while</span><span class="p">(</span><span class="nx">index</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">list</span><span class="p">.</span><span class="nx">length</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">now</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">performance</span><span class="p">.</span><span class="nx">now</span><span class="p">();</span>
+<span class="w">      </span><span class="k">while</span><span class="p">(</span><span class="nx">performance</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">now</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">// 模拟耗时操作</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="nx">result</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">list</span><span class="p">[</span><span class="nx">index</span><span class="o">++</span><span class="p">]);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">result</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span><span class="w"> </span><span class="c1">// 此处要定义为全局变量</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">doTaskWithScheduler</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">list</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">performTask</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">while</span><span class="p">(</span><span class="nx">index</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">list</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="nx">shouldYield</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">const</span><span class="w"> </span><span class="nx">now</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">performance</span><span class="p">.</span><span class="nx">now</span><span class="p">();</span>
+<span class="w">        </span><span class="k">while</span><span class="p">(</span><span class="nx">performance</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">now</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">// 模拟耗时操作</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="nx">result</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">list</span><span class="p">[</span><span class="nx">index</span><span class="p">]);</span>
+<span class="w">        </span><span class="nx">index</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mf">1</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">index</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">list</span><span class="p">.</span><span class="nx">length</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nx">performTask</span><span class="p">;</span><span class="w"> </span><span class="c1">// 没执行完继续返回执行</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">result</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">task</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">scheduleCallback</span><span class="p">(</span><span class="nx">normalPriority</span><span class="p">,</span><span class="w"> </span><span class="nx">performTask</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nx">task</span><span class="p">.</span><span class="nx">cancel</span><span class="p">()</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// doTask(list); // 未启用Scheduler</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">task</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">doTaskWithScheduler</span><span class="p">(</span><span class="nx">list</span><span class="p">)</span><span class="w"> </span><span class="c1">// 启用Scheduler</span>
+<span class="p">&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+</code></pre></div>
+<p>例如我们实现了一个简易的长列表计算逻辑，<code>doTask</code>和<code>doTaskWithScheduler</code>分别是没开启/开启了<code>Scheduler</code>的情况。最终的
+火焰图如下。</p>
+<h3>未启用Scheduler</h3>
+<h3>启用Scheduler</h3>
+<p>可以看到启用<code>Scheduler</code>之后，浏览器每一帧基本<code>js</code>线程都只会占用5ms，不会影响浏览器的渲染。但是未启用的情况下足足阻塞了浏览器主线程3s，这三秒期间浏览器不会有任何响应。</p>
+<h2>总结</h2>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240521-1955-3.png" alt=""></p>
+<p>到此我们的文章就已接近尾声，其实整个<code>react</code>运行的过程就是三个循环相互配合的过程。三个循环分别位于浏览器，<code>Scheduler</code>和<code>Reconciler</code>。然后我们再整体串一下整个流程：</p>
+<ol>
+<li><p>用户触发<code>setState、forceUpdate、render</code>这些会引起页面重新渲染的函数时，<code>react</code>会依次调用<code>updateContainer -&gt; scheduleUpdateOnFiber -&gt; ensureRootIsScheduled</code>。<code>ensureRootIsScheduled</code>会在<code>taskQueue</code>中注册一个任务，同时会调用<code>MessageChannel</code>表示需要发起调度。</p>
+</li>
+<li><p>在浏览器事件循环中监听到<code>MessageChannel</code>触发<code>Scheduler</code>调度，从而开启我们的<code>Scheduler workloop</code>循环。同时<code>Scheduler workloop</code>的每一次循环中都会判断当前帧是否还有空闲时间，如果没有会立刻中断循环。然后判断是否还有任务需要调度来决定是不是要发起一次新的调度。</p>
+</li>
+<li><p>在<code>Scheduler workloop</code>中会从<code>taskQueue</code>中不断的获取任务并执行，任务的回调函数也就是我们的<code>performConcurrentWorkOnRoot</code>。在<code>performConcurrentWorkOnRoot</code>中会开启<code>fiber</code>构建循环<code>workLoopConcurrent</code>。循环的通过<code>vdom</code>去构建<code>fiber</code>树。每一次循环也都会判断当前帧是否还有空闲时间，如果没有会立刻中断。同时记录当前构建的状态，并返回<code>performConcurrentWorkOnRoot</code>函数本身，表示当前任务未执行完，在下次调度的时候从上一次记录的状态开始构建。</p>
+</li>
+</ol>
+<p><code>react</code>源码中还有非常多值得学习和探讨的地方，本篇文章也只是站在一个比较宏观的角度将<code>react</code>中比较重要的几个部分进行串联，相信看完之后大家对<code>react</code>也有了整体的认识，再去看源码的话也不至于一头雾水。</p>
+<p>最后，鉴于本人水平有限，文中有错误的地方还请各位大佬批评指正。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "彻底理解react中任务调度和时间分片.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

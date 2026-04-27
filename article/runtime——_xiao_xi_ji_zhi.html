@@ -1,0 +1,613 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>runtime——消息机制 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="runtime——消息机制,iOS,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="runtime——消息机制" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>runtime——消息机制</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2016-07-01 15:39
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_ios.html' class='article_tag'>iOS</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='http://www.jianshu.com/p/a63b5d973c63' target='blank'>runtime——消息机制</a></p></h4>
+<p><strong>从异常说起</strong></p>
+<p>我们都知道，在iOS中存在这么一个通用类类型id，它可以用来表示任何对象的类型 ——
+这意味着我们使用id类型的对象调用任何一个方法，编译器都不会进行报错。比如下面这段代码：</p>
+<div class="highlight"><pre><code><span></span><span class="n">id</span><span class="w"> </span><span class="n">wrongArr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">@</span><span class="s">&quot;This is a NSString instance.&quot;</span><span class="p">;</span>
+<span class="p">[</span><span class="n">wrongArr</span><span class="w"> </span><span class="n">addObject</span><span class="o">:</span><span class="w"> </span><span class="err">@</span><span class="s">&quot;The operate will crash your application&quot;</span><span class="p">];</span>
+</code></pre></div>
+<p>不出意外的，编译器会给你这么一个信息然后华丽丽的崩溃了。相信几乎所有的开发者们在开发生涯中都遇到过这种崩溃信息：</p>
+<div class="highlight"><pre><code><span></span><span class="o">-</span><span class="p">[</span><span class="n">__NSCFConstantString</span><span class="w"> </span><span class="n">addObject</span><span class="o">:</span><span class="p">]</span><span class="o">:</span><span class="w"> </span><span class="n">unrecognized</span><span class="w"> </span><span class="n">selector</span><span class="w"> </span><span class="n">sent</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">instance</span><span class="w"> </span><span class="mh">0x10675c060</span>
+</code></pre></div>
+<p>很简单，我们朝着一个地址为0x10675c060的实例对象发送了不属于这个对象的方法。这句话不是instance 0x10675c060 called
+unrecognized selector，而是消息发送错误。实际上，我们每一次对OC对象的方法调用都是一次消息的发送</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/1464058756801769.jpg" alt="783864-d2544915fc753f76.jpg"></p>
+<p>消息发送异常</p>
+<p><strong>关于静态语言和动态语言</strong></p>
+<p>这里要先介绍计算机的开发语言的一个专业名词：动态语言和静态语言。确切的说，OC是一门动态语言。动态语言和静态语言两者的区别如下：</p>
+<ul>
+<li><p><strong>静态语言：</strong> 静态语言在运行前会进行类型判断，类的所有成员、方法都会在编译阶段确定好内存地址。类成员只能访问属于自己的方法和变量，像上面的调用代码无法通过编译，会直接引起编译器报错。但因为如此，静态语言结构规范、便于调试、且可以进行多样的性能优化。常见的静态语言包括java/C++/C等</p>
+</li>
+<li><p><strong>动态语言：</strong>大部分的判断工作被推迟到运行时进行，类的成员变量、方法地址都在运行时确认。可以在运行时动态的添加类成员、方法等。具有较高的灵活性和可定制性、便于阅读，但方法通常无法进行内联等优化</p>
+</li>
+</ul>
+<p>两种语言孰优孰略本人不在这里做判断，但是要知道的是smalltalk是动态语言的鼻祖，更是OC发展的最大推动力。在smalltalk中，所有的东西都是对象（
+或者都应该被当做对象），例如表达式2 + 3被理解成向对象2发送了消息+，其中接收的参数是 3</p>
+<p><strong>消息发送</strong></p>
+<p>在前篇<a href="http://www.jianshu.com/p/2c0305676621">runtime-属性与变量</a>中我们导入过runtime的头文件实现了一
+键归档功能，今天我们要导入另外一个文件：</p>
+<p>在OC中，调用一个方法的格式如下：</p>
+<div class="highlight"><pre><code><span></span><span class="p">[</span><span class="n">davin</span><span class="w"> </span><span class="n">playWith</span><span class="o">:</span><span class="w"> </span><span class="n">friend</span><span class="p">];</span>
+</code></pre></div>
+<p>在方法调用的时候，runtime会将上面的方法调用转换成一个C语言的函数调用，表示朝着davin发送了一个playWith:消息，并传入了friend这个参
+数：</p>
+<div class="highlight"><pre><code><span></span><span class="n">objc_msgSend</span><span class="p">(</span><span class="n">davin</span><span class="p">,</span><span class="w"> </span><span class="err">@</span><span class="n">selector</span><span class="p">(</span><span class="n">playWith</span><span class="o">:</span><span class="p">),</span><span class="w"> </span><span class="n">friend</span><span class="p">);</span>
+</code></pre></div>
+<p>那么在这个C语言函数中发生了什么事情？编译器是如何找到这个类的方法的呢？苹果开源了<a href="http://opensource.apple.com
+//tarballs/">runtime</a>的实现代码，其中为了高度优化性能，苹果使用汇编实现了这个函数（源码处于Source/objc-msg-arm.s文件下）：</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/*****************************************************************</span>
+<span class="cm"> *</span>
+<span class="cm"> * id objc_msgSend(id self, SEL    _cmd,...);</span>
+<span class="cm"> *</span>
+<span class="cm"> *****************************************************************/</span>
+<span class="w">    </span><span class="n">ENTRY</span><span class="w"> </span><span class="n">objc_msgSend</span>
+<span class="w">    </span><span class="n">MESSENGER_START</span>
+<span class="w">    </span><span class="n">cbz</span><span class="w">    </span><span class="n">r0</span><span class="p">,</span><span class="w"> </span><span class="n">LNilReceiver_f</span><span class="w">  </span><span class="c1">// 判断消息接收者是否为nil</span>
+<span class="w">    </span><span class="n">ldr</span><span class="w">    </span><span class="n">r9</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">r0</span><span class="p">]</span><span class="w">   </span><span class="c1">// r9 = self-&gt;isa</span>
+<span class="w">    </span><span class="n">CacheLookup</span><span class="w"> </span><span class="n">NORMAL</span><span class="w">  </span><span class="c1">// 到缓存中查找方法</span>
+<span class="nl">LCacheMiss</span><span class="p">:</span><span class="w">         </span><span class="c1">// 方法未缓存</span>
+<span class="w">    </span><span class="n">MESSENGER_END_SLOW</span>
+<span class="w">    </span><span class="n">ldr</span><span class="w">    </span><span class="n">r9</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">r0</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="n">ISA</span><span class="p">]</span>
+<span class="w">    </span><span class="n">b</span><span class="w">    </span><span class="n">__objc_msgSend_uncached</span>
+<span class="nl">LNilReceiver</span><span class="p">:</span><span class="w">      </span><span class="c1">// 消息接收者为nil处理</span>
+<span class="w">    </span><span class="n">mov</span><span class="w">    </span><span class="n">r1</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mi">0</span>
+<span class="w">    </span><span class="n">mov</span><span class="w">    </span><span class="n">r2</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mi">0</span>
+<span class="w">    </span><span class="n">mov</span><span class="w">    </span><span class="n">r3</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mi">0</span>
+<span class="w">    </span><span class="n">FP_RETURN_ZERO</span>
+<span class="w">    </span><span class="n">MESSENGER_END_NIL</span>
+<span class="w">    </span><span class="n">bx</span><span class="w">    </span><span class="n">lr</span>
+<span class="nl">LMsgSendExit</span><span class="p">:</span>
+<span class="w">    </span><span class="n">END_ENTRY</span><span class="w"> </span><span class="n">objc_msgSend</span>
+</code></pre></div>
+<p>即使不懂汇编，上面的代码通过注释后也足以让各位一窥究竟。从上述代码中我们可以看到一个方法调用过程中发生的事情，包括：</p>
+<ul>
+<li><p>判断接收者是否为nil，如果为nil，清空寄存器，消息发送返回nil</p>
+</li>
+<li><p>到类缓存中查找方法，如果存在直接返回方法</p>
+</li>
+<li><p>没有找到缓存，到类的方法列表中依次寻找</p>
+</li>
+</ul>
+<p>查找方法实现是通过_class_lookupMethodAndLoadCache3这个奇怪的函数完成的：</p>
+<div class="highlight"><pre><code><span></span><span class="n">IMP</span><span class="w"> </span><span class="nf">_class_lookupMethodAndLoadCache3</span><span class="p">(</span><span class="n">id</span><span class="w"> </span><span class="n">obj</span><span class="p">,</span><span class="w"> </span><span class="n">SEL</span><span class="w"> </span><span class="n">sel</span><span class="p">,</span><span class="w"> </span><span class="n">Class</span><span class="w"> </span><span class="n">cls</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">lookUpImpOrForward</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">sel</span><span class="p">,</span><span class="w"> </span><span class="n">obj</span><span class="p">,</span>
+<span class="w">                          </span><span class="n">YES</span><span class="cm">/*initialize*/</span><span class="p">,</span><span class="w"> </span><span class="n">NO</span><span class="cm">/*cache*/</span><span class="p">,</span><span class="w"> </span><span class="n">YES</span><span class="cm">/*resolver*/</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="n">IMP</span><span class="w"> </span><span class="nf">lookUpImpOrForward</span><span class="p">(</span><span class="n">Class</span><span class="w"> </span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">SEL</span><span class="w"> </span><span class="n">sel</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">inst</span><span class="p">,</span>
+<span class="w">                   </span><span class="kt">bool</span><span class="w"> </span><span class="n">initialize</span><span class="p">,</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">cache</span><span class="p">,</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">resolver</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">Class</span><span class="w"> </span><span class="n">curClass</span><span class="p">;</span>
+<span class="w">    </span><span class="n">IMP</span><span class="w"> </span><span class="n">methodPC</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nil</span><span class="p">;</span>
+<span class="w">    </span><span class="n">Method</span><span class="w"> </span><span class="n">meth</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">triedResolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NO</span><span class="p">;</span>
+<span class="w">    </span><span class="n">methodListLock</span><span class="p">.</span><span class="n">assertUnlocked</span><span class="p">();</span>
+<span class="w">    </span><span class="c1">// 如果传入的cache为YES，到类缓存中查找方法缓存</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">cache</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">methodPC</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_cache_getImp</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">sel</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">methodPC</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">methodPC</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// 判断类是否已经被释放</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">cls</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">_class_getFreedObjectClass</span><span class="p">())</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="n">IMP</span><span class="p">)</span><span class="w"> </span><span class="n">_freedHandler</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// 如果类未初始化，对其进行初始化。如果这个消息是initialize，那么直接进行类的初始化</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">initialize</span><span class="w">  </span><span class="o">&amp;&amp;</span><span class="w">  </span><span class="o">!</span><span class="n">cls</span><span class="o">-&gt;</span><span class="n">isInitialized</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">_class_initialize</span><span class="w"> </span><span class="p">(</span><span class="n">_class_getNonMetaClass</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">inst</span><span class="p">));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w"> </span><span class="nl">retry</span><span class="p">:</span>
+<span class="w">    </span><span class="n">methodListLock</span><span class="p">.</span><span class="n">lock</span><span class="p">();</span>
+<span class="w">    </span><span class="c1">// 忽略在GC环境下的部分消息，比如retain、release等</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">ignoreSelector</span><span class="p">(</span><span class="n">sel</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">methodPC</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_cache_addIgnoredEntry</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">sel</span><span class="p">);</span>
+<span class="w">        </span><span class="k">goto</span><span class="w"> </span><span class="n">done</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// 遍历缓存方法，如果找到，直接返回</span>
+<span class="w">    </span><span class="n">methodPC</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_cache_getImp</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">sel</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">methodPC</span><span class="p">)</span><span class="w"> </span><span class="k">goto</span><span class="w"> </span><span class="n">done</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// 遍历类自身的方法列表查找方法实现</span>
+<span class="w">    </span><span class="n">meth</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_class_getMethodNoSuper_nolock</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">sel</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">meth</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">log_and_fill_cache</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">meth</span><span class="p">,</span><span class="w"> </span><span class="n">sel</span><span class="p">);</span>
+<span class="w">        </span><span class="n">methodPC</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">method_getImplementation</span><span class="p">(</span><span class="n">meth</span><span class="p">);</span>
+<span class="w">        </span><span class="k">goto</span><span class="w"> </span><span class="n">done</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// 尝试向上遍历父类的方法列表查找实现</span>
+<span class="w">    </span><span class="n">curClass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cls</span><span class="p">;</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">((</span><span class="n">curClass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">curClass</span><span class="o">-&gt;</span><span class="n">superclass</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Superclass cache.</span>
+<span class="w">        </span><span class="n">meth</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_cache_getMethod</span><span class="p">(</span><span class="n">curClass</span><span class="p">,</span><span class="w"> </span><span class="n">sel</span><span class="p">,</span><span class="w"> </span><span class="n">_objc_msgForward_impcache</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">meth</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">meth</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="p">(</span><span class="n">Method</span><span class="p">)</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">log_and_fill_cache</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">curClass</span><span class="p">,</span><span class="w"> </span><span class="n">meth</span><span class="p">,</span><span class="w"> </span><span class="n">sel</span><span class="p">);</span>
+<span class="w">                </span><span class="n">methodPC</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">method_getImplementation</span><span class="p">(</span><span class="n">meth</span><span class="p">);</span>
+<span class="w">                </span><span class="k">goto</span><span class="w"> </span><span class="n">done</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">            </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="c1">// Found a forward:: entry in a superclass.</span>
+<span class="w">                </span><span class="c1">// Stop searching, but don&#39;t cache yet; call method</span>
+<span class="w">                </span><span class="c1">// resolver for this class first.</span>
+<span class="w">                </span><span class="k">break</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="c1">// 查找父类的方法列表</span>
+<span class="w">        </span><span class="n">meth</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_class_getMethodNoSuper_nolock</span><span class="p">(</span><span class="n">curClass</span><span class="p">,</span><span class="w"> </span><span class="n">sel</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">meth</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">log_and_fill_cache</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">curClass</span><span class="p">,</span><span class="w"> </span><span class="n">meth</span><span class="p">,</span><span class="w"> </span><span class="n">sel</span><span class="p">);</span>
+<span class="w">            </span><span class="n">methodPC</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">method_getImplementation</span><span class="p">(</span><span class="n">meth</span><span class="p">);</span>
+<span class="w">            </span><span class="k">goto</span><span class="w"> </span><span class="n">done</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// 没有找到任何的方法实现，进入消息转发第一阶段“动态方法解析”</span>
+<span class="w">    </span><span class="c1">// 调用+ (BOOL)resolveInstanceMethod: (SEL)selector</span>
+<span class="w">    </span><span class="c1">// 征询接收者所属的类是否能够动态的添加这个未实现的方法来解决问题</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">resolver</span><span class="w">  </span><span class="o">&amp;&amp;</span><span class="w">  </span><span class="o">!</span><span class="n">triedResolver</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">methodListLock</span><span class="p">.</span><span class="n">unlock</span><span class="p">();</span>
+<span class="w">        </span><span class="n">_class_resolveMethod</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">sel</span><span class="p">,</span><span class="w"> </span><span class="n">inst</span><span class="p">);</span>
+<span class="w">        </span><span class="n">triedResolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">YES</span><span class="p">;</span>
+<span class="w">        </span><span class="k">goto</span><span class="w"> </span><span class="n">retry</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// 仍然没有找到方法实现进入消息转发第二阶段“备援接收者”</span>
+<span class="w">    </span><span class="c1">// 先后会调用 -(id)forwardingTargetForSelector: (SEL)selector</span>
+<span class="w">    </span><span class="c1">// 以及 - (void)forwardInvocation: (NSInvocation*)invocation 进行最后的补救</span>
+<span class="w">    </span><span class="c1">// 如果补救未成功抛出消息发送错误异常</span>
+<span class="w">    </span><span class="n">_cache_addForwardEntry</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">sel</span><span class="p">);</span>
+<span class="w">    </span><span class="n">methodPC</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_objc_msgForward_impcache</span><span class="p">;</span>
+<span class="w"> </span><span class="nl">done</span><span class="p">:</span>
+<span class="w">    </span><span class="n">methodListLock</span><span class="p">.</span><span class="n">unlock</span><span class="p">();</span>
+<span class="w">    </span><span class="n">assert</span><span class="p">(</span><span class="o">!</span><span class="p">(</span><span class="n">ignoreSelector</span><span class="p">(</span><span class="n">sel</span><span class="p">)</span><span class="w">  </span><span class="o">&amp;&amp;</span><span class="w">  </span><span class="n">methodPC</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="p">(</span><span class="n">IMP</span><span class="p">)</span><span class="o">&amp;</span><span class="n">_objc_ignored_method</span><span class="p">));</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">methodPC</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>上面就是一个方法调用的全部过程。主要分为三个部分：</p>
+<ul>
+<li><strong>查找是否存在对应的方法缓存，如果存在直接返回调用</strong></li>
+</ul>
+<p>为了优化性能，方法的缓存使用了散列表的方式，在下一部分会进行比较详细的讲述</p>
+<ul>
+<li><strong>未找到缓存，到类本身或顺着类结构向上查找方法实现，返回的method_t *类型也被命名为Method</strong></li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="c1">//非加锁状态下查找方法实现</span>
+<span class="k">static</span><span class="w"> </span><span class="n">method_t</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nf">getMethodNoSuper_nolock</span><span class="p">(</span><span class="n">Class</span><span class="w"> </span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">SEL</span><span class="w"> </span><span class="n">sel</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">runtimeLock</span><span class="p">.</span><span class="n">assertLocked</span><span class="p">();</span>
+<span class="w">    </span><span class="n">assert</span><span class="p">(</span><span class="n">cls</span><span class="o">-&gt;</span><span class="n">isRealized</span><span class="p">());</span>
+<span class="w">    </span><span class="c1">// fixme nil cls?</span>
+<span class="w">    </span><span class="c1">// fixme nil sel?</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="w"> </span><span class="n">mlists</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cls</span><span class="o">-&gt;</span><span class="n">data</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">methods</span><span class="p">.</span><span class="n">beginLists</span><span class="p">(),</span>
+<span class="w">            </span><span class="n">end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cls</span><span class="o">-&gt;</span><span class="n">data</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">methods</span><span class="p">.</span><span class="n">endLists</span><span class="p">();</span>
+<span class="w">             </span><span class="n">mlists</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">end</span><span class="p">;</span>
+<span class="w">               </span><span class="o">++</span><span class="n">mlists</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="n">method_t</span><span class="w"> </span><span class="o">*</span><span class="n">m</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">search_method_list</span><span class="p">(</span><span class="o">*</span><span class="n">mlists</span><span class="p">,</span><span class="w"> </span><span class="n">sel</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">m</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">m</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">nil</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="c1">// 搜索方法列表</span>
+<span class="k">static</span><span class="w"> </span><span class="n">method_t</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nf">search_method_list</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">method_list_t</span><span class="w"> </span><span class="o">*</span><span class="n">mlist</span><span class="p">,</span><span class="w"> </span><span class="n">SEL</span><span class="w"> </span><span class="n">sel</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">methodListIsFixedUp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">mlist</span><span class="o">-&gt;</span><span class="n">isFixedUp</span><span class="p">();</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">methodListHasExpectedSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">mlist</span><span class="o">-&gt;</span><span class="n">entsize</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">method_t</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">__builtin_expect</span><span class="p">(</span><span class="n">methodListIsFixedUp</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">methodListHasExpectedSize</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="c1">// 对有序数组进行线性探测</span>
+<span class="w">          </span><span class="k">return</span><span class="w"> </span><span class="n">findMethodInSortedMethodList</span><span class="p">(</span><span class="n">sel</span><span class="p">,</span><span class="w"> </span><span class="n">mlist</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Linear search of unsorted method list</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">meth</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">mlist</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">meth</span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">sel</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="o">&amp;</span><span class="n">meth</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="cp">#if DEBUG</span>
+<span class="w">    </span><span class="c1">// sanity-check negative results</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">mlist</span><span class="o">-&gt;</span><span class="n">isFixedUp</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">meth</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">mlist</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">meth</span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">sel</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">_objc_fatal</span><span class="p">(</span><span class="s">&quot;linear search worked when binary search did not&quot;</span><span class="p">);</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="cp">#endif</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">nil</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>如果在这个步骤中找到了方法的实现，那么将它加入到方法缓存中以便下次调用能快速找到：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 记录并且缓存方法</span>
+<span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">log_and_fill_cache</span><span class="p">(</span><span class="n">Class</span><span class="w"> </span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">IMP</span><span class="w"> </span><span class="n">imp</span><span class="p">,</span><span class="w"> </span><span class="n">SEL</span><span class="w"> </span><span class="n">sel</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">receiver</span><span class="p">,</span><span class="w"> </span><span class="n">Class</span><span class="w"> </span><span class="n">implementer</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="cp">#if SUPPORT_MESSAGE_LOGGING</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">objcMsgLogEnabled</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">bool</span><span class="w"> </span><span class="n">cacheIt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">logMessageSend</span><span class="p">(</span><span class="n">implementer</span><span class="o">-&gt;</span><span class="n">isMetaClass</span><span class="p">(),</span>
+<span class="w">                                </span><span class="n">cls</span><span class="o">-&gt;</span><span class="n">nameForLogging</span><span class="p">(),</span>
+<span class="w">                                </span><span class="n">implementer</span><span class="o">-&gt;</span><span class="n">nameForLogging</span><span class="p">(),</span>
+<span class="w">                                </span><span class="n">sel</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">cacheIt</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="cp">#endif</span>
+<span class="w">    </span><span class="n">cache_fill</span><span class="w"> </span><span class="p">(</span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">sel</span><span class="p">,</span><span class="w"> </span><span class="n">imp</span><span class="p">,</span><span class="w"> </span><span class="n">receiver</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="c1">//在无加锁状态下缓存方法</span>
+<span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">cache_fill_nolock</span><span class="p">(</span><span class="n">Class</span><span class="w"> </span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">SEL</span><span class="w"> </span><span class="n">sel</span><span class="p">,</span><span class="w"> </span><span class="n">IMP</span><span class="w"> </span><span class="n">imp</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">receiver</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">cacheUpdateLock</span><span class="p">.</span><span class="n">assertLocked</span><span class="p">();</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">cls</span><span class="o">-&gt;</span><span class="n">isInitialized</span><span class="p">())</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">cache_getImp</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">sel</span><span class="p">))</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+<span class="w">    </span><span class="n">cache_t</span><span class="w"> </span><span class="o">*</span><span class="n">cache</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">getCache</span><span class="p">(</span><span class="n">cls</span><span class="p">);</span>
+<span class="w">    </span><span class="n">cache_key_t</span><span class="w"> </span><span class="n">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">getKey</span><span class="p">(</span><span class="n">sel</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// 如果缓存占用不到3/4，进行缓存。</span>
+<span class="w">    </span><span class="n">mask_t</span><span class="w"> </span><span class="n">newOccupied</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cache</span><span class="o">-&gt;</span><span class="n">occupied</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">    </span><span class="n">mask_t</span><span class="w"> </span><span class="n">capacity</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cache</span><span class="o">-&gt;</span><span class="n">capacity</span><span class="p">();</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">cache</span><span class="o">-&gt;</span><span class="n">isConstantEmptyCache</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">cache</span><span class="o">-&gt;</span><span class="n">reallocate</span><span class="p">(</span><span class="n">capacity</span><span class="p">,</span><span class="w"> </span><span class="n">capacity</span><span class="w"> </span><span class="o">?:</span><span class="w"> </span><span class="n">INIT_CACHE_SIZE</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">newOccupied</span><span class="w"> </span><span class="n">expand</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">bucket_t</span><span class="w"> </span><span class="o">*</span><span class="n">bucket</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cache</span><span class="o">-&gt;</span><span class="n">find</span><span class="p">(</span><span class="n">key</span><span class="p">,</span><span class="w"> </span><span class="n">receiver</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">bucket</span><span class="o">-&gt;</span><span class="n">key</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="n">cache</span><span class="o">-&gt;</span><span class="n">incrementOccupied</span><span class="p">();</span>
+<span class="w">    </span><span class="n">bucket</span><span class="o">-&gt;</span><span class="n">set</span><span class="p">(</span><span class="n">key</span><span class="p">,</span><span class="w"> </span><span class="n">imp</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>如果在类自身中没有找到方法实现，那么循环获取父类，重复上面的查找动作，找到后再将方法缓存到本类而非父类的缓存中</p>
+<ul>
+<li><strong>未找到任何方法实现，触发消息转发机制进行最后补救</strong></li>
+</ul>
+<p>其中消息转发分为两个阶段，第一个阶段我们可以通过动态添加方法之后让编译器再次执行查找方法实现的过程；第二个阶段称作备援的接收者，就是找到一个接盘侠来处理这个
+事件</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">_class_resolveMethod</span><span class="p">(</span><span class="n">Class</span><span class="w"> </span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">SEL</span><span class="w"> </span><span class="n">sel</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">inst</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="c1">// 非beta类的情况下直接调用 resolveInstanceMethod 方法</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="w"> </span><span class="n">cls</span><span class="o">-&gt;</span><span class="n">isMetaClass</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">_class_resolveInstanceMethod</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">sel</span><span class="p">,</span><span class="w"> </span><span class="n">inst</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// 先调用 resolveClassMethod 请求动态添加方法</span>
+<span class="w">        </span><span class="c1">// 然后进行一次查找判断是否处理完成</span>
+<span class="w">        </span><span class="c1">// 如果没有添加，再调用 resolveInstanceMethod 方法</span>
+<span class="w">        </span><span class="n">_class_resolveClassMethod</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">sel</span><span class="p">,</span><span class="w"> </span><span class="n">inst</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">lookUpImpOrNil</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">sel</span><span class="p">,</span><span class="w"> </span><span class="n">inst</span><span class="p">,</span>
+<span class="w">                      </span><span class="n">NO</span><span class="cm">/*initialize*/</span><span class="p">,</span><span class="w"> </span><span class="n">YES</span><span class="cm">/*cache*/</span><span class="p">,</span><span class="w"> </span><span class="n">NO</span><span class="cm">/*resolver*/</span><span class="p">))</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">            </span><span class="n">_class_resolveInstanceMethod</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="n">sel</span><span class="p">,</span><span class="w"> </span><span class="n">inst</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>方法缓存</strong></p>
+<p>在上一篇runtime文章中笔者已经说过对于OC的每一个对象来说，本质上都是一个objc_class的结构体封装，在最新的runtime源码的objc-
+runtime-new.h中，objc_class的结构如下（笔者已经略去了大部分的函数）：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">objc_class</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">objc_object</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">Class</span><span class="w"> </span><span class="n">superclass</span><span class="p">;</span><span class="w">          </span><span class="c1">// Class ISA;</span>
+<span class="w">    </span><span class="n">cache_t</span><span class="w"> </span><span class="n">cache</span><span class="p">;</span><span class="w">             </span><span class="c1">// formerly cache pointer and vtable</span>
+<span class="w">    </span><span class="n">class_data_bits_t</span><span class="w"> </span><span class="n">bits</span><span class="p">;</span><span class="w">    </span><span class="c1">// class_rw_t * plus custom rr/alloc flags</span>
+<span class="w">    </span><span class="n">class_rw_t</span><span class="w"> </span><span class="o">*</span><span class="nf">data</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">bits</span><span class="p">.</span><span class="n">data</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="nf">setData</span><span class="p">(</span><span class="n">class_rw_t</span><span class="w"> </span><span class="o">*</span><span class="n">newData</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">bits</span><span class="p">.</span><span class="n">setData</span><span class="p">(</span><span class="n">newData</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// .........</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>结构一目了然，很明显cache存储着我们在方法调用中需要查找的方法缓存。作为缓存方法的cache采用了散列表，以此来大幅度提高检索的速度：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#define CACHE_HASH(sel, mask) (((uintptr_t)(sel)&gt;&gt;2) &amp; (mask))</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">cache_t</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">bucket_t</span><span class="w"> </span><span class="o">*</span><span class="n">_buckets</span><span class="p">;</span>
+<span class="w">    </span><span class="n">mask_t</span><span class="w"> </span><span class="n">_mask</span><span class="p">;</span>
+<span class="w">    </span><span class="n">mask_t</span><span class="w"> </span><span class="n">_occupied</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// functions</span>
+<span class="p">}</span>
+<span class="c1">// cache method</span>
+<span class="n">buckets</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">cache_entry</span><span class="w"> </span><span class="o">**</span><span class="p">)</span><span class="n">cache</span><span class="o">-&gt;</span><span class="n">buckets</span><span class="p">;</span>
+<span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">CACHE_HASH</span><span class="p">(</span><span class="n">sel</span><span class="p">,</span><span class="w"> </span><span class="n">cache</span><span class="o">-&gt;</span><span class="n">mask</span><span class="p">);</span>
+<span class="w">     </span><span class="n">buckets</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">     </span><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">index</span><span class="o">+</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">cache</span><span class="o">-&gt;</span><span class="n">mask</span><span class="p">)</span>
+<span class="p">{</span><span class="w"> </span><span class="p">}</span>
+<span class="n">buckets</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">entry</span><span class="p">;</span>
+</code></pre></div>
+<p>在每次调用完未被缓存的方法时，下面的那段缓存方法的代码就会调用。苹果利用了sel的指针地址和mask做了一个简单的位运算，然后找到一个空槽存储起来。 以此我
+们可以推出从缓存中查找sel实现的代码CacheLookup，但是为了高度优化性能，苹果同样丧心病狂的使用汇编完成了查找的步骤，官方给出的注释足够我们大致看
+明白这段代码：</p>
+<div class="highlight"><pre><code><span></span><span class="p">.</span><span class="n">macro</span><span class="w"> </span><span class="n">CacheLookup</span>
+<span class="w">    </span><span class="n">ldrh</span><span class="w">    </span><span class="n">r12</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">r9</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="n">CACHE_MASK</span><span class="p">]</span><span class="w">    </span><span class="c1">// r12 = mask</span>
+<span class="w">    </span><span class="n">ldr</span><span class="w">    </span><span class="n">r9</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">r9</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="n">CACHE</span><span class="p">]</span><span class="w">    </span><span class="c1">// r9 = buckets</span>
+<span class="p">.</span><span class="k">if</span><span class="w"> </span><span class="n">$0</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">STRET</span><span class="w">  </span><span class="o">||</span><span class="w">  </span><span class="n">$0</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">SUPER_STRET</span>
+<span class="w">    </span><span class="n">and</span><span class="w">    </span><span class="n">r12</span><span class="p">,</span><span class="w"> </span><span class="n">r12</span><span class="p">,</span><span class="w"> </span><span class="n">r2</span><span class="w">        </span><span class="c1">// r12 = index = SEL &amp; mask</span>
+<span class="p">.</span><span class="k">else</span>
+<span class="w">    </span><span class="n">and</span><span class="w">    </span><span class="n">r12</span><span class="p">,</span><span class="w"> </span><span class="n">r12</span><span class="p">,</span><span class="w"> </span><span class="n">r1</span><span class="w">        </span><span class="c1">// r12 = index = SEL &amp; mask</span>
+<span class="p">.</span><span class="n">endif</span>
+<span class="w">    </span><span class="n">add</span><span class="w">    </span><span class="n">r9</span><span class="p">,</span><span class="w"> </span><span class="n">r9</span><span class="p">,</span><span class="w"> </span><span class="n">r12</span><span class="p">,</span><span class="w"> </span><span class="n">LSL</span><span class="w"> </span><span class="err">#</span><span class="mi">3</span><span class="w">    </span><span class="c1">// r9 = bucket = buckets+index*8</span>
+<span class="w">    </span><span class="n">ldr</span><span class="w">    </span><span class="n">r12</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">r9</span><span class="p">]</span><span class="w">        </span><span class="c1">// r12 = bucket-&gt;sel</span>
+<span class="mi">2</span><span class="o">:</span>
+<span class="p">.</span><span class="k">if</span><span class="w"> </span><span class="n">$0</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">STRET</span><span class="w">  </span><span class="o">||</span><span class="w">  </span><span class="n">$0</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">SUPER_STRET</span>
+<span class="w">    </span><span class="n">teq</span><span class="w">    </span><span class="n">r12</span><span class="p">,</span><span class="w"> </span><span class="n">r2</span>
+<span class="p">.</span><span class="k">else</span>
+<span class="w">    </span><span class="n">teq</span><span class="w">    </span><span class="n">r12</span><span class="p">,</span><span class="w"> </span><span class="n">r1</span>
+<span class="p">.</span><span class="n">endif</span>
+<span class="w">    </span><span class="n">bne</span><span class="w">    </span><span class="mf">1f</span>
+<span class="w">    </span><span class="n">CacheHit</span><span class="w"> </span><span class="n">$0</span>
+<span class="mi">1</span><span class="o">:</span>
+<span class="w">    </span><span class="n">cmp</span><span class="w">    </span><span class="n">r12</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mi">1</span>
+<span class="w">    </span><span class="n">blo</span><span class="w">    </span><span class="n">LCacheMiss_f</span><span class="w">        </span><span class="c1">// if (bucket-&gt;sel == 0) cache miss</span>
+<span class="w">    </span><span class="n">it</span><span class="w">    </span><span class="n">eq</span><span class="w">            </span><span class="c1">// if (bucket-&gt;sel == 1) cache wrap</span>
+<span class="w">    </span><span class="n">ldreq</span><span class="w">    </span><span class="n">r9</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">r9</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mi">4</span><span class="p">]</span><span class="w">        </span><span class="c1">// bucket-&gt;imp is before first bucket</span>
+<span class="w">    </span><span class="n">ldr</span><span class="w">    </span><span class="n">r12</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">r9</span><span class="p">,</span><span class="w"> </span><span class="err">#</span><span class="mi">8</span><span class="p">]</span><span class="o">!</span><span class="w">        </span><span class="c1">// r12 = (++bucket)-&gt;sel</span>
+<span class="w">    </span><span class="n">b</span><span class="w">    </span><span class="mi">2</span><span class="n">b</span>
+<span class="p">.</span><span class="n">endmacro</span>
+</code></pre></div>
+<p>具体的源码可以从<a href="http://opensource.apple.com//tarballs/">苹果开源</a>这里下载，这个方法苹果已经注释的足够清晰了。</p>
+<p>上面所有的操作都是对方法的缓存、查找操作，那么方法究竟是什么？在OC中方法被抽象成的数据类型是Method，如果了解并且使用过runtime的读者们可能了解
+这个类型，其结构如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">old_method</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">SEL</span><span class="w"> </span><span class="n">method_name</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">method_types</span><span class="p">;</span>
+<span class="w">    </span><span class="n">IMP</span><span class="w"> </span><span class="n">method_imp</span><span class="p">;</span>
+<span class="p">};</span>
+<span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">method_t</span><span class="w"> </span><span class="o">*</span><span class="n">Method</span><span class="p">;</span>
+</code></pre></div>
+<ul>
+<li><p>method_imp方法的实现代码，你可以把它看做一个block。事实上，后者确实可以转换成一个IMP类型来实现某些黑魔法。</p>
+</li>
+<li><p>method_types方法的参数编码，什么意思？在属性与变量中我说过每一种数据类型有着自己对应的字符编码，这个表示方法返回值、参数的字符编码，比如-(void)playWith:(id)的字符编码为v@:@</p>
+</li>
+<li><p>method_name顾名思义，方法的名字。通常我们使用@selector()的方式获取一个方法的sel地址，这个被用来进行散列计算存储方法的imp实现。由于SEL类型采用了散列的算法，因此如果同一个类中存在同样名字的方法，那么就会导致方法的imp地址无法唯一化。这也是苹果不允许同名不同参数类型的方法存在的原因</p>
+</li>
+</ul>
+<p><strong>消息转发</strong></p>
+<p>通常情况下，在我们调用不属于某个对象的方法的时候，我们的应用就会崩溃crash，比如笔者经历过好几次因为后台返回的NSNull类型导致了测试反馈应用闪退。通
+过上面的方法调用源码我们可以看到并不是没有找到方法实现就直接发生了崩溃，在崩溃之前编译器会进行消息转发机制，总共给了我们三次机会来避免这样的崩溃并尽可能的找
+到方法的响应者。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/1464059012694122.jpg" alt="1464059012694122.jpg"></p>
+<p>消息转发阶段</p>
+<p>首先先看第一阶段。我们都知道，在iOS开发当中我们需要非常的注意用户体验。单纯的是因为数据类型错误而导致应用出现闪退，这样的处理会极大的影响使用app的用户
+。因此，我们可以通过class_addMethod这个函数来动态的添加这种错误的处理（类可以在objc_registerClassPair完成类的注册之后动
+态的添加方法，但不允许动态添加属性，参考category机制）</p>
+<div class="highlight"><pre><code><span></span><span class="n">id</span><span class="w"> </span><span class="nf">wrongTypeGetter</span><span class="p">(</span><span class="n">id</span><span class="w"> </span><span class="n">object</span><span class="p">,</span><span class="w"> </span><span class="n">SEL</span><span class="w"> </span><span class="n">sel</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">nil</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">wrongTypeSetter</span><span class="p">(</span><span class="n">id</span><span class="w"> </span><span class="n">object</span><span class="p">,</span><span class="w"> </span><span class="n">SEL</span><span class="w"> </span><span class="n">sel</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">value</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// do nothing</span>
+<span class="p">}</span>
+<span class="o">+</span><span class="w"> </span><span class="p">(</span><span class="n">BOOL</span><span class="p">)</span><span class="n">resolveInstanceMethod</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="n">SEL</span><span class="p">)</span><span class="n">selector</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">NSString</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">selName</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NSStringFromSelector</span><span class="p">(</span><span class="n">selector</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">([</span><span class="n">sel</span><span class="w"> </span><span class="n">hasPrefix</span><span class="o">:</span><span class="w"> </span><span class="err">@</span><span class="s">&quot;set&quot;</span><span class="p">])</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">class_addMethod</span><span class="p">(</span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="n">selector</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="n">IMP</span><span class="p">)</span><span class="n">wrongTypeSetter</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;v@:@&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">class_addMethod</span><span class="p">(</span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="n">selector</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="n">IMP</span><span class="p">)</span><span class="n">wrongTypeGetter</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;@@:&quot;</span><span class="p">)</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在第二阶段最开始的时候，这时候已经默许了你并不想使用消息接收者来响应这个方法，所以我们需要找到消息接盘侠 —— 这并不是一件坏事。在iOS中不支持多继承，尽
+管我们可以通过协议和组合模式实现伪多继承。伪多继承和多继承的区别在于：多继承是将多个类的功能组合到一个对象当中，而伪多继承多个类的功能依旧分布在不同对象当中
+，但是对象彼此对消息发送者透明。那么，如果我们消息转发给另一个对象可以用来实现这种伪多继承。</p>
+<div class="highlight"><pre><code><span></span><span class="err">@</span><span class="n">interface</span><span class="w"> </span><span class="n">Person</span><span class="o">:</span><span class="w"> </span><span class="n">NSObject</span>
+<span class="err">@</span><span class="n">property</span><span class="w"> </span><span class="p">(</span><span class="n">nonatomic</span><span class="p">,</span><span class="w"> </span><span class="n">strong</span><span class="p">)</span><span class="w"> </span><span class="n">NSNumber</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">age</span><span class="p">;</span>
+<span class="err">@</span><span class="n">end</span>
+<span class="err">@</span><span class="n">implementation</span><span class="w"> </span><span class="n">Person</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="n">forwardingTargetForSelector</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="n">SEL</span><span class="p">)</span><span class="n">aSelector</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="c1">// 甚至可以通过runtime遍历自己属性找到可以响应方法的接盘侠</span>
+<span class="w">    </span><span class="n">NSString</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">selName</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NSStringFromSelector</span><span class="p">(</span><span class="n">aSelector</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">([</span><span class="n">selName</span><span class="w"> </span><span class="n">hasSuffix</span><span class="o">:</span><span class="w"> </span><span class="err">@</span><span class="s">&quot;Value&quot;</span><span class="p">])</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">age</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">nil</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="err">@</span><span class="n">end</span>
+<span class="c1">// View controller</span>
+<span class="n">id</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[[</span><span class="n">Person</span><span class="w"> </span><span class="n">alloc</span><span class="p">]</span><span class="w"> </span><span class="n">init</span><span class="p">];</span>
+<span class="p">[</span><span class="n">p</span><span class="w"> </span><span class="n">setAge</span><span class="o">:</span><span class="w"> </span><span class="err">@</span><span class="p">(</span><span class="mi">18</span><span class="p">)];</span>
+<span class="n">NSLog</span><span class="p">(</span><span class="err">@</span><span class="s">&quot;%lu, %.2f&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">p</span><span class="w"> </span><span class="n">integerValue</span><span class="p">],</span><span class="w"> </span><span class="p">[</span><span class="n">p</span><span class="w"> </span><span class="n">doubleValue</span><span class="p">]);</span><span class="w">    </span><span class="c1">//18, 18.00</span>
+</code></pre></div>
+<p>如果你依旧没有为这个方法找到另外一个调用者，那么阻止你app闪退的最后时刻到来了。runtime需要生成一个methodSignature变量来组装，这将通
+过调用消息接收者的-(NSMethodSignature *)methodSignatureForSelector:获取，这个变量包含了方法的参数类型、参数
+个数以及消息接收者等信息。接着把这个变量组装成一个NSInvocation对象进行最后一次的消息转发，调用接收者的-forwardInvocation:来进
+行最后的挽救机会。这意味着我们可以尽情的对invocation做任何事情，包括随意修改参数值、消息接收者等。我最常拿来干的事情就是减少数组的遍历工作：</p>
+<div class="highlight"><pre><code><span></span><span class="err">@</span><span class="n">implementation</span><span class="w"> </span><span class="n">NSArray</span><span class="p">(</span><span class="n">LXDRuntime</span><span class="p">)</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">forwardInvocation</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="n">NSInvocation</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">anInvocation</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">id</span><span class="w"> </span><span class="n">item</span><span class="w"> </span><span class="n">in</span><span class="w"> </span><span class="n">self</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">([</span><span class="n">item</span><span class="w"> </span><span class="n">respondsToSelector</span><span class="o">:</span><span class="w"> </span><span class="n">anInvocation</span><span class="p">.</span><span class="n">selector</span><span class="p">])</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="p">[</span><span class="n">anInvocation</span><span class="w"> </span><span class="n">invokeWithTarget</span><span class="o">:</span><span class="w"> </span><span class="n">item</span><span class="p">];</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+<span class="err">@</span><span class="n">end</span>
+</code></pre></div>
+<p>总的来说整个消息发送的过程可以归纳成下面这张图：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/1464059057867047.jpg" alt="1464059057867047.jpg"></p>
+<p>消息发送全过程</p>
+<p>虽然消息转发可以帮助我们显著的减少app的闪退率，但是在开发阶段千万不要加入这些特性。最好是在app申请上架的那个阶段再加，这样不至于app其他消息发送异常
+被我们忽略了。</p>
+<p><strong>消息机制黑魔法</strong></p>
+<p>上面笔者讲解了关于一个调用方法之中发生的事情，确实非常的复杂。同样的这些特性也非常值得我们去学习使用，runtime提供了一系列关于Method的方法给我们
+实现面向切面编程的工作。这些工作包括了替换原有方法实现，交换方法实现等等工作。</p>
+<p>假设现在我需要一个圆角按钮，并且保证点击触发事件的范围必须要这个圆之内，那么通过一个UIButton+LXDRuntime的扩展来替换旧有-
+pointInside:withEvent:方法</p>
+<div class="highlight"><pre><code><span></span><span class="err">@</span><span class="n">interface</span><span class="w"> </span><span class="n">UIButton</span><span class="p">(</span><span class="n">LXDRuntime</span><span class="p">)</span>
+<span class="err">@</span><span class="n">property</span><span class="w"> </span><span class="p">(</span><span class="n">nonatomic</span><span class="p">,</span><span class="w"> </span><span class="n">assign</span><span class="p">)</span><span class="w"> </span><span class="n">BOOL</span><span class="w"> </span><span class="n">roundTouchEnable</span><span class="p">;</span>
+<span class="err">@</span><span class="n">end</span>
+<span class="k">const</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">LXDRoundTouchEnableKey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">LXDRoundTouchEnableKey</span><span class="p">;</span>
+<span class="err">@</span><span class="n">implementation</span><span class="w"> </span><span class="n">UIButton</span><span class="p">(</span><span class="n">LXDRuntime</span><span class="p">)</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="n">BOOL</span><span class="p">)</span><span class="n">roundTouchEnable</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">[</span><span class="n">objc_getAssociatedObject</span><span class="p">(</span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="n">LXDRoundTouchEnableKey</span><span class="p">)</span><span class="w"> </span><span class="n">boolValue</span><span class="p">];</span>
+<span class="p">}</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">setRoundTouchEnable</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="n">BOOL</span><span class="p">)</span><span class="n">roundTouchEnable</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">objc_setAssociatedObject</span><span class="p">(</span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="n">LXDRoundTouchEnableKey</span><span class="p">,</span><span class="w"> </span><span class="err">@</span><span class="p">(</span><span class="n">roundTouchEnable</span><span class="p">),</span><span class="w"> </span><span class="n">OBJC_ASSOCIATION_RETAIN_NONATOMIC</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="n">BOOL</span><span class="p">)</span><span class="n">replacePointInside</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="n">CGPoint</span><span class="p">)</span><span class="n">point</span><span class="w"> </span><span class="n">withEvent</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="n">UIEvent</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">event</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">CGRectGetWidth</span><span class="p">(</span><span class="n">self</span><span class="p">.</span><span class="n">frame</span><span class="p">)</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">CGRectGetHeight</span><span class="p">(</span><span class="n">self</span><span class="p">.</span><span class="n">frame</span><span class="p">)</span>
+<span class="w">        </span><span class="o">||</span><span class="w"> </span><span class="o">!</span><span class="n">self</span><span class="p">.</span><span class="w"> </span><span class="n">roundTouchEnable</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="p">[</span><span class="n">super</span><span class="w"> </span><span class="n">pointInside</span><span class="o">:</span><span class="w"> </span><span class="n">point</span><span class="w"> </span><span class="n">withEvent</span><span class="o">:</span><span class="w"> </span><span class="n">event</span><span class="p">];</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">CGFloat</span><span class="w"> </span><span class="n">radius</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">CGRectGetWidth</span><span class="p">(</span><span class="n">self</span><span class="p">.</span><span class="n">frame</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span>
+<span class="w">    </span><span class="n">CGPoint</span><span class="w"> </span><span class="n">offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">CGPointMake</span><span class="p">(</span><span class="n">point</span><span class="p">.</span><span class="n">x</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">radius</span><span class="p">,</span><span class="w"> </span><span class="n">point</span><span class="p">.</span><span class="n">y</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">radius</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">sqrt</span><span class="p">(</span><span class="n">offset</span><span class="p">.</span><span class="n">x</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">offset</span><span class="p">.</span><span class="n">x</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">offset</span><span class="p">.</span><span class="n">y</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">offset</span><span class="p">.</span><span class="n">y</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">radius</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="c1">// 替换方法实现</span>
+<span class="o">+</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">initialize</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="p">[</span><span class="n">super</span><span class="w"> </span><span class="n">initialize</span><span class="p">];</span>
+<span class="w">    </span><span class="n">Method</span><span class="w"> </span><span class="n">replaceMethod</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">class_getInstanceMethod</span><span class="p">([</span><span class="n">self</span><span class="w"> </span><span class="n">class</span><span class="p">],</span><span class="w"> </span><span class="err">@</span><span class="n">selector</span><span class="p">(</span><span class="n">replacePointInside</span><span class="o">:</span><span class="n">withEvent</span><span class="o">:</span><span class="p">));</span>
+<span class="w">    </span><span class="n">Method</span><span class="w"> </span><span class="n">originMethod</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">class_getInstanceMethod</span><span class="p">([</span><span class="n">self</span><span class="w"> </span><span class="n">class</span><span class="p">],</span><span class="w"> </span><span class="err">@</span><span class="n">selector</span><span class="p">(</span><span class="n">pointInside</span><span class="o">:</span><span class="n">withEvent</span><span class="o">:</span><span class="p">));</span>
+<span class="w">    </span><span class="n">method_setImplementation</span><span class="p">(</span><span class="n">originMethod</span><span class="p">,</span><span class="w"> </span><span class="n">method_getImplementation</span><span class="p">(</span><span class="n">replaceMethod</span><span class="p">));</span>
+<span class="p">}</span>
+<span class="err">@</span><span class="n">end</span>
+</code></pre></div>
+<p>那么当我需要我的按钮只响应圆形点击区域的时候，只需要设置button.roundTouchEnable  = YES，就会自动实现了圆形点击的判断。除了上面
+的上面的方法替换，还有另一个常用的黑魔法是交换两个方法的实现。归功于Method的特殊结构，将方法名字sel跟代码实现imp分隔开来。你可以把imp当做是一
+个block代码块，而交换实现的操作就相当于把这两个block交换了。</p>
+<div class="highlight"><pre><code><span></span><span class="err">@</span><span class="n">interface</span><span class="w"> </span><span class="n">Person</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">NSObject</span>
+<span class="err">@</span><span class="n">property</span><span class="w"> </span><span class="p">(</span><span class="n">nonatomic</span><span class="p">,</span><span class="w"> </span><span class="n">strong</span><span class="p">)</span><span class="w"> </span><span class="n">NSString</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">name</span><span class="p">;</span>
+<span class="err">@</span><span class="n">property</span><span class="w"> </span><span class="p">(</span><span class="n">nonatomic</span><span class="p">,</span><span class="w"> </span><span class="n">strong</span><span class="p">)</span><span class="w"> </span><span class="n">NSNumber</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">age</span><span class="p">;</span>
+<span class="err">@</span><span class="n">end</span>
+<span class="err">@</span><span class="n">implementation</span><span class="w"> </span><span class="n">Person</span>
+<span class="o">+</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">initialize</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="p">[</span><span class="n">super</span><span class="w"> </span><span class="n">initialize</span><span class="p">];</span>
+<span class="w">    </span><span class="n">Method</span><span class="w"> </span><span class="n">ageGetter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">class_getInstanceMethod</span><span class="p">([</span><span class="n">self</span><span class="w"> </span><span class="n">class</span><span class="p">],</span><span class="w"> </span><span class="err">@</span><span class="n">selector</span><span class="p">(</span><span class="n">age</span><span class="p">));</span>
+<span class="w">    </span><span class="n">Method</span><span class="w"> </span><span class="n">nameGetter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">class_getInstanceMethod</span><span class="p">([</span><span class="n">self</span><span class="w"> </span><span class="n">class</span><span class="p">],</span><span class="w"> </span><span class="err">@</span><span class="n">selector</span><span class="p">(</span><span class="n">name</span><span class="p">));</span>
+<span class="w">    </span><span class="n">method_exchangeImplementations</span><span class="p">(</span><span class="n">ageGetter</span><span class="p">,</span><span class="w"> </span><span class="n">nameGetter</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="c1">// View controller</span>
+<span class="n">Person</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[[</span><span class="n">Person</span><span class="w"> </span><span class="n">alloc</span><span class="p">]</span><span class="w"> </span><span class="n">init</span><span class="p">];</span>
+<span class="n">p</span><span class="p">.</span><span class="n">age</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">@</span><span class="p">(</span><span class="mi">56</span><span class="p">);</span>
+<span class="n">p</span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">@</span><span class="s">&quot;Job Steve&quot;</span><span class="p">;</span>
+<span class="n">NSLog</span><span class="p">(</span><span class="err">@</span><span class="s">&quot;%@ is %@ year old&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">p</span><span class="p">.</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">p</span><span class="p">.</span><span class="n">age</span><span class="p">);</span>
+<span class="c1">// LXDRuntimeDemo[7316:244912] 56 is Job Steve year old</span>
+<span class="err">@</span><span class="n">end</span>
+</code></pre></div>
+<p>上面的代码交换了name和age的实现，用图示来表示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/1464059111845457.jpg" alt="1464059111845457.jpg"></p>
+<p>方法交换</p>
+<p>应该不难看出，method_exchangeImplementations之所以被推崇的原因在于这种方式交换实现的时候不会导致原有的方法实现发生改变（从头到
+尾，age的IMP跟name的IMP都没有进行任何的修改），当然了，它的缺点也是非常明显的：</p>
+<ul>
+<li><p>多人开发对同一个方法都进行方法替换/交换时，会使得业务逻辑复杂，非常的不利于调试</p>
+</li>
+<li><p>被交换的方法实现会直接的影响到所有该类的实例对象以及子类，不适用于单个对象的实现</p>
+</li>
+</ul>
+<p>可以说runtime提供的这些黑魔法都是双刃剑，合理的运用能让我们更加的强大。另外，除了Method的黑魔法，还要提到一个IMP相关的使用陷阱。上文说过，I
+MP跟block是非常相似的东西，前者可以跟函数指针强制转换，因此可以看做是一个特殊的block，同样的系统提供了两者相互转换的方法：imp_impleme
+ntationWithBlock和imp_getBlock。按照上面说的，当调用方法转换成消息转发的时候，objc_msgSend自身已经存在了两个参数id
+object以及SEL aSelector，那么按照这种思路IMP和block的切换应该是这样的：</p>
+<div class="highlight"><pre><code><span></span><span class="o">+</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">initialize</span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">^</span><span class="n">requestBlock</span><span class="p">)(</span><span class="n">id</span><span class="w"> </span><span class="n">object</span><span class="p">,</span><span class="w"> </span><span class="n">SEL</span><span class="w"> </span><span class="n">aSelector</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">URL</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">parameters</span><span class="p">)</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="o">^</span><span class="p">(</span><span class="n">id</span><span class="w"> </span><span class="n">object</span><span class="p">,</span><span class="w"> </span><span class="n">SEL</span><span class="w"> </span><span class="n">aSelector</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">URL</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">parameters</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// do some networking request</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">    </span><span class="n">IMP</span><span class="w"> </span><span class="n">requestIMP</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">imp_implementationWithBlock</span><span class="p">(</span><span class="n">requestBlock</span><span class="p">);</span>
+<span class="w">    </span><span class="n">class_addMethod</span><span class="p">([</span><span class="n">self</span><span class="w"> </span><span class="n">class</span><span class="p">],</span><span class="w"> </span><span class="err">@</span><span class="n">selector</span><span class="p">(</span><span class="n">networkReuqest</span><span class="o">:</span><span class="n">parameters</span><span class="o">:</span><span class="p">),</span><span class="w"> </span><span class="n">requestIMP</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;v@:@@&quot;</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="c1">// View controller</span>
+<span class="p">[</span><span class="n">self</span><span class="w"> </span><span class="n">performSelector</span><span class="o">:</span><span class="w"> </span><span class="err">@</span><span class="n">selector</span><span class="p">(</span><span class="n">networkReuqest</span><span class="o">:</span><span class="n">parameters</span><span class="o">:</span><span class="p">)</span><span class="w"> </span><span class="n">withObject</span><span class="o">:</span><span class="w"> </span><span class="n">URL</span><span class="w"> </span><span class="n">withObject</span><span class="o">:</span><span class="w"> </span><span class="n">parameters</span><span class="p">];</span>
+</code></pre></div>
+<p>上面这段代码会crash的非常无厘头，提示你EXC_BAD_ACCESS错误。重要的事情说三遍：</p>
+<p>block参数不存在SEL!!</p>
+<p>block参数不存在SEL!!</p>
+<p>block参数不存在SEL!!</p>
+<p>上面的代码只要去掉了SEL aSelector这个参数，这段代码就能正常执行。</p>
+<p><strong>尾话</strong></p>
+<p>runtime对于每一个iOS开发者来说，都应该去了解。通过runtime的源码实现，我们可以看到苹果为了性能优化武装到牙齿的行为，也能看到我们书写代码深层
+之中不为人知的实现。作为runtime系列第二篇（<a href="http://www.jianshu.com/p/2c0305676621">第一篇</a>），纠结了我很久才
+开始动工，期间看源码看的头都大了，但是确实对我在开发的认识以及代码的结构上有了更多的了解。最后，本文无代码，还是奉上苹果的<a href="http://opensource.apple.com//tarballs/">runtime源码地址</a>。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "runtime——消息机制.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

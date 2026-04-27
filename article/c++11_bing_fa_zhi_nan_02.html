@@ -1,0 +1,1027 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>C++11并发指南02 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="C++11并发指南02,C/C++,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="C++11并发指南四(<future>详解一std::promise介绍)<br/>C++11并发指南四(<future>详解二std::packaged_task介绍)<br>C++11并发指南四(<future>详解三std::future & std::shared_future)" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>C++11并发指南02</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2020-10-02 16:53
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://www.cnblogs.com/haippy/p/3239248.html' target='blank'>C++11并发指南四(<future>详解一std::promise介绍)</a></p></h4>
+<p>前面两讲《C++11 并发指南二(std::thread 详解)》，《C++11 并发指南三(std::mutex 详解)》分别介绍了std::thread 和 std::mutex，相信读者对 C++11 中的多线程编程有了一个最基本的认识，本文将介绍 C++11 标准中头文件里面的类和相关函数。</p>
+<p>前面两讲《<a href="http://www.cnblogs.com/haippy/p/3236136.html">C++11 并发指南二(std::thread详解)</a>》，《<a href="http://www.cnblogs.com/haippy/p/3237213.html">C++11 并发指南三(std::mutex详解)</a>》分别介绍了 std::thread 和std::mutex，相信读者对 C++11 中的多线程编程有了一个最基本的认识，本文将介绍 C++11 标准中 <future>头文件里面的类和相关函数。</p>
+<p><future> 头文件中包含了以下几个类和函数：</p>
+<ul>
+<li>Providers 类：std::promise, std::package_task</li>
+<li>Futures 类：std::future, shared_future.</li>
+<li>Providers 函数：std::async()</li>
+<li>其他类型：std::future_error, std::future_errc, std::future_status, std::launch.</li>
+</ul>
+<h3>std::promise 类介绍</h3>
+<p>promise 对象可以保存某一类型 T 的值，该值可被 future 对象读取（可能在另外一个线程中），因此 promise也提供了一种线程同步的手段。在 promise对象构造时可以和一个共享状态（通常是std::future）相关联，并可以在相关联的共享状态(std::future)上保存一个类型为 T 的值。</p>
+<p>可以通过 get_future 来获取与该 promise 对象相关联的 future 对象，调用该函数之后，两个对象共享相同的共享状态(shared state)</p>
+<ul>
+<li>promise 对象是异步 Provider，它可以在某一时刻设置共享状态的值。</li>
+<li>future 对象可以异步返回共享状态的值，或者在必要的情况下阻塞调用者并等待共享状态标志变为 ready，然后才能获取共享状态的值。</li>
+</ul>
+<p>下面以一个简单的例子来说明上述关系</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span><span class="c1">       // std::cout</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;functional&gt;</span><span class="c1">     // std::ref</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;thread&gt;</span><span class="c1">         // std::thread</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;future&gt;</span><span class="c1">         // std::promise, std::future</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">print_int</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">fut</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fut</span><span class="p">.</span><span class="n">get</span><span class="p">();</span><span class="w"> </span><span class="c1">// 获取共享状态的值.</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;value: &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="sc">&#39;\n&#39;</span><span class="p">;</span><span class="w"> </span><span class="c1">// 打印 value: 10.</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="w"> </span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">promise</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">prom</span><span class="p">;</span><span class="w"> </span><span class="c1">// 生成一个 std::promise&lt;int&gt; 对象.</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">fut</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">prom</span><span class="p">.</span><span class="n">get_future</span><span class="p">();</span><span class="w"> </span><span class="c1">// 和 future 关联.</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="n">t</span><span class="p">(</span><span class="n">print_int</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">ref</span><span class="p">(</span><span class="n">fut</span><span class="p">));</span><span class="w"> </span><span class="c1">// 将 future 交给另外一个线程t.</span>
+<span class="w">    </span><span class="n">prom</span><span class="p">.</span><span class="n">set_value</span><span class="p">(</span><span class="mi">10</span><span class="p">);</span><span class="w"> </span><span class="c1">// 设置共享状态的值, 此处和线程t保持同步.</span>
+<span class="w">    </span><span class="n">t</span><span class="p">.</span><span class="n">join</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<h4>std::promise 构造函数</h4>
+<table style="width: 738px; height: 160px">
+<tbody>
+<tr class="odd"><th><span style="font-size: 14px">default (1)</span></th>
+<td>
+<pre><span style="font-size: 14px">promise();
+</span></pre>
+</td>
+</tr>
+<tr class="even"><th><span style="font-size: 14px">with allocator (2)</span></th>
+<td>
+<pre><span style="font-size: 14px">template &lt;class Alloc&gt; promise (allocator_arg_t aa, const Alloc&amp; alloc);
+</span></pre>
+</td>
+</tr>
+<tr class="odd"><th><span style="font-size: 14px">copy [deleted] (3)</span></th>
+<td>
+<pre><span style="font-size: 14px">promise (const promise&amp;) = delete;
+</span></pre>
+</td>
+</tr>
+<tr class="even"><th><span style="font-size: 14px">move (4)</span></th>
+<td>
+<pre><span style="font-size: 14px">promise (promise&amp;&amp; x) noexcept;
+</span></pre>
+</td>
+</tr>
+</tbody>
+</table><ol>
+<li>默认构造函数，初始化一个空的共享状态。</li>
+<li>带自定义内存分配器的构造函数，与默认构造函数类似，但是使用自定义分配器来分配共享状态。</li>
+<li>拷贝构造函数，被禁用。</li>
+<li>移动构造函数。</li>
+</ol>
+<p>另外，std::promise 的 operator= 没有拷贝语义，即 std::promise 普通的赋值操作被禁用，operator= 只有 move 语义，所以 std::promise 对象是禁止拷贝的。</p>
+<p>例子:</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span><span class="c1">       // std::cout</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;thread&gt;</span><span class="c1">         // std::thread</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;future&gt;</span><span class="c1">         // std::promise, std::future</span>
+
+<span class="n">std</span><span class="o">::</span><span class="n">promise</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">prom</span><span class="p">;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">print_global_promise</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">fut</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">prom</span><span class="p">.</span><span class="n">get_future</span><span class="p">();</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fut</span><span class="p">.</span><span class="n">get</span><span class="p">();</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;value: &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="sc">&#39;\n&#39;</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="w"> </span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="n">th1</span><span class="p">(</span><span class="n">print_global_promise</span><span class="p">);</span>
+<span class="w">    </span><span class="n">prom</span><span class="p">.</span><span class="n">set_value</span><span class="p">(</span><span class="mi">10</span><span class="p">);</span>
+<span class="w">    </span><span class="n">th1</span><span class="p">.</span><span class="n">join</span><span class="p">();</span>
+
+<span class="w">    </span><span class="n">prom</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">promise</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">();</span><span class="w">    </span><span class="c1">// prom 被move赋值为一个新的 promise 对象.</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="n">th2</span><span class="w"> </span><span class="p">(</span><span class="n">print_global_promise</span><span class="p">);</span>
+<span class="w">    </span><span class="n">prom</span><span class="p">.</span><span class="n">set_value</span><span class="w"> </span><span class="p">(</span><span class="mi">20</span><span class="p">);</span>
+<span class="w">    </span><span class="n">th2</span><span class="p">.</span><span class="n">join</span><span class="p">();</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<h4>std::promise::get_future 介绍</h4>
+<p>该函数返回一个与 promise 共享状态相关联的 future _。_返回的 future 对象可以访问由 promise对象设置在共享状态上的值或者某个异常对象。只能从 promise 共享状态获取一个 future 对象。在调用该函数之后，promise对象通常会在某个时间点准备好(设置一个值或者一个异常对象)，如果不设置值或者异常，promise 对象在析构时会自动地设置一个 future_error异常(broken_promise)来设置其自身的准备状态。上面的例子中已经提到了 get_future，此处不再重复。</p>
+<h4>std::promise::set_value 介绍</h4>
+<table>
+<tbody>
+<tr class="odd"><th><span style="font-size: 14px">generic template (1)</span></th>
+<td>
+<pre><span style="font-size: 14px">void set_value (const T&amp; val);
+void set_value (T&amp;&amp; val);
+</span></pre>
+</td>
+</tr>
+<tr class="even"><th><span style="font-size: 14px">specializations (2)</span></th>
+<td>
+<pre><span style="font-size: 14px">void promise&lt;R&amp;&gt;::set_value (R&amp; val);   // when T is a reference type (R&amp;)
+void promise&lt;void&gt;::set_value (void);   // when T is void</span></pre>
+</td>
+</tr>
+</tbody>
+</table><p>设置共享状态的值，此后 promise 的共享状态标志变为 ready.</p>
+<h4>std::promise::set_exception 介绍</h4>
+<p>为 promise 设置异常，此后 promise 的共享状态变标志变为ready，例子如下，线程1从终端接收一个整数，线程2将该整数打印出来，如果线程1接收一个非整数，则为 promise 设置一个异常(failbit)，线程2 在std::future::get 是抛出该异常。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span><span class="c1">       // std::cin, std::cout, std::ios</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;functional&gt;</span><span class="c1">     // std::ref</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;thread&gt;</span><span class="c1">         // std::thread</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;future&gt;</span><span class="c1">         // std::promise, std::future</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;exception&gt;</span><span class="c1">      // std::exception, std::current_exception</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">get_int</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">promise</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">prom</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">x</span><span class="p">;</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Please, enter an integer value: &quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cin</span><span class="p">.</span><span class="n">exceptions</span><span class="w"> </span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">ios</span><span class="o">::</span><span class="n">failbit</span><span class="p">);</span><span class="w">   </span><span class="c1">// throw on failbit</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cin</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">x</span><span class="p">;</span><span class="w">                         </span><span class="c1">// sets failbit if input is not int</span>
+<span class="w">        </span><span class="n">prom</span><span class="p">.</span><span class="n">set_value</span><span class="p">(</span><span class="n">x</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">exception</span><span class="o">&amp;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">prom</span><span class="p">.</span><span class="n">set_exception</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">current_exception</span><span class="p">());</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">print_int</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">fut</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fut</span><span class="p">.</span><span class="n">get</span><span class="p">();</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;value: &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="sc">&#39;\n&#39;</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">exception</span><span class="o">&amp;</span><span class="w"> </span><span class="n">e</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;[exception caught: &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">e</span><span class="p">.</span><span class="n">what</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;]</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="w"> </span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">promise</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">prom</span><span class="p">;</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">fut</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">prom</span><span class="p">.</span><span class="n">get_future</span><span class="p">();</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="n">th1</span><span class="p">(</span><span class="n">get_int</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">ref</span><span class="p">(</span><span class="n">prom</span><span class="p">));</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="n">th2</span><span class="p">(</span><span class="n">print_int</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">ref</span><span class="p">(</span><span class="n">fut</span><span class="p">));</span>
+
+<span class="w">    </span><span class="n">th1</span><span class="p">.</span><span class="n">join</span><span class="p">();</span>
+<span class="w">    </span><span class="n">th2</span><span class="p">.</span><span class="n">join</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<h4>std::promise::set_value_at_thread_exit 介绍</h4>
+<p>设置共享状态的值，但是不将共享状态的标志设置为 ready，当线程退出时该 promise 对象会自动设置为 ready。如果某个 std::future对象与该 promise 对象的共享状态相关联，并且该 future 正在调用 get，则调用 get 的线程会被阻塞，当线程退出时，调用future::get 的线程解除阻塞，同时 get 返回 set_value_at_thread_exit 所设置的值。注意，该函数已经设置了promise 共享状态的值，如果在线程结束之前有其他设置或者修改共享状态的值的操作，则会抛出 future_error(promise_already_satisfied )。</p>
+<h4>std::promise::swap 介绍</h4>
+<p>交换 promise 的共享状态。</p>
+<hr>
+
+<h4><p>原文出处：<a href='https://www.cnblogs.com/haippy/p/3279565.html' target='blank'>C++11并发指南四(<future>详解二std::packaged_task介绍)</a></p></h4>
+<p>上一讲《<a href="http://www.cnblogs.com/haippy/p/3239248.html">C++11 并发指南四(<future> 详解一 std::promise介绍)</a>》主要介绍了 <future> 头文件中的std::promise 类，本文主要介绍 std::packaged_task。</p>
+<p>std::packaged_task包装一个可调用的对象，并且允许异步获取该可调用对象产生的结果，从包装可调用对象意义上来讲，std::packaged_task 与std::function 类似，只不过 std::packaged_task 将其包装的可调用对象的执行结果传递给一个 std::future对象（该对象通常在另外一个线程中获取 std::packaged_task 任务的执行结果）。</p>
+<p>std::packaged_task 对象内部包含了两个最基本元素，一、被包装的任务(stored task)，任务(task)是一个可调用的对象，如函数指针、成员函数指针或者函数对象，二、共享状态(shared state)，用于保存任务的返回值，可以通过 std::future 对象来达到异步访问共享状态的效果。</p>
+<p>可以通过 std::packged_task::get_future 来获取与共享状态相关联的 std::future 对象。在调用该函数之后，两个对象共享相同的共享状态，具体解释如下：</p>
+<ul>
+<li>std::packaged_task 对象是异步 Provider，它在某一时刻通过调用被包装的任务来设置共享状态的值。</li>
+<li>std::future 对象是一个异步返回对象，通过它可以获得共享状态的值，当然在必要的时候需要等待共享状态标志变为 ready.</li>
+</ul>
+<p>std::packaged_task 的共享状态的生命周期一直持续到最后一个与之相关联的对象被释放或者销毁为止。下面一个小例子大致讲了 std::packaged_task 的用法：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span><span class="c1">     // std::cout</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;future&gt;</span><span class="c1">       // std::packaged_task, std::future</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;chrono&gt;</span><span class="c1">       // std::chrono::seconds</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;thread&gt;</span><span class="c1">       // std::thread, std::this_thread::sleep_for</span>
+
+<span class="c1">// count down taking a second for each value:</span>
+<span class="kt">int</span><span class="w"> </span><span class="nf">countdown</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">from</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">to</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="o">=</span><span class="n">from</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">!=</span><span class="n">to</span><span class="p">;</span><span class="w"> </span><span class="o">--</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="sc">&#39;\n&#39;</span><span class="p">;</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">this_thread</span><span class="o">::</span><span class="n">sleep_for</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">chrono</span><span class="o">::</span><span class="n">seconds</span><span class="p">(</span><span class="mi">1</span><span class="p">));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Finished!</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">from</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">to</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="w"> </span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">packaged_task</span><span class="o">&lt;</span><span class="kt">int</span><span class="p">(</span><span class="kt">int</span><span class="p">,</span><span class="kt">int</span><span class="p">)</span><span class="o">&gt;</span><span class="w"> </span><span class="n">task</span><span class="p">(</span><span class="n">countdown</span><span class="p">);</span><span class="w"> </span><span class="c1">// 设置 packaged_task</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">task</span><span class="p">.</span><span class="n">get_future</span><span class="p">();</span><span class="w"> </span><span class="c1">// 获得与 packaged_task 共享状态相关联的 future 对象.</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="n">th</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">task</span><span class="p">),</span><span class="w"> </span><span class="mi">10</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w">   </span><span class="c1">//创建一个新线程完成计数任务.</span>
+
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ret</span><span class="p">.</span><span class="n">get</span><span class="p">();</span><span class="w">                    </span><span class="c1">// 等待任务完成并获取结果.</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;The countdown lasted for &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">value</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot; seconds.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+
+<span class="w">    </span><span class="n">th</span><span class="p">.</span><span class="n">join</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>执行结果为：</p>
+<div class="highlight"><pre><code><span></span><span class="n">concurrency</span><span class="w"> </span><span class="p">)</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="n">Packaged_Task1</span><span class="w"> </span>
+<span class="mi">10</span>
+<span class="mi">9</span>
+<span class="mi">8</span>
+<span class="mi">7</span>
+<span class="mi">6</span>
+<span class="mi">5</span>
+<span class="mi">4</span>
+<span class="mi">3</span>
+<span class="mi">2</span>
+<span class="mi">1</span>
+<span class="n">Finished</span><span class="o">!</span>
+<span class="n">The</span><span class="w"> </span><span class="n">countdown</span><span class="w"> </span><span class="n">lasted</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="mi">10</span><span class="w"> </span><span class="n">seconds</span><span class="p">.</span>
+</code></pre></div>
+<p><strong>std::packaged_task 构造函数</strong></p>
+<table>
+<tbody>
+<tr class="odd"><th>default (1)</th>
+<td>
+<pre>packaged_task() noexcept;
+</pre>
+</td>
+</tr>
+<tr class="even"><th>initialization (2)</th>
+<td>
+<pre>template &lt;class Fn&gt;
+  explicit packaged_task (Fn&amp;&amp; fn);
+</pre>
+</td>
+</tr>
+<tr class="odd"><th>with allocator (3)</th>
+<td>
+<pre>template &lt;class Fn, class Alloc&gt;
+  explicit packaged_task (allocator_arg_t aa, const Alloc&amp; alloc, Fn&amp;&amp; fn);
+</pre>
+</td>
+</tr>
+<tr class="even"><th>copy [deleted] (4)</th>
+<td>
+<pre>packaged_task (const packaged_task&amp;) = delete;
+</pre>
+</td>
+</tr>
+<tr class="odd"><th>move (5)</th>
+<td>
+<pre>packaged_task (packaged_task&amp;&amp; x) noexcept;</pre>
+</td>
+</tr>
+</tbody>
+</table><p>std::packaged_task 构造函数共有 5 中形式，不过拷贝构造已经被禁用了。下面简单地介绍一下上述几种构造函数的语义：</p>
+<ol>
+<li>默认构造函数，初始化一个空的共享状态，并且该 packaged_task 对象无包装任务。</li>
+<li>初始化一个共享状态，并且被包装任务由参数 fn 指定。</li>
+<li>带自定义内存分配器的构造函数，与默认构造函数类似，但是使用自定义分配器来分配共享状态。</li>
+<li>拷贝构造函数，被禁用。</li>
+<li>移动构造函数。</li>
+</ol>
+<p>下面例子介绍了各类构造函数的用法：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span><span class="c1">     // std::cout</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;utility&gt;</span><span class="c1">      // std::move</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;future&gt;</span><span class="c1">       // std::packaged_task, std::future</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;thread&gt;</span><span class="c1">       // std::thread</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="w"> </span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">packaged_task</span><span class="o">&lt;</span><span class="kt">int</span><span class="p">(</span><span class="kt">int</span><span class="p">)</span><span class="o">&gt;</span><span class="w"> </span><span class="n">foo</span><span class="p">;</span><span class="w"> </span><span class="c1">// 默认构造函数.</span>
+
+<span class="w">    </span><span class="c1">// 使用 lambda 表达式初始化一个 packaged_task 对象.</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">packaged_task</span><span class="o">&lt;</span><span class="kt">int</span><span class="p">(</span><span class="kt">int</span><span class="p">)</span><span class="o">&gt;</span><span class="w"> </span><span class="n">bar</span><span class="p">([](</span><span class="kt">int</span><span class="w"> </span><span class="n">x</span><span class="p">){</span><span class="k">return</span><span class="w"> </span><span class="n">x</span><span class="o">*</span><span class="mi">2</span><span class="p">;});</span>
+
+<span class="w">    </span><span class="n">foo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">bar</span><span class="p">);</span><span class="w"> </span><span class="c1">// move-赋值操作，也是 C++11 中的新特性.</span>
+
+<span class="w">    </span><span class="c1">// 获取与 packaged_task 共享状态相关联的 future 对象.</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">foo</span><span class="p">.</span><span class="n">get_future</span><span class="p">();</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">foo</span><span class="p">),</span><span class="w"> </span><span class="mi">10</span><span class="p">).</span><span class="n">detach</span><span class="p">();</span><span class="w"> </span><span class="c1">// 产生线程，调用被包装的任务.</span>
+
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ret</span><span class="p">.</span><span class="n">get</span><span class="p">();</span><span class="w"> </span><span class="c1">// 等待任务完成并获取结果.</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;The double of 10 is &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">value</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>与 std::promise 类似， std::packaged_task 也禁用了普通的赋值操作运算，只允许 move 赋值运算。</p>
+<p><strong>std::packaged_task::valid 介绍</strong></p>
+<p>检查当前 packaged_task 是否和一个有效的共享状态相关联，对于由默认构造函数生成的 packaged_task 对象，该函数返回false，除非中间进行了 move 赋值操作或者 swap 操作。</p>
+<p>请看下例：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span><span class="c1">     // std::cout</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;utility&gt;</span><span class="c1">      // std::move</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;future&gt;</span><span class="c1">       // std::packaged_task, std::future</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;thread&gt;</span><span class="c1">       // std::thread</span>
+
+<span class="c1">// 在新线程中启动一个 int(int) packaged_task.</span>
+<span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">launcher</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">packaged_task</span><span class="o">&lt;</span><span class="kt">int</span><span class="p">(</span><span class="kt">int</span><span class="p">)</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">tsk</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">arg</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">tsk</span><span class="p">.</span><span class="n">valid</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tsk</span><span class="p">.</span><span class="n">get_future</span><span class="p">();</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">tsk</span><span class="p">),</span><span class="n">arg</span><span class="p">).</span><span class="n">detach</span><span class="p">();</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">ret</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">else</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">();</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="n">main</span><span class="w"> </span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">packaged_task</span><span class="o">&lt;</span><span class="kt">int</span><span class="p">(</span><span class="kt">int</span><span class="p">)</span><span class="o">&gt;</span><span class="w"> </span><span class="n">tsk</span><span class="p">([](</span><span class="kt">int</span><span class="w"> </span><span class="n">x</span><span class="p">){</span><span class="k">return</span><span class="w"> </span><span class="n">x</span><span class="o">*</span><span class="mi">2</span><span class="p">;});</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">fut</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">launcher</span><span class="p">(</span><span class="n">tsk</span><span class="p">,</span><span class="mi">25</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;The double of 25 is &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">fut</span><span class="p">.</span><span class="n">get</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>std::packaged_task::get_future 介绍</strong></p>
+<p>返回一个与 packaged_task 对象共享状态相关的 future 对象。返回的 future 对象可以获得由另外一个线程在该packaged_task 对象的共享状态上设置的某个值或者异常。</p>
+<p>请看例子(其实前面已经讲了 get_future 的例子)：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span><span class="c1">     // std::cout</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;utility&gt;</span><span class="c1">      // std::move</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;future&gt;</span><span class="c1">       // std::packaged_task, std::future</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;thread&gt;</span><span class="c1">       // std::thread</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="w"> </span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">packaged_task</span><span class="o">&lt;</span><span class="kt">int</span><span class="p">(</span><span class="kt">int</span><span class="p">)</span><span class="o">&gt;</span><span class="w"> </span><span class="n">tsk</span><span class="p">([](</span><span class="kt">int</span><span class="w"> </span><span class="n">x</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">3</span><span class="p">;</span><span class="w"> </span><span class="p">}));</span><span class="w"> </span><span class="c1">// package task</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">fut</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tsk</span><span class="p">.</span><span class="n">get_future</span><span class="p">();</span><span class="w">   </span><span class="c1">// 获取 future 对象.</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">tsk</span><span class="p">),</span><span class="w"> </span><span class="mi">100</span><span class="p">).</span><span class="n">detach</span><span class="p">();</span><span class="w">   </span><span class="c1">// 生成新线程并调用packaged_task.</span>
+
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fut</span><span class="p">.</span><span class="n">get</span><span class="p">();</span><span class="w">                     </span><span class="c1">// 等待任务完成, 并获取结果.</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;The triple of 100 is &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">value</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>std::packaged_task::operator()(Args... args) 介绍</strong></p>
+<p>调用该 packaged_task 对象所包装的对象(通常为函数指针，函数对象，lambda 表达式等)，传入的参数为 args.调用该函数一般会发生两种情况：</p>
+<ul>
+<li>如果成功调用 packaged_task 所包装的对象，则返回值（如果被包装的对象有返回值的话）被保存在 packaged_task 的共享状态中。</li>
+<li>如果调用 packaged_task 所包装的对象失败，并且抛出了异常，则异常也会被保存在 packaged_task 的共享状态中。</li>
+</ul>
+<p>以上两种情况都使共享状态的标志变为 ready，因此其他等待该共享状态的线程可以获取共享状态的值或者异常并继续执行下去。</p>
+<p>共享状态的值可以通过在 future 对象(由 get_future获得)上调用 get 来获得。</p>
+<p>由于被包装的任务在 packaged_task 构造时指定，因此调用 operator() 的效果由 packaged_task对象构造时所指定的可调用对象来决定：</p>
+<ul>
+<li>如果被包装的任务是函数指针或者函数对象，调用 std::packaged_task::operator() 只是将参数传递给被包装的对象。</li>
+<li>如果被包装的任务是指向类的非静态成员函数的指针，那么 std::packaged_task::operator() 的第一个参数应该指定为成员函数被调用的那个对象，剩余的参数作为该成员函数的参数。</li>
+<li>如果被包装的任务是指向类的非静态成员变量，那么 std::packaged_task::operator() 只允许单个参数。</li>
+</ul>
+<p><strong>std::packaged_task::make_ready_at_thread_exit 介绍</strong></p>
+<p>该函数会调用被包装的任务，并向任务传递参数，类似 std::packaged_task 的 operator() 成员函数。但是与 operator()函数不同的是，make_ready_at_thread_exit 并不会立即设置共享状态的标志为 ready，而是在线程退出时设置共享状态的标志。</p>
+<p>如果与该 packaged_task 共享状态相关联的 future 对象在 future::get 处等待，则当前的 future::get调用会被阻塞，直到线程退出。而一旦线程退出，future::get 调用继续执行，或者抛出异常。</p>
+<p>注意，该函数已经设置了 promise 共享状态的值，如果在线程结束之前有其他设置或者修改共享状态的值的操作，则会抛出 future_error(promise_already_satisfied )。</p>
+<p><strong>std::packaged_task::reset() 介绍</strong></p>
+<p>重置 packaged_task 的共享状态，但是保留之前的被包装的任务。请看例子，该例子中，packaged_task 被重用了多次：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span><span class="c1">     // std::cout</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;utility&gt;</span><span class="c1">      // std::move</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;future&gt;</span><span class="c1">       // std::packaged_task, std::future</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;thread&gt;</span><span class="c1">       // std::thread</span>
+
+<span class="c1">// a simple task:</span>
+<span class="kt">int</span><span class="w"> </span><span class="nf">triple</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">x</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">x</span><span class="o">*</span><span class="mi">3</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="w"> </span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">packaged_task</span><span class="o">&lt;</span><span class="kt">int</span><span class="p">(</span><span class="kt">int</span><span class="p">)</span><span class="o">&gt;</span><span class="w"> </span><span class="n">tsk</span><span class="w"> </span><span class="p">(</span><span class="n">triple</span><span class="p">);</span><span class="w"> </span><span class="c1">// package task</span>
+
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">fut</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tsk</span><span class="p">.</span><span class="n">get_future</span><span class="p">();</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">tsk</span><span class="p">),</span><span class="w"> </span><span class="mi">100</span><span class="p">).</span><span class="n">detach</span><span class="p">();</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;The triple of 100 is &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">fut</span><span class="p">.</span><span class="n">get</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+
+
+<span class="w">    </span><span class="c1">// re-use same task object:</span>
+<span class="w">    </span><span class="n">tsk</span><span class="p">.</span><span class="n">reset</span><span class="p">();</span>
+<span class="w">    </span><span class="n">fut</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tsk</span><span class="p">.</span><span class="n">get_future</span><span class="p">();</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">tsk</span><span class="p">),</span><span class="w"> </span><span class="mi">200</span><span class="p">).</span><span class="n">detach</span><span class="p">();</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Thre triple of 200 is &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">fut</span><span class="p">.</span><span class="n">get</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>std::packaged_task::swap() 介绍</strong></p>
+<p>交换 packaged_task 的共享状态。</p>
+<p>好了，std::packaged_task 介绍到这里，本文参考了<a href="http://www.cplusplus.com/reference/future/packaged_task/">http://www.cplusplus.com/reference/future/packaged_task/</a> 相关的内容。后一篇文章我将向大家介绍std::future，std::shared_future 以及 std::future_error，另外还会介绍 <future> 头文件中的std::async，std::future_category 函数以及相关枚举类型。</p>
+<p><hr></p>
+<h4><p>原文出处：<a href='https://www.cnblogs.com/haippy/p/3280643.html' target='blank'>C++11并发指南四(<future>详解三std::future & std::shared_future)</a></p></h4>
+<p>上一讲《<a href="http://www.cnblogs.com/haippy/p/3279565.html">C++11 并发指南四(<future> 详解二 std::packaged_task介绍)</a>》主要介绍了 <future> 头文件中的std::packaged_task 类，本文主要介绍 std::future，std::shared_future 以及std::future_error，另外还会介绍 <future> 头文件中的 std::async，std::future_category函数以及相关枚举类型。</p>
+<h3>std::future 介绍</h3>
+<p>前面已经多次提到过 std::future，那么 std::future 究竟是什么呢？简单地说，std::future可以用来获取异步任务的结果，因此可以把它当成一种简单的线程间同步的手段。std::future 通常由某个 Provider 创建，你可以把Provider 想象成一个异步任务的提供者，Provider 在某个线程中设置共享状态的值，与该共享状态相关联的 std::future 对象调用get（通常在另外一个线程中） 获取该值，如果共享状态的标志不为 ready，则调用 std::future::get 会阻塞当前的调用者，直到Provider 设置了共享状态的值（此时共享状态的标志变为 ready），std::future::get 返回异步任务的值或异常（如果发生了异常）。</p>
+<p>一个有效(valid)的 std::future 对象通常由以下三种 Provider 创建，并和某个共享状态相关联。Provider可以是函数或者类，其实我们前面都已经提到了，他们分别是：</p>
+<ul>
+<li>std::async 函数，本文后面会介绍 std::async() 函数。</li>
+<li>std::promise::get_future，get_future 为 promise 类的成员函数，详见 <a href="http://www.cnblogs.com/haippy/p/3239248.html">C++11 并发指南四(<future> 详解一 std::promise 介绍)</a>。</li>
+<li>std::packaged_task::get_future，此时 get_future为 packaged_task 的成员函数，详见<a href="http://www.cnblogs.com/haippy/p/3279565.html">C++11 并发指南四(<future> 详解二 std::packaged_task 介绍)</a>。</li>
+</ul>
+<p>一个 std::future 对象只有在有效(valid)的情况下才有用(useful)，由 std::future 默认构造函数创建的 future对象不是有效的（除非当前非有效的 future 对象被 move 赋值另一个有效的 future 对象）。</p>
+<p>在一个有效的 future 对象上调用 get 会阻塞当前的调用者，直到 Provider 设置了共享状态的值或异常（此时共享状态的标志变为ready），std::future::get 将返回异步任务的值或异常（如果发生了异常）。</p>
+<p>下面以一个<a href="http://www.cplusplus.com/reference/future/future/">简单的例子</a>说明上面一段文字吧（<a href="http://www.cplusplus.com/reference/future/future/">参考</a>）：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// future example</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span><span class="c1">             // std::cout</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;future&gt;</span><span class="c1">               // std::async, std::future</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;chrono&gt;</span><span class="c1">               // std::chrono::milliseconds</span>
+
+<span class="c1">// a non-optimized way of checking for prime numbers:</span>
+<span class="kt">bool</span>
+<span class="nf">is_prime</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">x</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">x</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">x</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">            </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">int</span>
+<span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="c1">// call function asynchronously:</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">fut</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">async</span><span class="p">(</span><span class="n">is_prime</span><span class="p">,</span><span class="w"> </span><span class="mi">444444443</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// do something while waiting for function to set future:</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;checking, please wait&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">chrono</span><span class="o">::</span><span class="n">milliseconds</span><span class="w"> </span><span class="n">span</span><span class="p">(</span><span class="mi">100</span><span class="p">);</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">fut</span><span class="p">.</span><span class="n">wait_for</span><span class="p">(</span><span class="n">span</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">future_status</span><span class="o">::</span><span class="n">timeout</span><span class="p">)</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="sc">&#39;.&#39;</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fut</span><span class="p">.</span><span class="n">get</span><span class="p">();</span><span class="w">         </span><span class="c1">// retrieve return value</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;</span><span class="se">\n</span><span class="s">444444443 &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="p">(</span><span class="n">x</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="s">&quot;is&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;is not&quot;</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot; prime.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<h4>std::future 成员函数</h4>
+<p><strong>std::future 构造函数</strong></p>
+<p>std::future 一般由 std::async, std::promise::get_future,
+std::packaged_task::get_future 创建，不过也提供了构造函数，如下表所示：</p>
+<table>
+<tbody>
+<tr class="odd"><th>default (1)</th>
+<td>
+<pre>future() noexcept;
+</pre>
+</td>
+</tr>
+<tr class="even"><th>copy [deleted] (2)</th>
+<td>
+<pre>future (const future&amp;) = delete;
+</pre>
+</td>
+</tr>
+<tr class="odd"><th>move (3)</th>
+<td>
+<pre>future (future&amp;&amp; x) noexcept;</pre>
+</td>
+</tr>
+</tbody>
+</table><p>不过 std::future 的拷贝构造函数是被禁用的，只提供了默认的构造函数和 move 构造函数（注：C++ 新特新）。另外，std::future的普通赋值操作也被禁用，只提供了 move 赋值操作。如下代码所示：</p>
+<div class="highlight"><pre><code><span></span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">fut</span><span class="p">;</span><span class="w">           </span><span class="c1">// 默认构造函数</span>
+<span class="n">fut</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">async</span><span class="p">(</span><span class="n">do_some_task</span><span class="p">);</span><span class="w">   </span><span class="c1">// move-赋值操作。</span>
+</code></pre></div>
+<p><strong>std::future::share()</strong></p>
+<p>返回一个 std::shared_future 对象（本文后续内容将介绍 std::shared_future ），调用该函数之后，该std::future 对象本身已经不和任何共享状态相关联，因此该 std::future 的状态不再是 valid 的了。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span><span class="c1">       // std::cout</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;future&gt;</span><span class="c1">         // std::async, std::future, std::shared_future</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">do_get_value</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="mi">10</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="w"> </span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">fut</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">async</span><span class="p">(</span><span class="n">do_get_value</span><span class="p">);</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">shared_future</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">shared_fut</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fut</span><span class="p">.</span><span class="n">share</span><span class="p">();</span>
+
+<span class="w">    </span><span class="c1">// 共享的 future 对象可以被多次访问.</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;value: &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">shared_fut</span><span class="p">.</span><span class="n">get</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="sc">&#39;\n&#39;</span><span class="p">;</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;its double: &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">shared_fut</span><span class="p">.</span><span class="n">get</span><span class="p">()</span><span class="o">*</span><span class="mi">2</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="sc">&#39;\n&#39;</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>std::future::get()</strong></p>
+<p>std::future::get一共有三种形式，如下表所示（<a href="http://www.cplusplus.com/reference/future/future/get/">参考</a>）：</p>
+<table>
+<tbody>
+<tr class="odd"><th>generic template (1)</th>
+<td>
+<pre>T get();
+</pre>
+</td>
+</tr>
+<tr class="even"><th>reference specialization (2)</th>
+<td>
+<pre>R&amp; future&lt;R&amp;&gt;::get();       // when T is a reference type (R&amp;)
+</pre>
+</td>
+</tr>
+<tr class="odd"><th>void specialization (3)</th>
+<td>
+<pre>void future&lt;void&gt;::get();   // when T is void</pre>
+</td>
+</tr>
+</tbody>
+</table><p>当与该 std::future 对象相关联的共享状态标志变为 ready 后，调用该函数将返回保存在共享状态中的值，如果共享状态的标志不为ready，则调用该函数会阻塞当前的调用者，而此后一旦共享状态的标志变为 ready，get 返回 Provider所设置的共享状态的值或者异常（如果抛出了异常）。</p>
+<p>请看下面的程序：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span><span class="c1">       // std::cin, std::cout, std::ios</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;functional&gt;</span><span class="c1">     // std::ref</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;thread&gt;</span><span class="c1">         // std::thread</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;future&gt;</span><span class="c1">         // std::promise, std::future</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;exception&gt;</span><span class="c1">      // std::exception, std::current_exception</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">get_int</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">promise</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">prom</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">x</span><span class="p">;</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Please, enter an integer value: &quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cin</span><span class="p">.</span><span class="n">exceptions</span><span class="w"> </span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">ios</span><span class="o">::</span><span class="n">failbit</span><span class="p">);</span><span class="w">   </span><span class="c1">// throw on failbit</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cin</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">x</span><span class="p">;</span><span class="w">                         </span><span class="c1">// sets failbit if input is not int</span>
+<span class="w">        </span><span class="n">prom</span><span class="p">.</span><span class="n">set_value</span><span class="p">(</span><span class="n">x</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">exception</span><span class="o">&amp;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">prom</span><span class="p">.</span><span class="n">set_exception</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">current_exception</span><span class="p">());</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">print_int</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">fut</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fut</span><span class="p">.</span><span class="n">get</span><span class="p">();</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;value: &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="sc">&#39;\n&#39;</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">exception</span><span class="o">&amp;</span><span class="w"> </span><span class="n">e</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;[exception caught: &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">e</span><span class="p">.</span><span class="n">what</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;]</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="w"> </span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">promise</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">prom</span><span class="p">;</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">fut</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">prom</span><span class="p">.</span><span class="n">get_future</span><span class="p">();</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="n">th1</span><span class="p">(</span><span class="n">get_int</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">ref</span><span class="p">(</span><span class="n">prom</span><span class="p">));</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="n">th2</span><span class="p">(</span><span class="n">print_int</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">ref</span><span class="p">(</span><span class="n">fut</span><span class="p">));</span>
+
+<span class="w">    </span><span class="n">th1</span><span class="p">.</span><span class="n">join</span><span class="p">();</span>
+<span class="w">    </span><span class="n">th2</span><span class="p">.</span><span class="n">join</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>std::future::valid()</strong></p>
+<p>检查当前的 std::future 对象是否有效，即释放与某个共享状态相关联。一个有效的 std::future 对象只能通过 std::async(),std::future::get_future 或者 std::packaged_task::get_future 来初始化。另外由 std::future默认构造函数创建的 std::future 对象是无效(invalid)的，当然通过 std::future 的 move 赋值后该 std::future对象也可以变为 valid。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span><span class="c1">       // std::cout</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;future&gt;</span><span class="c1">         // std::async, std::future</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;utility&gt;</span><span class="c1">        // std::move</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">do_get_value</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="mi">11</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="w"> </span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="c1">// 由默认构造函数创建的 std::future 对象,</span>
+<span class="w">    </span><span class="c1">// 初始化时该 std::future 对象处于为 invalid 状态.</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">foo</span><span class="p">,</span><span class="w"> </span><span class="n">bar</span><span class="p">;</span>
+<span class="w">    </span><span class="n">foo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">async</span><span class="p">(</span><span class="n">do_get_value</span><span class="p">);</span><span class="w"> </span><span class="c1">// move 赋值, foo 变为 valid.</span>
+<span class="w">    </span><span class="n">bar</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">foo</span><span class="p">);</span><span class="w"> </span><span class="c1">// move 赋值, bar 变为 valid, 而 move 赋值以后 foo 变为 invalid.</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">foo</span><span class="p">.</span><span class="n">valid</span><span class="p">())</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;foo&#39;s value: &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">foo</span><span class="p">.</span><span class="n">get</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="sc">&#39;\n&#39;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">else</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;foo is not valid</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">bar</span><span class="p">.</span><span class="n">valid</span><span class="p">())</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;bar&#39;s value: &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">bar</span><span class="p">.</span><span class="n">get</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="sc">&#39;\n&#39;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">else</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;bar is not valid</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>std::future::wait()</strong></p>
+<p>等待与当前std::future 对象相关联的共享状态的标志变为 ready.</p>
+<p>如果共享状态的标志不是 ready（此时 Provider 没有在共享状态上设置值（或者异常）），调用该函数会被阻塞当前线程，直到共享状态的标志变为ready。</p>
+<p>一旦共享状态的标志变为 ready，wait() 函数返回，当前线程被解除阻塞，但是 wait() 并不读取共享状态的值或者异常。下面的代码说明了std::future::wait()的用法（<a href="http://www.cplusplus.com/reference/future/future/wait/">参考</a>）</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span><span class="c1">                // std::cout</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;future&gt;</span><span class="c1">                // std::async, std::future</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;chrono&gt;</span><span class="c1">                // std::chrono::milliseconds</span>
+
+<span class="c1">// a non-optimized way of checking for prime numbers:</span>
+<span class="kt">bool</span><span class="w"> </span><span class="nf">do_check_prime</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">x</span><span class="p">)</span><span class="w"> </span><span class="c1">// 为了体现效果, 该函数故意没有优化.</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">x</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">x</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">            </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="c1">// call function asynchronously:</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">fut</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">async</span><span class="p">(</span><span class="n">do_check_prime</span><span class="p">,</span><span class="w"> </span><span class="mi">194232491</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Checking...</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="n">fut</span><span class="p">.</span><span class="n">wait</span><span class="p">();</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;</span><span class="se">\n</span><span class="s">194232491 &quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">fut</span><span class="p">.</span><span class="n">get</span><span class="p">())</span><span class="w"> </span><span class="c1">// guaranteed to be ready (and not block) after wait returns</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;is prime.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">else</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;is not prime.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>执行结果如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">concurrency</span><span class="w"> </span><span class="p">)</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="n">Future</span><span class="o">-</span><span class="n">wait</span><span class="w"> </span>
+<span class="n">Checking</span><span class="p">...</span>
+
+<span class="mi">194232491</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">prime</span><span class="p">.</span>
+<span class="n">concurrency</span><span class="w"> </span><span class="p">)</span>
+</code></pre></div>
+<p><strong>std::future::wait_for()</strong></p>
+<p>与 std::future::wait() 的功能类似，即等待与该 std::future 对象相关联的共享状态的标志变为 ready，该函数原型如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Rep</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">Period</span><span class="o">&gt;</span>
+<span class="n">future_status</span><span class="w"> </span><span class="n">wait_for</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">chrono</span><span class="o">::</span><span class="n">duration</span><span class="o">&lt;</span><span class="n">Rep</span><span class="p">,</span><span class="n">Period</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">rel_time</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+</code></pre></div>
+<p>而与 std::future::wait() 不同的是，wait_for() 可以设置一个时间段 rel_time，如果共享状态的标志在该时间段结束之前没有被 Provider 设置为 ready，则调用 wait_for 的线程被阻塞，在等待了rel_time 的时间长度后 wait_until() 返回，返回值如下：</p>
+<table class="boxed">
+<tbody>
+<tr><th>返回值</th><th>描述</th></tr>
+<tr>
+<td><samp><span style="font-size: 14px"><a href="http://www.cplusplus.com/future_status">future_status::ready</a></span></samp></td>
+<td><span style="font-size: 14px">共享状态的标志已经变为 ready，即 Provider 在共享状态上设置了值或者异常。</span></td>
+</tr>
+<tr>
+<td><samp><span style="font-size: 14px"><a href="http://www.cplusplus.com/future_status">future_status::timeout</a></span></samp></td>
+<td><span style="font-size: 14px">超时，即在规定的时间内<span style="font-size: 14px">共享状态的标志没有变为 ready。</span></span></td>
+</tr>
+<tr>
+<td><samp><span style="font-size: 14px"><a href="http://www.cplusplus.com/future_status">future_status::deferred</a></span></samp></td>
+<td><span style="font-size: 14px"><span style="font-size: 14px">共享状态包含一个&nbsp;<span style="font-size: 14px"><em>deferred</em></span> 函数。</span></span></td>
+</tr>
+</tbody>
+</table><p>请看下面的例子：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span><span class="c1">                // std::cout</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;future&gt;</span><span class="c1">                // std::async, std::future</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;chrono&gt;</span><span class="c1">                // std::chrono::milliseconds</span>
+
+<span class="c1">// a non-optimized way of checking for prime numbers:</span>
+<span class="kt">bool</span><span class="w"> </span><span class="nf">do_check_prime</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">x</span><span class="p">)</span><span class="w"> </span><span class="c1">// 为了体现效果, 该函数故意没有优化.</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">x</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">x</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">            </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="c1">// call function asynchronously:</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">fut</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">async</span><span class="p">(</span><span class="n">do_check_prime</span><span class="p">,</span><span class="w"> </span><span class="mi">194232491</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Checking...</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">chrono</span><span class="o">::</span><span class="n">milliseconds</span><span class="w"> </span><span class="n">span</span><span class="p">(</span><span class="mi">1000</span><span class="p">);</span><span class="w"> </span><span class="c1">// 设置超时间隔.</span>
+
+<span class="w">    </span><span class="c1">// 如果超时，则输出&quot;.&quot;，继续等待</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">fut</span><span class="p">.</span><span class="n">wait_for</span><span class="p">(</span><span class="n">span</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">future_status</span><span class="o">::</span><span class="n">timeout</span><span class="p">)</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="sc">&#39;.&#39;</span><span class="p">;</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;</span><span class="se">\n</span><span class="s">194232491 &quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">fut</span><span class="p">.</span><span class="n">get</span><span class="p">())</span><span class="w"> </span><span class="c1">// guaranteed to be ready (and not block) after wait returns</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;is prime.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">else</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;is not prime.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>std::future::wait_until()</strong></p>
+<p>与 std::future::wait() 的功能类似，即等待与该 std::future 对象相关联的共享状态的标志变为 ready，该函数原型如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Rep</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">Period</span><span class="o">&gt;</span>
+<span class="n">future_status</span><span class="w"> </span><span class="n">wait_until</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">chrono</span><span class="o">::</span><span class="n">time_point</span><span class="o">&lt;</span><span class="n">Clock</span><span class="p">,</span><span class="n">Duration</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">abs_time</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+</code></pre></div>
+<p>而 与 std::future::wait() 不同的是，wait_until() 可以设置一个系统绝对时间点abs_time，如果共享状态的标志在该时间点到来之前没有被 Provider 设置为 ready，则调用 wait_until 的线程被阻塞，在abs_time 这一时刻到来之后 wait_for() 返回，返回值如下：</p>
+<table class="boxed">
+<tbody>
+<tr><th>返回值</th><th>描述</th></tr>
+<tr>
+<td><samp><span style="font-size: 14px"><a href="http://www.cplusplus.com/future_status">future_status::ready</a></span></samp></td>
+<td><span style="font-size: 14px">共享状态的标志已经变为 ready，即 Provider 在共享状态上设置了值或者异常。</span></td>
+</tr>
+<tr>
+<td><samp><span style="font-size: 14px"><a href="http://www.cplusplus.com/future_status">future_status::timeout</a></span></samp></td>
+<td><span style="font-size: 14px">超时，即在规定的时间内<span style="font-size: 14px">共享状态的标志没有变为 ready。</span></span></td>
+</tr>
+<tr>
+<td><samp><span style="font-size: 14px"><a href="http://www.cplusplus.com/future_status">future_status::deferred</a></span></samp></td>
+<td><span style="font-size: 14px"><span style="font-size: 14px">共享状态包含一个&nbsp;<span style="font-size: 14px"><em>deferred</em></span> 函数。</span></span></td>
+</tr>
+</tbody>
+</table><h3>std::shared_future 介绍</h3>
+<p>std::shared_future 与 std::future 类似，但是 std::shared_future 可以拷贝、多个std::shared_future 可以共享某个共享状态的最终结果(即共享状态的某个值或者异常)。shared_future 可以通过某个std::future 对象隐式转换（参见 std::shared_future 的构造函数），或者通过 std::future::share()显示转换，无论哪种转换，被转换的那个 std::future 对象都会变为 not-valid.</p>
+<p><strong>std::shared_future 构造函数</strong></p>
+<p>std::shared_future 共有四种构造函数，如下表所示：</p>
+<table>
+<tbody>
+<tr class="odd"><th>default (1)</th>
+<td>
+<pre>shared_future() noexcept;
+</pre>
+</td>
+</tr>
+<tr class="even"><th>copy (2)</th>
+<td>
+<pre>shared_future (const shared_future&amp; x);
+</pre>
+</td>
+</tr>
+<tr class="odd"><th>move (3)</th>
+<td>
+<pre>shared_future (shared_future&amp;&amp; x) noexcept;
+</pre>
+</td>
+</tr>
+<tr class="even"><th>move from future (4)</th>
+<td>
+<pre>shared_future (future&lt;T&gt;&amp;&amp; x) noexcept;</pre>
+</td>
+</tr>
+</tbody>
+</table><p>最后 move from future(4) 即从一个有效的 std::future 对象构造一个 std::shared_future，构造之后std::future 对象 x 变为无效(not-valid)。</p>
+<p><strong>std::shared_future 其他成员函数</strong></p>
+<p>std::shared_future 的成员函数和 std::future 大部分相同，如下（每个成员函数都给出了连接）：</p>
+<p><a href="http://www.cplusplus.com/reference/future/shared_future/operator=/">operator=</a>  赋值操作符，与 std::future 的赋值操作不同，std::shared_future 除了支持 move 赋值操作外，还支持普通的赋值操作。</p>
+<p><a href="http://www.cplusplus.com/reference/future/shared_future/get/">get</a>   获取与该 std::shared_future 对象相关联的共享状态的值（或者异常）。</p>
+<p><a href="http://www.cplusplus.com/reference/future/shared_future/valid/">valid</a>   有效性检查。</p>
+<p><a href="http://www.cplusplus.com/reference/future/shared_future/wait/">wait</a>   等待与该 std::shared_future 对象相关联的共享状态的标志变为 ready。</p>
+<p><a href="http://www.cplusplus.com/reference/future/shared_future/wait_for/">wait_for</a>   等待与该 std::shared_future 对象相关联的共享状态的标志变为 ready。（等待一段时间，超过该时间段wait_for 返回。）</p>
+<p><a href="http://www.cplusplus.com/reference/future/shared_future/wait_until/">wait_until</a>   等待与该 std::shared_future 对象相关联的共享状态的标志变为 ready。（在某一时刻前等待，超过该时刻 wait_until 返回。）</p>
+<h3>std::future_error 介绍</h3>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">future_error</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">logic_error</span><span class="p">;</span>
+</code></pre></div>
+<p>std::future_error 继承子 C++ 标准异常体系中的 logic_error，有关 C++ 异常的继承体系，请参考相关的C++教程 ;-)。</p>
+<h3>其他与 std::future 相关的函数介绍</h3>
+<p>与 std::future 相关的函数主要是 std::async()，原型如下：</p>
+<table style="width: 603px; height: 139px">
+<tbody>
+<tr class="odd"><th><span style="font-size: 13px">unspecified policy (1)</span></th>
+<td>
+<pre>template &lt;class Fn, class... Args&gt;
+  future&lt;typename result_of&lt;Fn(Args...)&gt;::type&gt;<br>&nbsp; &nbsp; async(Fn&amp;&amp; fn, Args&amp;&amp;... args);
+</pre>
+</td>
+</tr>
+<tr class="even"><th><span style="font-size: 13px">specific policy (2)</span></th>
+<td>
+<pre>template &lt;class Fn, class... Args&gt;
+  future&lt;typename result_of&lt;Fn(Args...)&gt;::type&gt;<br>&nbsp; &nbsp; async(launch policy, Fn&amp;&amp; fn, Args&amp;&amp;... args);
+</pre>
+</td>
+</tr>
+</tbody>
+</table><p>上面两组 std::async() 的不同之处是第一类 std::async 没有指定异步任务（即执行某一函数）的启动策略(launch policy)，而第二类函数指定了启动策略，详见 std::launch 枚举类型，指定启动策略的函数的 policy参数可以是launch::async，launch::deferred，以及两者的按位或( | )。</p>
+<p>std::async() 的 fn 和 args 参数用来指定异步任务及其参数。另外，std::async() 返回一个 std::future对象，通过该对象可以获取异步任务的值或异常（如果异步任务抛出了异常）。</p>
+<p>下面介绍一下 std::async 的用法。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;stdio.h&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;stdlib.h&gt;</span>
+
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;cmath&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;chrono&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;future&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span>
+
+<span class="kt">double</span><span class="w"> </span><span class="nf">ThreadTask</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">n</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">this_thread</span><span class="o">::</span><span class="n">get_id</span><span class="p">()</span>
+<span class="w">        </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot; start computing...&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kt">double</span><span class="w"> </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">n</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">ret</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">sin</span><span class="p">(</span><span class="n">i</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">this_thread</span><span class="o">::</span><span class="n">get_id</span><span class="p">()</span>
+<span class="w">        </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot; finished computing...&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">ret</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">argv</span><span class="p">[])</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="o">&lt;</span><span class="kt">double</span><span class="o">&gt;</span><span class="w"> </span><span class="n">f</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">async</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">launch</span><span class="o">::</span><span class="n">async</span><span class="p">,</span><span class="w"> </span><span class="n">ThreadTask</span><span class="p">,</span><span class="w"> </span><span class="mi">100000000</span><span class="p">));</span>
+
+<span class="cp">#if 0</span>
+<span class="c">    while(f.wait_until(std::chrono::system_clock::now() + std::chrono::seconds(1))</span>
+<span class="c">            != std::future_status::ready) {</span>
+<span class="c">        std::cout &lt;&lt; &quot;task is running...\n&quot;;</span>
+<span class="c">    }</span>
+<span class="cp">#else</span>
+<span class="w">    </span><span class="k">while</span><span class="p">(</span><span class="n">f</span><span class="p">.</span><span class="n">wait_for</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">chrono</span><span class="o">::</span><span class="n">seconds</span><span class="p">(</span><span class="mi">1</span><span class="p">))</span>
+<span class="w">            </span><span class="o">!=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">future_status</span><span class="o">::</span><span class="n">ready</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;task is running...</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="cp">#endif</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">f</span><span class="p">.</span><span class="n">get</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">EXIT_SUCCESS</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>其他与 std::future 相关的枚举类介绍</h3>
+<p>下面介绍与 std::future 相关的枚举类型。与 std::future 相关的枚举类型包括：</p>
+<div class="highlight"><pre><code><span></span><span class="k">enum</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">future_errc</span><span class="p">;</span>
+
+<span class="k">enum</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">future_status</span><span class="p">;</span>
+
+<span class="k">enum</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">launch</span><span class="p">;</span>
+</code></pre></div>
+<p>下面分别介绍以上三种枚举类型：</p>
+<p><strong>std::future_errc 类型</strong></p>
+<p>std::future_errc
+类型描述如下（<a href="http://www.cplusplus.com/reference/future/future_errc/">参考</a>）：</p>
+<table class="boxed">
+<tbody>
+<tr><th><samp><span style="font-size: 14px">类型<br></span></samp></th><th><span style="font-size: 14px"><code>取值</code><br></span></th><th><span style="font-size: 14px">描述</span></th></tr>
+<tr>
+<td><samp><span style="font-size: 14px">broken_promise</span></samp></td>
+<td><span style="font-size: 14px"><code>0</code></span></td>
+<td><span style="font-size: 14px">与该 std::future 共享状态相关联的 std::promise 对象在设置值或者异常之前一被销毁。</span></td>
+</tr>
+<tr>
+<td><samp><span style="font-size: 14px">future_already_retrieved</span></samp></td>
+<td><span style="font-size: 14px"><code>1</code></span></td>
+<td><span style="font-size: 14px">与该 std::future 对象相关联的共享状态的值已经被当前 Provider 获取了，即调用了 std::future::get 函数。</span></td>
+</tr>
+<tr>
+<td><samp><span style="font-size: 14px">promise_already_satisfied</span></samp></td>
+<td><span style="font-size: 14px"><code>2</code></span></td>
+<td><span style="font-size: 14px">std::promise 对象已经对共享状态设置了某一值或者异常。</span></td>
+</tr>
+<tr>
+<td><samp><span style="font-size: 14px">no_state</span></samp></td>
+<td><span style="font-size: 14px"><code>3</code></span></td>
+<td><span style="font-size: 14px">无共享状态。</span></td>
+</tr>
+</tbody>
+</table><p><strong>std::future_status 类型（<a href="http://www.cplusplus.com/reference/future/future_status/">参考</a>）</strong></p>
+<p>std::future_status 类型主要用在 std::future(或std::shared_future)中的 wait_for 和 wait_until 两个函数中的。</p>
+<table class="boxed">
+<tbody>
+<tr><th><samp><span style="font-size: 14px">类型</span></samp></th><th><span style="font-size: 14px"><code>取值<br></code></span></th><th><span style="font-size: 14px">描述</span></th></tr>
+<tr>
+<td><samp><span style="font-size: 14px"><a href="http://www.cplusplus.com/future_status">future_status::ready</a></span></samp></td>
+<td><span style="font-size: 14px"><code>0</code></span></td>
+<td><span style="font-size: 14px">wait_for(或wait_until) 因为<span style="font-size: 14px">共享状态的标志变为 ready 而</span>返回。</span></td>
+</tr>
+<tr>
+<td><samp><span style="font-size: 14px"><a href="http://www.cplusplus.com/future_status">future_status::timeout</a></span></samp></td>
+<td><span style="font-size: 14px"><code>1</code></span></td>
+<td><span style="font-size: 14px">超时，即 <span style="font-size: 14px">wait_for(或wait_until) 因为在指定的时间段（或时刻）内<span style="font-size: 14px"><span style="font-size: 14px">共享状态的标志依然没有变为 ready </span></span><span style="font-size: 14px">而</span>返回。</span></span></td>
+</tr>
+<tr>
+<td><samp><span style="font-size: 14px"><a href="http://www.cplusplus.com/future_status">future_status::deferred</a></span></samp></td>
+<td><span style="font-size: 14px"><code>2</code></span></td>
+<td><span style="font-size: 14px">共享状态包含了 <span style="font-size: 14px"><em>deferred</em></span> 函数。</span></td>
+</tr>
+</tbody>
+</table><p><strong>std::launch 类型</strong></p>
+<p>该枚举类型主要是在调用 std::async 设置异步任务的启动策略的。</p>
+<table class="boxed" style="width: 845px; height: 81px">
+<tbody>
+<tr><th><samp><span style="font-size: 14px">类型</span></samp></th><th><span style="font-size: 14px">描述</span></th></tr>
+<tr>
+<td><samp><span style="font-size: 14px"><a href="http://www.cplusplus.com/launch">launch::async</a></span></samp></td>
+<td><span style="font-size: 14px"><strong>Asynchronous:</strong> 异步任务会在另外一个线程中调用，并通过共享状态返回异步任务的结果（一般是调用 std::future::get() 获取异步任务的结果）。</span></td>
+</tr>
+<tr>
+<td><samp><span style="font-size: 14px"><a href="http://www.cplusplus.com/launch">launch::deferred</a></span></samp></td>
+<td><span style="font-size: 14px"><strong>Deferred:</strong> 异步任务将会在共享状态被访问时调用，相当与按需调用（即延迟</span><span style="font-size: 14px">(deferred)</span><span style="font-size: 14px">调用）。</span></td>
+</tr>
+</tbody>
+</table><p>请看下例（<a href="http://www.cplusplus.com/reference/future/launch/">参考</a>）：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span><span class="c1">                // std::cout</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;future&gt;</span><span class="c1">                // std::async, std::future, std::launch</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;chrono&gt;</span><span class="c1">                // std::chrono::milliseconds</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;thread&gt;</span><span class="c1">                // std::this_thread::sleep_for</span>
+
+<span class="kt">void</span>
+<span class="nf">do_print_ten</span><span class="p">(</span><span class="kt">char</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">ms</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">10</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">this_thread</span><span class="o">::</span><span class="n">sleep_for</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">chrono</span><span class="o">::</span><span class="n">milliseconds</span><span class="p">(</span><span class="n">ms</span><span class="p">));</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">c</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kt">int</span>
+<span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;with launch::async:</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">&gt;</span><span class="n">foo</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">async</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">launch</span><span class="o">::</span><span class="n">async</span><span class="p">,</span><span class="w"> </span><span class="n">do_print_ten</span><span class="p">,</span><span class="w"> </span><span class="sc">&#39;*&#39;</span><span class="p">,</span><span class="w"> </span><span class="mi">100</span><span class="p">);</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">future</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">&gt;</span><span class="n">bar</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">async</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">launch</span><span class="o">::</span><span class="n">async</span><span class="p">,</span><span class="w"> </span><span class="n">do_print_ten</span><span class="p">,</span><span class="w"> </span><span class="sc">&#39;@&#39;</span><span class="p">,</span><span class="w"> </span><span class="mi">200</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// async &quot;get&quot; (wait for foo and bar to be ready):</span>
+<span class="w">    </span><span class="n">foo</span><span class="p">.</span><span class="n">get</span><span class="p">();</span>
+<span class="w">    </span><span class="n">bar</span><span class="p">.</span><span class="n">get</span><span class="p">();</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;</span><span class="se">\n\n</span><span class="s">&quot;</span><span class="p">;</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;with launch::deferred:</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="n">foo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">async</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">launch</span><span class="o">::</span><span class="n">deferred</span><span class="p">,</span><span class="w"> </span><span class="n">do_print_ten</span><span class="p">,</span><span class="w"> </span><span class="sc">&#39;*&#39;</span><span class="p">,</span><span class="w"> </span><span class="mi">100</span><span class="p">);</span>
+<span class="w">    </span><span class="n">bar</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">async</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">launch</span><span class="o">::</span><span class="n">deferred</span><span class="p">,</span><span class="w"> </span><span class="n">do_print_ten</span><span class="p">,</span><span class="w"> </span><span class="sc">&#39;@&#39;</span><span class="p">,</span><span class="w"> </span><span class="mi">200</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// deferred &quot;get&quot; (perform the actual calls):</span>
+<span class="w">    </span><span class="n">foo</span><span class="p">.</span><span class="n">get</span><span class="p">();</span>
+<span class="w">    </span><span class="n">bar</span><span class="p">.</span><span class="n">get</span><span class="p">();</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="sc">&#39;\n&#39;</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在我的机器上执行结果：</p>
+<div class="highlight"><pre><code><span></span><span class="n">with</span><span class="w"> </span><span class="n">launch</span><span class="o">::</span><span class="n">async</span><span class="o">:</span>
+<span class="o">*</span><span class="err">@</span><span class="o">**</span><span class="err">@</span><span class="o">**</span><span class="err">@</span><span class="o">**</span><span class="err">@</span><span class="o">**</span><span class="err">@</span><span class="o">*</span><span class="err">@@@@@</span>
+
+<span class="n">with</span><span class="w"> </span><span class="n">launch</span><span class="o">::</span><span class="n">deferred</span><span class="o">:</span>
+<span class="o">**********</span><span class="err">@@@@@@@@@@</span>
+</code></pre></div>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "C++11并发指南02.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

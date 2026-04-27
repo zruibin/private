@@ -1,0 +1,260 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>为什么新版内核将进程pid管理从bitmap替换成了radix-tree？ - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="为什么新版内核将进程pid管理从bitmap替换成了radix-tree？,Linux,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="为什么新版内核将进程pid管理从bitmap替换成了radix-tree？" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>为什么新版内核将进程pid管理从bitmap替换成了radix-tree？</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2023-07-11 09:07
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_linux.html' class='article_tag'>Linux</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://mp.weixin.qq.com/s/0w7dJh0Gr4PokUBcy8rN7w' target='blank'>为什么新版内核将进程pid管理从bitmap替换成了radix-tree？</a></p></h4>
+<blockquote><p>在下一本新书里我会将参考的 Linux 内核版本升级成6.10。上周末写到创建进程部分的时候，发现内核已经将进程 pid 号的管理从 bitmap 换成了基数树(radix-tree)，所以写篇文章来和大家聊聊这个改动。</p>
+</blockquote>
+<p>第一次写进程创建的时候我使用的内核版本还是 3.10 的版本。在这个版本里已分配的进程 pid 号是用 bitmap 来存储的。但在 5.4 和 6.1 版本里，发现进程 pid 号管理实现已经从 bitmap 替换成了基数树（radix-tree）。后来翻了下版本更新历史，原来自从 Linux 4.15 之后，内核就已经将 bitmap 换掉了。</p>
+<p>所以今天我来给大家聊聊为什么 Linux 内核要将 bitmap 替换成基数树，最后也看看这次替换的性能效果。</p>
+<h2>一、旧的 bitmap 方式管理 pid</h2>
+<p>内核需要为每一个进程/线程都分配一个进程号。</p>
+<p>如果每个使用过的进程号如果使用传统的 int 变量来存储的话会消耗很大的内存。假如内核要支持最大 65535 个进程，那存储这些进程号需要 65535*4 字节 = 262,140字节 ≈ 260 KB。</p>
+<p>bitmap 可以极大地压缩整数的存储。如果使用 bitmap 来存储使用过的进程号，用一个 bit 表示对应的 pid 是否被使用过了。最大支持 65535 个进程的话，只需要 65535 / 8 = 8 KB 的内存就够用了。相比上面的 260 KB，内存节约的非常的多。</p>
+<p>占用内存小还有一个特别大的优势，那就是遍历的时候，由于局部性特别好，CPU 缓存命中率特别的高，遍历的时候性能就会特别好。所以，之前很长的一段时间里，内核都是使用 bitmap 来管理所有的进程 pid。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20230711-0907-1.png" alt=""></p>
+<p>内核中创建进程时申请 pid 的核心函数是 alloc_pid。在 3.10 版本中的时候，分配 pid 调用 pidmap 的接口函数 <code>alloc_pidmap</code> 来完成。它的源码是下面这个样子的：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">//file:kernel/pid.c  </span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">pid</span><span class="w"> </span><span class="o">*</span><span class="n">alloc_pid</span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">pid_namespace</span><span class="w"> </span><span class="o">*</span><span class="n">ns</span><span class="p">)</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w"> </span><span class="p">...</span><span class="w">  </span>
+
+<span class="w"> </span><span class="c1">// 进程可能归属多个命名空间，在每一个命令空间中都需要分配进程号  </span>
+<span class="w"> </span><span class="c1">// 实际调用 alloc_pidmap 来申请整数类型的进程号  </span>
+<span class="w"> </span><span class="n">tmp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ns</span><span class="p">;</span><span class="w">  </span>
+<span class="w"> </span><span class="n">pid</span><span class="o">-&gt;</span><span class="n">level</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ns</span><span class="o">-&gt;</span><span class="n">level</span><span class="p">;</span><span class="w">  </span>
+<span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ns</span><span class="o">-&gt;</span><span class="n">level</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">--</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">nr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">alloc_pidmap</span><span class="p">(</span><span class="n">tmp</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="n">pid</span><span class="o">-&gt;</span><span class="n">numbers</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">nr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nr</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">  </span><span class="p">...</span><span class="w">  </span>
+<span class="w"> </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w"> </span><span class="p">...</span><span class="w"> </span>
+
+<span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">pid</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>如前面所述，bitmap 的最大好处是节约内存。但其也有个比较大的缺点，分配一个新的 pid 时的计算复杂度比较高。如果在进程数量比较多的，几乎需要把整个 bitmap 中的每一个 bit 位都遍历一遍才行。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// file:kernel/pid.c  </span>
+<span class="k">static</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="nf">alloc_pidmap</span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">pid_namespace</span><span class="w"> </span><span class="o">*</span><span class="n">pid_ns</span><span class="p">)</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w"> </span><span class="p">...</span><span class="w">  </span>
+
+<span class="w"> </span><span class="n">map</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">pid_ns</span><span class="o">-&gt;</span><span class="n">pidmap</span><span class="p">[</span><span class="n">pid</span><span class="o">/</span><span class="n">BITS_PER_PAGE</span><span class="p">];</span><span class="w">  </span>
+<span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">max_scan</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="w"> </span><span class="p">;</span><span class="w"> </span><span class="p">;</span><span class="w"> </span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">   </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">test_and_set_bit</span><span class="p">(</span><span class="n">offset</span><span class="p">,</span><span class="w"> </span><span class="n">map</span><span class="o">-&gt;</span><span class="n">page</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">atomic_dec</span><span class="p">(</span><span class="o">&amp;</span><span class="n">map</span><span class="o">-&gt;</span><span class="n">nr_free</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="n">set_last_pid</span><span class="p">(</span><span class="n">pid_ns</span><span class="p">,</span><span class="w"> </span><span class="n">last</span><span class="p">,</span><span class="w"> </span><span class="n">pid</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">pid</span><span class="p">;</span><span class="w">  </span>
+<span class="w">   </span><span class="p">}</span><span class="w">  </span>
+<span class="w">   </span><span class="n">offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">find_next_offset</span><span class="p">(</span><span class="n">map</span><span class="p">,</span><span class="w"> </span><span class="n">offset</span><span class="p">);</span><span class="w">  </span>
+<span class="w">   </span><span class="n">pid</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">mk_pid</span><span class="p">(</span><span class="n">pid_ns</span><span class="p">,</span><span class="w"> </span><span class="n">map</span><span class="p">,</span><span class="w"> </span><span class="n">offset</span><span class="p">);</span><span class="w">  </span>
+
+<span class="w">   </span><span class="p">...</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">  </span><span class="p">...</span><span class="w">  </span>
+<span class="w"> </span><span class="p">}</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在最近几年的业界发展中，服务器的内存越来越大，服务器上几百 GB 的内存都很常见。另外随着这几年轻量化容器云的发展，服务器上运行的进程数越来越多。传统的基于bitmap 来管理分配的 pid 的节约内存的优势越来越显得没有价值，而它分配新 pid 时占用的 CPU 资源较高这一缺点越来越明显。</p>
+<h2>二、使用基数树管理 pid</h2>
+<p>在 2017 年的时候，Gargi Sharma 提交了一个名为 “Replace PID bitmap allocation with IDR AP” 的patch，在这个提交里 bitmap 被开始替换成了基数树。并最终被并入到了 Linux 4.15 的版本中。关于这个提交的详情参见<a href="https://lwn.net/Articles/735675/">https://lwn.net/Articles/735675/</a> 或 <a href="https://lore.kernel.org/lkml/f5104f457ed581e0ac032a68af03c5ba5cb94755.1506342921.git.gs051095@gmail.com/">https://lore.kernel.org/lkml/f5104f457ed581e0ac032a68af03c5ba5cb94755.1506342921.git.gs051095@gmail.com/</a></p>
+<p>树相关的数据结构是变体最多的，基数树就是树数据结构的其中一种。它有最明显的特点是它的每一层只管理一个 6 bit 的分段。所以它的分叉数基本是固定的 64（2^6=64）（根节点除外），层数也是固定的。</p>
+<p>基数树节点的数据结构定义中，有几个非常重要的字段，分别是 shift、slots 和 tags。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">//file:include/linux/xarray.h  </span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">xa_node</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w"> </span><span class="p">...</span><span class="w">  </span>
+
+<span class="w"> </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="n">shift</span><span class="p">;</span><span class="w">  </span>
+<span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">__rcu</span><span class="w"> </span><span class="o">*</span><span class="n">slots</span><span class="p">[</span><span class="n">XA_CHUNK_SIZE</span><span class="p">];</span><span class="w">  </span>
+<span class="w"> </span><span class="k">union</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">tags</span><span class="p">[</span><span class="n">XA_MAX_MARKS</span><span class="p">][</span><span class="n">XA_MARK_LONGS</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="p">...</span><span class="w">  </span>
+<span class="w"> </span><span class="p">};</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>shift 表示了自己在数字中表示第几段数字。在Linux 中默认的基数大小为 6。这种情况下最低一层的内部节点，shift 为 0，倒数第二层 shift 为 6。再上一层节点的 shift 为 12。以此类推，shift 从低往高， 逐层递增 6。</p>
+<p>slots 是一个指针数组，存储的是其指向的子节点的指针。内核中默认情况下 <code>XA_CHUNK_SIZE</code> 是 64，也就是是一个 <code>*slots[64]</code>。每个元素都指向下一级的树节点，没有下一级子节点的话指针指向 null。</p>
+<p>tags 用来记录 slog 数组中每一个下标的存储状态。可以用来表示每一个 slot 是否已经分配出去的状态。它是一个 long 类型的数组，一个 long 类型的变量是 8 个字节，正好有 64 个 bit 位。</p>
+<p>上面的过程描述有点抽象。为了更好地理解，我们再使用一个简单的例子来看一下基数树在内存中的样子。</p>
+<blockquote><p>内核中的基数树是用于管理 32 bit 位的 整数 ID 的，但为了举例更简单清晰，我们用 16 bit 的整数组成的基数树来举例。</p>
+</blockquote>
+<p>16 bit 的无符号整数的表示范围是 0 - 65536。假设有一个由已经分配出去的 100、1000、10000、50000、60000 的整数 ID。我们把这几个数组来组成的基数树。</p>
+<p>首先把上述各个整数的二进制形式转化出来如下，</p>
+<ul>
+<li>100: 0000,000001,100100</li>
+<li>1000: 0000,001111,101000</li>
+<li>10000: 0010,011100,010000</li>
+<li>50000: 1100,001101,010000</li>
+<li>60000: 1110,101001,100000</li>
+</ul>
+<p>在表示方式上，从尾部开始，按照 6 bit 为一组来表示。这样，每一个 16 bit 位的数字可以拆分表示为一个三段的数字。</p>
+<p>在基数树中，根节点用来存储的每个数字的第一段。如果其中某一个数字已占用，那就把 slot 对应的下标的指针指向其子节点。否则为空。在计算机中计算的时候，是通过将每个值右移 shift 这么多位，根节点的 shift 为 12，那就右移 12 位取得其结果。</p>
+<p>对于整数 100、1000、10000、50000 和 60000 来说，它们的第一段分别是二进制 0000、0000、0010、1100 和 1110，转化成 10 进制后是 0、0、2、12 和 14。</p>
+<p>再下面一层节点的 slot 下标是每个值中间 6 个 bit 位的值，其 shift 为 6。第一层树的节点的 slot 是每个值最后 6 个 bit 的值，其 shift 为 0。我们再将上述每一个整数按照 6 bit 为分段，表示成 10 进制如下：</p>
+<ul>
+<li>100: 0,1,36</li>
+<li>1000: 0,15,40</li>
+<li>10000: 2,28,16</li>
+<li>50000: 12,13,16</li>
+<li>60000: 14,41,32</li>
+</ul>
+<p>那么 100、1000、10000、50000、60000 这几个数组成的基数树的结构如下图所示。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20230711-0907-2.png" alt=""></p>
+<p>拿整数 100 举例，按每 6 bit 一段分表示后为 0, 1, 36。其第一段是 0 ，那就在基数树的根节点的 slots 的 0 号下标存储其子节点指针。其第 2 分段为 1 ，那就在其第二层节点的 slots 的 1 号下标存储其子节点指针。在第三层节点的 slots 的 36 号下标存储最终的值 100。</p>
+<p>基数树就这样建立好了。</p>
+<p>在这个树的基础上判断一个整数值是否存在，或者是从这个树中分配一个新的未使用过的整数 ID 出来的时候，只需要分别对 3 层的树节点进行遍历，分别查看每一层中的 tag 状态位，看 slots 对应的下标是否已经占用即可。不像 bitmap 需要遍历整个 bit 数组。计算复杂度得到大大降低。</p>
+<p>内核和上面例子的区别是其基数树存储的是 32 bit 位的整数。树的层次也就需要 6 层节点来存储。</p>
+<p>使用了基数树后，内核源码也就发生了变化。在比较新的 6.1 <code>版本的内核中，alloc_pid</code> 变成了下面这个样子，通过调用 <code>idr_alloc</code> 来申请一个未使用过的进程 ID 出来。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">//file:kernel/pid.c  </span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">pid</span><span class="w"> </span><span class="o">*</span><span class="n">alloc_pid</span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">pid_namespace</span><span class="w"> </span><span class="o">*</span><span class="n">ns</span><span class="p">,</span><span class="w"> </span><span class="p">...)</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w"> </span><span class="p">...</span><span class="w">  </span>
+
+<span class="w"> </span><span class="c1">// 进程可能归属多个命名空间，在每一个命令空间中都需要分配进程号  </span>
+<span class="w"> </span><span class="c1">// 实际调用 idr_alloc 来申请整数类型的进程号   </span>
+<span class="w"> </span><span class="n">tmp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ns</span><span class="p">;</span><span class="w">  </span>
+<span class="w"> </span><span class="n">pid</span><span class="o">-&gt;</span><span class="n">level</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ns</span><span class="o">-&gt;</span><span class="n">level</span><span class="p">;</span><span class="w">  </span>
+<span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ns</span><span class="o">-&gt;</span><span class="n">level</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">--</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">nr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">idr_alloc</span><span class="p">(</span><span class="o">&amp;</span><span class="n">tmp</span><span class="o">-&gt;</span><span class="n">idr</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="n">tid</span><span class="p">,</span><span class="w">  </span>
+<span class="w">        </span><span class="n">tid</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">GFP_ATOMIC</span><span class="p">);</span><span class="w">  </span>
+
+<span class="w">  </span><span class="p">...</span><span class="w">  </span>
+
+<span class="w">  </span><span class="n">pid</span><span class="o">-&gt;</span><span class="n">numbers</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">nr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nr</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">pid</span><span class="o">-&gt;</span><span class="n">numbers</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">ns</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tmp</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">tmp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tmp</span><span class="o">-&gt;</span><span class="n">parent</span><span class="p">;</span><span class="w">  </span>
+<span class="w"> </span><span class="p">}</span><span class="w">  </span>
+<span class="w"> </span><span class="p">...</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>其申请的核心过程是 <code>idr_get_free</code>，主要就是遍历这颗基数树的若干节点，并根据每个节点的 tag、slot 等字段找出还未被占用的整数 ID。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">//file:lib/radix-tree.c  </span>
+<span class="kt">void</span><span class="w"> </span><span class="n">__rcu</span><span class="w"> </span><span class="o">**</span><span class="nf">idr_get_free</span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">radix_tree_root</span><span class="w"> </span><span class="o">*</span><span class="n">root</span><span class="p">,</span><span class="w"> </span><span class="p">...)</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w"> </span><span class="p">...</span><span class="w">  </span>
+
+<span class="w"> </span><span class="n">shift</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">radix_tree_load_root</span><span class="p">(</span><span class="n">root</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">child</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">maxindex</span><span class="p">);</span><span class="w">  </span>
+<span class="w"> </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">shift</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">shift</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="n">RADIX_TREE_MAP_SHIFT</span><span class="p">;</span><span class="w"> </span><span class="c1">//RADIX_TREE_MAP_SHIFT为6  </span>
+<span class="w">  </span><span class="p">...</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// 遍历 tag 状态 bitmap，寻找下一个可用的下标  </span>
+<span class="w">  </span><span class="n">offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">radix_tree_find_next_bit</span><span class="p">(</span><span class="n">node</span><span class="p">,</span><span class="w"> </span><span class="n">IDR_FREE</span><span class="p">,</span><span class="w">  </span>
+<span class="w">       </span><span class="n">offset</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="n">start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">next_index</span><span class="p">(</span><span class="n">start</span><span class="p">,</span><span class="w"> </span><span class="n">node</span><span class="p">,</span><span class="w"> </span><span class="n">offset</span><span class="p">);</span><span class="w">  </span>
+<span class="w"> </span><span class="p">}</span><span class="w">  </span>
+<span class="w"> </span><span class="p">...</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<h2>三、基数树的性能效果</h2>
+<p>原理我们讲完了，我们再来看下使用基数树替代 bitmap 后的性能表现如何。这里我们直接引用该 patch 的提交者 Gargi Sharma 提供的实验数据。来自 <a href="https://lwn.net/Articles/735675/。">https://lwn.net/Articles/735675/。</a></p>
+<p>Gargi Sharma 在 10000 个进程的情况下分别统计了 ps、pstree 的耗时情况。</p>
+<div class="highlight"><pre><code><span></span><span class="nl">ps</span><span class="p">:</span><span class="w">  </span>
+<span class="w"> </span><span class="n">With</span><span class="w"> </span><span class="n">IDR</span><span class="w"> </span><span class="n">API</span><span class="w"> </span><span class="n">With</span><span class="w"> </span><span class="n">bitmap</span><span class="w">  </span>
+<span class="n">real</span><span class="w"> </span><span class="mi">0</span><span class="n">m1</span><span class="mf">.479</span><span class="n">s</span><span class="w"> </span><span class="mi">0</span><span class="n">m2</span><span class="mf">.319</span><span class="n">s</span><span class="w">  </span>
+<span class="n">user</span><span class="w"> </span><span class="mi">0</span><span class="n">m0</span><span class="mf">.070</span><span class="n">s</span><span class="w"> </span><span class="mi">0</span><span class="n">m0</span><span class="mf">.060</span><span class="n">s</span><span class="w">  </span>
+<span class="n">sys</span><span class="w"> </span><span class="mi">0</span><span class="n">m0</span><span class="mf">.289</span><span class="n">s</span><span class="w"> </span><span class="mi">0</span><span class="n">m0</span><span class="mf">.516</span><span class="n">s</span>
+</code></pre></div>
+<div class="highlight"><pre><code><span></span><span class="nl">pstree</span><span class="p">:</span><span class="w">  </span>
+<span class="w"> </span><span class="n">With</span><span class="w"> </span><span class="n">IDR</span><span class="w"> </span><span class="n">API</span><span class="w"> </span><span class="n">With</span><span class="w"> </span><span class="n">bitmap</span><span class="w">  </span>
+<span class="n">real</span><span class="w"> </span><span class="mi">0</span><span class="n">m1</span><span class="mf">.024</span><span class="n">s</span><span class="w"> </span><span class="mi">0</span><span class="n">m1</span><span class="mf">.794</span><span class="n">s</span><span class="w">  </span>
+<span class="n">user</span><span class="w">    </span><span class="mi">0</span><span class="n">m0</span><span class="mf">.348</span><span class="n">s</span><span class="w"> </span><span class="mi">0</span><span class="n">m0</span><span class="mf">.612</span><span class="n">s</span><span class="w">  </span>
+<span class="n">sys</span><span class="w"> </span><span class="mi">0</span><span class="n">m0</span><span class="mf">.184</span><span class="n">s</span><span class="w"> </span><span class="mi">0</span><span class="n">m0</span><span class="mf">.264</span><span class="n">s</span>
+</code></pre></div>
+<p>可见，在使用了基数树后，ps 和 pstree 命令的耗时都缩短了不少，性能大约提升了有 50%</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "为什么新版内核将进程pid管理从bitmap替换成了radix-tree？.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

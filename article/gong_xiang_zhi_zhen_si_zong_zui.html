@@ -1,0 +1,207 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>共享指针四宗罪 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="共享指针四宗罪,C/C++,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="共享指针四宗罪" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>共享指针四宗罪</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2022-03-22 19:40
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://mp.weixin.qq.com/s/U59S7vWmk9xXD056TC-rRg' target='blank'>共享指针四宗罪</a></p></h4>
+<h2>问题描述</h2>
+<p>在基于C++的大型系统的设计实现中，由于缺乏语言级别的GC支持，资源生存周期往往是一个棘手的问题。系统地解决这个问题的方法无非两种：</p>
+<ul>
+<li>使用GC库</li>
+<li>使用引用计数</li>
+</ul>
+<p>严格地说，引用计数其实也是一种最朴素的GC。相对于现代的GC技术，引用计数的实现简单，但相应地，它也存在着循环引用和线程同步开销等问题。</p>
+<p>关于这二者孰优孰劣，已经有过很多讨论，在此就不搅这股混水了。我一直也没有使用过C++的GC库，在实际项目中总是采用引用计数的方案。而作为Boost的拥趸，首选的自然是<code>shared_ptr</code>。一直以来我也对<code>shared_ptr</code>百般推崇，然而最近的一些项目开发经验却让我在<code>shared_ptr</code>上栽了坑，对C++引用计数也有了一些新的的认识，遂记录在此。</p>
+<p>本文主要针对基于<code>boost::shared_ptr</code>的C++引用计数实现方案进行一些讨论。C++引用计数方案往往伴随着用于自动管理引用计数的智能指针。按是否要
+求资源对象自己维护引用计数，C++引用计数方案可以分为两类：</p>
+<ul>
+<li><strong>侵入式</strong>：侵入式的引用计数管理要求资源对象本身维护引用计数，同时提供增减引用计数的管理接口。通常侵入式方案会提供配套的侵入式引用计数智能指针。该智能指针通过调用资源对象的引用计数管理接口来自动增减引用计数。COM对象与CComPtr便是侵入式引用计数的一个典型实例。</li>
+<li><strong>非侵入式</strong>：非侵入式的引用计数管理对资源对象本身没有任何要求，而是完全借助非侵入式引用计数智能指针在资源对象<strong>外部</strong>维护独立的引用计数。<code>shared_ptr</code>便是基于这个思路。</li>
+</ul>
+<h2>第一宗罪</h2>
+<p>初看起来，非侵入式方案由于对资源对象的实现没有任何要求，相较于侵入式方案更具吸引力。然而事实却并非如此。下面就来分析一下基于<code>shared_ptr</code>的非侵入式引用计数。在使用<code>shared_ptr</code>的引用计数解决方案中，引用计数完全由<code>shared_ptr</code>控制，资源对象对与自己对应的引用计数一无所知。</p>
+<p>而引用计数与资源对象的生存期息息相关，这就意味着资源对象丧失了对生存期的控制权，将自己的生杀大权拱手让给了<code>shared_ptr</code>。这种情况下，资源对象就不得不依靠至少一个<code>shared_ptr</code>实例来保障自己的生存。换言之，资源对象一旦“沾染”了<code>shared_ptr</code>，就一辈子都无法摆脱！考察以下的简单用例：</p>
+<p>用例一：</p>
+<div class="highlight"><pre><code><span></span><span class="n">Resource</span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">CResource</span><span class="p">;</span><span class="w">    </span>
+<span class="p">{</span><span class="w">    </span>
+<span class="w">    </span><span class="n">shared_ptr</span><span class="w"> </span><span class="nf">q</span><span class="p">(</span><span class="n">p</span><span class="p">);</span><span class="w">    </span>
+<span class="p">}</span><span class="w">    </span>
+<span class="n">p</span><span class="o">-&gt;</span><span class="n">Use</span><span class="p">()</span><span class="w"> </span><span class="c1">// CRASH</span>
+</code></pre></div>
+<p>单纯为了解决上述的崩溃，可以自定义一个什么也不做的deleter：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">noop_deleter</span><span class="w"> </span><span class="p">{</span><span class="w">    </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="nf">operator</span><span class="p">()(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">    </span>
+<span class="w">        </span><span class="c1">// NO-OP    </span>
+<span class="w">    </span><span class="p">}</span><span class="w">    </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>然后将上述用例的第三行改为：</p>
+<div class="highlight"><pre><code><span></span><span class="n">shared_ptr</span><span class="w"> </span><span class="nf">q</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="w"> </span><span class="n">noop_deleter</span><span class="p">());</span>
+</code></pre></div>
+<p>但是这样一来，<code>shared_ptr</code>就丧失了借助RAII自动释放资源的能力，违背了我们利用智能指针自动管理资源生存期的初衷（话说回来，这倒并不是说<code>noop_deleter</code>这种手法毫无用处，Boost.Asio中就巧妙地利用<code>shared_ptr</code>、weak_ptr和<code>noop_deleter</code>来实现异步I/O事件的取消）。</p>
+<p>从这个简单的用例可以看出，<code>shared_ptr</code>就像是毒品一样，一旦沾染就难以戒除。更甚者，染毒者连换用其他“毒品”的权力都没有：<code>shared_ptr</code>的引用计数管理接口是私有的，无法从<code>shared_ptr</code>之外操控，也就无法从<code>shared_ptr</code>迁移到其他类型的引用计数智能指针。</p>
+<p>不仅如此，资源对象沾染上<code>shared_ptr</code>之后，就只能使用<strong>最初的</strong>那个<code>shared_ptr</code>实例的拷贝来维系自己的生存期。考察以下用例：用例二：</p>
+<div class="highlight"><pre><code><span></span><span class="p">{</span><span class="w">    </span>
+<span class="w">    </span><span class="n">shared_ptr</span><span class="w"> </span><span class="nf">p1</span><span class="p">(</span><span class="k">new</span><span class="w"> </span><span class="n">CResource</span><span class="p">);</span><span class="w">    </span>
+<span class="w">    </span><span class="n">shared_ptr</span><span class="w"> </span><span class="nf">p2</span><span class="p">(</span><span class="n">p1</span><span class="p">);</span><span class="w">            </span><span class="c1">// OK    </span>
+<span class="w">    </span><span class="n">CResource</span><span class="o">*</span><span class="w"> </span><span class="n">p3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p1</span><span class="p">.</span><span class="n">get</span><span class="p">();</span><span class="w">    </span>
+<span class="w">    </span><span class="n">shared_ptr</span><span class="w"> </span><span class="nf">p4</span><span class="p">(</span><span class="n">p3</span><span class="p">);</span><span class="w">            </span><span class="c1">// ERROR    </span>
+<span class="w">                                  </span><span class="c1">// CRASH    </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>该用例的执行过程如下：</p>
+<ol>
+<li>p1在构造的同时为资源对象创建了一份外部引用计数，并将之置为1</li>
+<li>p2拷贝自p1，与p1共享同一个引用计数，将之增加为2</li>
+<li>p4并非p1的拷贝，因此在构造的同时又为资源对象创建了另外一个外部引用计数，并将之置为1</li>
+<li>在作用域结束时，p4析构，由其维护的额外的引用计数降为0，导致资源对象被析构</li>
+<li>然后p2析构，对应的引用计数降为1</li>
+<li>接着p1析构，对应的引用计数也归零，于是p1在临死之前再次释放资源对象 最后，由于资源对象被二次释放，程序崩溃</li>
+</ol>
+<p>至此，我们已经认识到了<code>shared_ptr</code>的第一宗罪——<strong>传播毒品</strong>：</p>
+<ul>
+<li>毒性一：一旦开始对资源对象使用<code>shared_ptr</code>，就必须一直使用</li>
+<li>毒性二：无法换用其他类型的引用计数之智能指针来管理资源对象生存期</li>
+<li>毒性三：必须使用最初的<code>shared_ptr</code>实例拷贝来维系资源对象生存期</li>
+</ul>
+<h2>第二宗罪</h2>
+<p>乘胜追击，再揭露一下<code>shared_ptr</code>的第二宗罪——<strong>散布病毒</strong>。有点耸人听闻了？其实道理很简单：由于使用了<code>shared_ptr</code>的资源对象必须仰仗<code>shared_ptr</code>的存在才能维系生存期，这就意味着使用资源的客户对象也必须使用<code>shared_ptr</code>来持有资源对象的引用——于是<code>shared_ptr</code>的势力范围成功地从资源对象本身扩散到了资源使用者，<strong>侵入了资源客户对象的实现</strong>。</p>
+<p>同时，资源的使用者往往是通过某种形式的资源分配器来获取资源。自然地，为了向客户转交资源对象的所有权，资源分配器也不得不在接口中传递<code>shared_ptr</code>，于是<code>shared_ptr</code>也会<strong>侵入资源分配器的接口</strong>。</p>
+<p>有一种情况可以暂时摆脱<code>shared_ptr</code>，例如：</p>
+<div class="highlight"><pre><code><span></span><span class="n">shared_ptr</span><span class="w"> </span><span class="nf">AllocateResource</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w">    </span>
+<span class="w">    </span><span class="n">shared_ptr</span><span class="w"> </span><span class="n">pResource</span><span class="p">(</span><span class="k">new</span><span class="w"> </span><span class="n">CResource</span><span class="p">);</span><span class="w">    </span>
+<span class="w">    </span><span class="n">InitResource</span><span class="p">(</span><span class="n">pResource</span><span class="p">.</span><span class="n">get</span><span class="p">());</span><span class="w">    </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">pResource</span><span class="p">;</span><span class="w">    </span>
+<span class="p">}</span><span class="w"> </span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">InitResource</span><span class="p">(</span><span class="n">IResource</span><span class="o">*</span><span class="w"> </span><span class="n">r</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">    </span>
+<span class="w">    </span><span class="c1">// Do resource initialization...    </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>以上用例中，在InitResource的执行期间，由于AllocateResource的堆栈仍然存在，pResource不会析构，因此可以放心的在InitResource的参数中使用裸指针传递资源对象。这种基于调用栈的引用计数优化，也是一种常用的手段。但在InitResource返回后，资源对象终究还是会落入<code>shared_ptr</code>的魔掌。</p>
+<p>由此可以看出，<code>shared_ptr</code>打着“非侵入式”的幌子，虽然没有侵入资源对象的实现，却侵入了资源分配接口以及资源客户对象的实现。而沾染上<code>shared_ptr</code>就摆脱不掉，如此传播下去，简直就是侵入了除资源对象实现以外的其他各个地方！这不是病毒是什么？</p>
+<p>然而，<strong>基于<code>shared_ptr</code>的引用计数解决方案真的不会侵入资源对象的实现吗？</strong></p>
+<h2>第三宗罪</h2>
+<p>在一些用例中，资源对象的成员方法（不包括构造函数）需要获取指向对象自身，即包含了this指针的<code>shared_ptr</code>。Boost.Asio的chat示例便展示了这样一个用例：<code>chat_session</code>对象会在其成员函数中发起异步I/O操作，并在异步I/O操作回调中保存一个指向自己的<code>shared_ptr</code>以保证回调执行时自身的生存期尚未结束。</p>
+<p>这种手法在Boost.Asio中非常常见，在不考虑<code>shared_ptr</code>带来的麻烦时，这实际上也是一种相当优雅的异步流程资源生存期处理方法。但现在让我们把注意力集中在<code>shared_ptr</code>上。</p>
+<p>通常，使用<code>shared_ptr</code>的资源对象必须动态分配，最常见的就是直接从堆上new出一个实例并交付给一个<code>shared_ptr</code>，或者也可以从某个资源池中分配再借助自定义的deleter在引用计数归零时将资源放回池中。无论是那种用法，该资源对象的实例在创建出来后，都总是立即交付给一个<code>shared_ptr</code>（记为p）。</p>
+<p>有鉴于之前提到的毒性三，如果资源对象的成员方法需要获取一个指向自己的<code>shared_ptr</code>，那么这个<code>shared_ptr</code>也必须是p的一个拷贝——或者更本质的说，必须与p共享同一个外部引用计数。然而对于资源对象而言，p维护的引用计数是外部的陌生事物，资源对象如何得到这个引用计数并由此构造出一个合法的<code>shared_ptr</code>呢？这是一个比较tricky的过程。为了解决这个问题，Boost提供了一个类模板<code>enable_shared_from_this</code>：</p>
+<p>所有需要在成员方法中获取指向this的<code>shared_ptr</code>的类型，都必须以CRTP手法继承自<code>enable_shared_from_this</code>。即：</p>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">CResource</span><span class="w"> </span><span class="o">:</span><span class="w">    </span>
+<span class="w">    </span><span class="k">public</span><span class="w"> </span><span class="n">boost</span><span class="o">::</span><span class="n">enable_shared_from_this</span><span class="o">&lt;</span><span class="n">CResource</span><span class="o">&gt;</span><span class="w">    </span>
+<span class="p">{</span><span class="w">    </span>
+<span class="w">    </span><span class="c1">// ...    </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>接着，资源对象的成员方法就可以使用<code>enable_shared_from_this::shared_from_this()</code>方法来获取所需的指向对象自身的<code>shared_ptr</code>了。问题似乎解决了。但是，等等！这样的继承体系不就对资源对象的实现有要求了吗？换言之，这不正是<strong>对资源对象实现的赤裸裸的侵入</strong>吗？这正是<code>shared_ptr</code>的第三宗罪——<strong>欺世盗名</strong>。</p>
+<h2>第四宗罪</h2>
+<p>最后一宗罪，是<strong>铺张浪费</strong>。对了，说的就是性能。</p>
+<p>基于引用计数的资源生存期管理，打一出生起就被扣着线程同步开销大的帽子。早期的Boost版本中，<code>shared_ptr</code>是借助Boost.Thread的mutex对象来保护引用计数。在后期的版本中采用了lock-free的原子整数操作一定程度上降低了线程同步开销。然而即使是lock-free，本质上也仍然是串行化访问，线程同步的开销多少都会存在。</p>
+<p>也许有人会说这点开销与引用计数带来的便利相比算不得什么。然而在我们项目的异步服务器框架的压力测试中，大量引用计数的增减操作，一举吃掉了5%的CPU。换言之，1/20的计算能力被浪费在了与业务逻辑完全无关的引用计数的维护上！而且，由于是异步流程的特殊性，也无法应用上面提及的基于调用栈的引用计数优化。</p>
+<p>那么针对这个问题就真的没有办法了吗？其实仔细检视一下整个异步流程，有些资源虽然会先后被不同的对象所引用，但在其整个生存周期内，每一时刻都只有一个对象持有该资源的引用。用于数据收发的缓冲区对象就是一个典型。它们总是被从某个源头产生，然后便一直从一处被传递到另一处，最终在某个时刻被回收。</p>
+<p>对于这样的对象，实际上没有必要针对流程中的每一次所有权转移都进行引用计数操作，只要简单地在分配时将引用计数置1，在需要释放时再将引用计数归零便可以了。</p>
+<p>对于侵入式引用计数方案，由于资源对象自身持有引用计数并提供了引用计数的操作接口，可以很容易地实现这样的优化。但<code>shared_ptr</code>则不然。<code>shared_ptr</code>把引用计数牢牢地攥在手中，不让外界碰触；外界只有通过<code>shared_ptr</code>的构造函数、析够函数以及reset()方法才能够间接地对引用计数进行操作。</p>
+<p>而由于<code>shared_ptr</code>的毒品特性，资源对象无法脱离<code>shared_ptr</code>而存在，因此在转移资源对象的所有权时，也必须通过拷贝<code>shared_ptr</code>的方式进行。一次拷贝就对应一对引用计数的原子增减操作。</p>
+<p>对于上述的可优化资源对象，如果在一个流程中被传递3次，除去分配和释放时的2次，还会导致6次无谓的原子整数操作。整整浪费了300%！</p>
+<p>事实证明，在将基于<code>shared_ptr</code>的非侵入式引用计数方案更改为侵入式引用计数方案并施行上述优化后，我们的异步服务器框架的性能有了明显的提升。</p>
+<h2>结语</h2>
+<p>最后总结一下<code>shared_ptr</code>的四宗罪：</p>
+<ul>
+<li><strong>传播毒品</strong>一旦对资源对象染上了<code>shared_ptr</code>，在其生存期内便无法摆脱。</li>
+<li><strong>散布病毒</strong>在应用了<code>shared_ptr</code>的资源对象的所有权变换的整个过程中的所有接口都会受到<code>shared_ptr</code>的污染。</li>
+<li><strong>欺世盗名</strong>在<code>enable_shared_from_this</code>用例下，基于<code>shared_ptr</code>的解决方案并非是非侵入式的。</li>
+<li><strong>铺张浪费</strong>由于<code>shared_ptr</code>隐藏了引用计数的操作接口，只能通过拷贝<code>shared_ptr</code>的方式间接操纵引用计数，使得用户难以规避不必要的引用计数操作，造成无谓的性能损失。</li>
+</ul>
+<p>探明这四宗罪算是最近一段时间的项目设计开发过程的一大收获。写这篇文章的目的不是为了将<code>shared_ptr</code>一棒子打死，只是为了总结基于<code>shared_ptr</code>的C++非侵入式引用计数解决方案的缺陷，也让自己不再盲目迷信<code>shared_ptr</code>。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "共享指针四宗罪.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

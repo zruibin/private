@@ -1,0 +1,366 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>低精度定时器原理 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="低精度定时器原理,Linux,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="图解｜低精度定时器原理" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>低精度定时器原理</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2023-07-03 09:01
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_linux.html' class='article_tag'>Linux</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://mp.weixin.qq.com/s/UIVSw00D-agXVr2MMGrW6w' target='blank'>图解｜低精度定时器原理</a></p></h4>
+<blockquote><p>功能介绍 以简单的方式介绍 Linux 内核的原理，以通俗的语言分析 Linux 内核的实现。如果你没有接触过 Linux 内核，那么就关注我们的公众号吧，我们将以图解的方式让内核更亲民...</p>
+</blockquote>
+<p>Linux 内核通常会使用 <code>定时器</code> 来做一些延时的操作，比如常用的 <code>sleep()</code> 系统调用就是使用定时器来实现的。</p>
+<p>在 Linux 内核中，有两种类型的定时器：<code>高精度定时器</code> 与 <code>低精度定时器</code>。低精度定时器基于硬件的时钟中断实现的，其定时周期的粒度为 1/HZ ms。例如，内核 HZ 为 1000（也就是说 1 秒能够产生 1000 次时钟中断），那么低精度定时器的最小定时间隔为1ms；而高精度定时器可以实现纳秒级别的定时（实际的定时周期粒度与 CPU 的主频有关）。</p>
+<p>可能有读者会问，既然有了高精度定时器，那么低精度定时器是否可以废弃呢？答案是否定的，主要原因是使用高精度定时器的成本比低精度定时器要高。所以，如果对时间精度不是非常敏感的话，使用低精度定时器更合适。</p>
+<p>本文主要介绍 Linux 内核中的低精度定时器的原理与实现。</p>
+<h2>时间轮</h2>
+<p>低精度定时器是基于时钟中断实现的，而时钟中断的触发频率是可以配置的，Linux 内核一般设置为每秒触发 1000 次，也就是说每隔 1 毫秒就会触发一次时钟中断。</p>
+<p>一般来说，内核中可能会存在成千上万个定时器，那么内核如何能够快速找到将要到期的定时器呢？</p>
+<p>在学习数据结构课程时，我们知道用于快速查找有序数据的数据结构有如何几种：</p>
+<ul>
+<li>平衡二叉树</li>
+<li>最大堆/最小堆</li>
+<li>跳跃表</li>
+<li>...</li>
+</ul>
+<p>由于这些数据结构的时间复杂度都是 log(n)，对性能要求非常高的内核来说是不能接受的，所以内核使用了一种性能更高的数据结构：<code>时间轮</code>。</p>
+<p>时间轮能够保证在时间复杂度为 log(1) 的情况下找到将要到期的定时器，下面我们将会介绍时间轮的原理。</p>
+<p>时间轮的基本思想是通过数组来保存定时器，而数组的索引就是定时器的过期时间。如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20230703-0901-2.png" alt=""></p>
+<p>如上图所示的数组中，索引为 1 的槽位存放的是 1 毫秒后超时的定时器列表，索引为 2 的槽位存放的是 2 毫秒后超时的定时器列表，如此类推...</p>
+<p>此时，我们可以使用一个指针来指向超时的定时器列表，如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20230703-0901-3.png" alt=""></p>
+<p>每当时钟中断被触发一次，指针向下移动一位，这样就能在时间复杂度为 log(1) 的情况下获取到期的定时器。</p>
+<p>这样虽然能够在时间复杂度为 log(1) 的情况下找到到期的定时器，但如果超时时间非常大的话，那么用于存储定时器的数组也会非常巨大，如：定时器的超时时间为 4294967295 毫秒，那么将需要一个大小为 4294967296 的数组。</p>
+<h3>1. 存储定时器</h3>
+<p>为了解决这个问题，内核使用 <code>层级</code> 的概念来减少数组占用的内存空间。其原理如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20230703-0901-4.png" alt=""></p>
+<p>由于超时时间是一个整数（32 位整型），所以可以将其划分为 5 个等级，每个级别使用一个数组来表示。例如第一级数组占用 8 个位，所以其大小为 256。而其他级别的数组都占用 6 个位，所以大小都为 64。</p>
+<p>一个定时器被存放到哪个数组，是由其超时时间决定的，算法也非常简单：如果第五级的值不为零，那么将会被存放到第五级数组中，而存放的位置以第五级的值作为索引。</p>
+<p>例如，一个定时器的超时时间其第五级的值为 32，那么此定时器将会被存放到第五级数组的第 32 个槽位上。如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20230703-0901-5.png" alt=""></p>
+<p>如果第五级的值为零，而第四级的值不为零，那么定时器将会被存放在第四级数组中，存放的位置以第四级的值作为索引，如此类推。</p>
+<p>从上面的分析可以看出，定时器的超时时间越小，其存放的数组层级就越小。所以：</p>
+<ul>
+<li>第一级数组存放的是超时时间范围为 <code>[0, 256)</code> 毫秒的定时器。</li>
+<li>第二级数组存放的是超时时间范围为 <code>[256, 16384)</code> 毫秒的定时器（16384 = 256 * 64）。</li>
+<li>第三级数组存放的是超时时间范围为 <code>[16384, 1048576)</code> 毫秒的定时器（1048576 = 256 <em> 64 </em> 64）。</li>
+<li>第四级数组存放的是超时时间范围为 <code>[1048576, 67108864)</code> 毫秒的定时器（67108864 = 256 <em> 64 </em> 64 * 64）。</li>
+<li>第五级数组存放的是超时时间范围为 <code>[67108864, 4294967296)</code> 毫秒的定时器（4294967296 = 256 <em> 64 </em> 64 <em> 64 </em> 64）。</li>
+</ul>
+<h3>2. 执行定时器</h3>
+<p>接下来，我们将要分析内核是如何选择到期的定时器来执行的。</p>
+<p>如果所有定时器只存储在一级数组中，那么选择到期的定时器就非常简单：由于数组每个槽位的索引对应着定时器的超时时间，所以只需要在时钟中断发生时，执行到期指针指向的定时器列表。执行完毕后，将到期指针移动到下一个位置即可。如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20230703-0901-6.png" alt=""></p>
+<p>但对于定时器存储在多级数组的情况，算法就变得复杂很多。</p>
+<p>从上面的分析可知，第一级数组存放的是 0 ～ 255 毫秒后到期的定时器列表，而数组的索引对应的就是定时器的超时时间。如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20230703-0901-7.png" alt=""></p>
+<p>而其他等级的数组，每个槽位存放的定时器其超时时间并不是一个固定的值，而是一个范围，范围与数组的等级和槽位的索引值有关，其计算方式为：</p>
+<div class="highlight"><pre><code><span></span><span class="mi">256</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">64</span><span class="o">^</span><span class="n">n</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">槽位索引</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">超时时间</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">256</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">64</span><span class="o">^</span><span class="n">n</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="n">槽位索引</span><span class="o">+</span><span class="mi">1</span><span class="p">)</span>
+</code></pre></div>
+<p>在上面的公式中，<code>n</code> 的值等于 <code>数组的等级</code> 减去 2。所以对于第二级数组来说，其公式如下：</p>
+<div class="highlight"><pre><code><span></span><span class="mi">256</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">槽位索引</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">超时时间</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">256</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="n">槽位索引</span><span class="o">+</span><span class="mi">1</span><span class="p">)</span>
+</code></pre></div>
+<p>第三级数组公式如下：</p>
+<div class="highlight"><pre><code><span></span><span class="mi">256</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">64</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">槽位索引</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">超时时间</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">256</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">64</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="n">槽位索引</span><span class="o">+</span><span class="mi">1</span><span class="p">)</span>
+</code></pre></div>
+<p>第四和第五级数组如此类推。</p>
+<p>由于内核不会使用索引为 0 的槽位，所以第二、第三级数组的定时器如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20230703-0901-8.png" alt=""></p>
+<p>内核只会执行第一级数组中的定时器，每当时钟中断触发时，会执行第一级数组 <code>到期指针</code> 指向的定时器列表，执行完毕后会将 <code>到期指针</code> 向下移动一位。如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20230703-0901-9.png" alt=""></p>
+<p>当到期指针执行完最后一个槽位的定时器列表后，会重新移动到第一个槽位。</p>
+<p>那么其他级别数组的定时器在什么时候才会被执行呢？其实对于其他级别的数组也有一个 <code>到期指针</code>，每当前一级别的数组执行完一轮后，当前级别数组的 <code>到期指针</code>将会移动到下一个槽位，如：当第一级数组执行一轮后，第二级数组的 <code>到期指针</code> 将会移动到下一个槽位。</p>
+<p>其他级别的数组（非第一级数组）移动 <code>到期指针</code> 时，会将指针指向的定时器列表从数组中删除，并且重新添加到内核中。如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20230703-0901-10.png" alt=""></p>
+<p>如上图所示，第一级数组执行一轮后，内核将会把第二级数组的到期指针指向的定时器列表删除，并且重新添加到内核中。然后，将会把到期指针移动到下一个槽位。</p>
+<p>第三级数组也会在第二级数组执行一轮后，将其到期指针指向的定时器列表删除，并且重新添加到内核中。接着将到期指针移动到下一个槽位，其他级别的数组如此类推。</p>
+<h2>源码实现</h2>
+<p>接下来，我们将会分析 Linux 内核是如何实现低精度定时器的。由于高版本的内核其实现与上面介绍的原理有些区别，但基本原理是一致的，这里我们将使用
+<code>2.4.37</code> 版本作为分析的对象。</p>
+<h3>1. 五个等级数组</h3>
+<p>如上面分析一致，在 Linux 内核中定义了 5 个数组来存放系统中的定时器，如下代码所示：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">timer_vec</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">index</span><span class="p">;</span><span class="w">     </span><span class="c1">// 到期指针  </span>
+<span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">list_head</span><span class="w"> </span><span class="n">vec</span><span class="p">[</span><span class="mi">64</span><span class="p">];</span><span class="w">  </span>
+<span class="p">};</span>
+
+<span class="k">struct</span><span class="w"> </span><span class="nc">timer_vec_root</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">index</span><span class="p">;</span><span class="w">     </span><span class="c1">// 到期指针  </span>
+<span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">list_head</span><span class="w"> </span><span class="n">vec</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span><span class="w">  </span>
+<span class="p">};</span>
+
+<span class="k">static</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">timer_vec</span><span class="w"> </span><span class="n">tv5</span><span class="p">;</span><span class="w">  </span>
+<span class="k">static</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">timer_vec</span><span class="w"> </span><span class="n">tv4</span><span class="p">;</span><span class="w">  </span>
+<span class="k">static</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">timer_vec</span><span class="w"> </span><span class="n">tv3</span><span class="p">;</span><span class="w">  </span>
+<span class="k">static</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">timer_vec</span><span class="w"> </span><span class="n">tv2</span><span class="p">;</span><span class="w">  </span>
+<span class="k">static</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">timer_vec_root</span><span class="w"> </span><span class="n">tv1</span><span class="p">;</span>
+</code></pre></div>
+<p>上面代码中，<code>tv1</code>、<code>tv2</code>、<code>tv3</code>、<code>tv4</code>、<code>tv5</code> 分别对应第一级、二级、三级、四级和五级数组。</p>
+<p>通过代码可知，数组元素的类型为链表，用于存放不同到期时间的定时器。另外，除了第一级数组的元素个数是 256 个外，其他级别的数组的元素个数都是 64个。每个级别的数组都有一个到期指针，用于指向当前正在执行的定时器列表。</p>
+<p>我们接着来看看内核怎么初始化这些数组的，内核调用 <code>init_timervecs()</code> 函数来初始化各级数组。代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">init_timervecs</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="p">;</span><span class="w"> </span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">TVN_SIZE</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="n">INIT_LIST_HEAD</span><span class="p">(</span><span class="n">tv5</span><span class="p">.</span><span class="n">vec</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">i</span><span class="p">);</span><span class="w">  </span>
+<span class="w">        </span><span class="n">INIT_LIST_HEAD</span><span class="p">(</span><span class="n">tv4</span><span class="p">.</span><span class="n">vec</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">i</span><span class="p">);</span><span class="w">  </span>
+<span class="w">        </span><span class="n">INIT_LIST_HEAD</span><span class="p">(</span><span class="n">tv3</span><span class="p">.</span><span class="n">vec</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">i</span><span class="p">);</span><span class="w">  </span>
+<span class="w">        </span><span class="n">INIT_LIST_HEAD</span><span class="p">(</span><span class="n">tv2</span><span class="p">.</span><span class="n">vec</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">i</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">TVR_SIZE</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w">  </span>
+<span class="w">        </span><span class="n">INIT_LIST_HEAD</span><span class="p">(</span><span class="n">tv1</span><span class="p">.</span><span class="n">vec</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">i</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>init_timervecs()</code> 主要通过 <code>INIT_LIST_HEAD</code> 宏来初始化各级数组的元素。</p>
+<h3>2. 定时器对象</h3>
+<p>在内核中，定时器使用 <code>timer_list</code> 对象来表示，其定义如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">timer_list</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">list_head</span><span class="w"> </span><span class="n">list</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">expires</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">data</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">function</span><span class="p">)(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="p">);</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>下面介绍一下 <code>timer_list</code> 对象各个字段的作用：</p>
+<ul>
+<li><code>list</code>：用于连接到期时候相同的定时器。</li>
+<li><code>expires</code>：定时器的到期时间。</li>
+<li><code>data</code>：传给回调函数的数据。</li>
+<li><code>function</code>：定时器到期后，将会调用的回调函数。</li>
+</ul>
+<p>我们要向内核添加一个定时器时，需要先创建一个 <code>timer_list</code> 对象，并且设置其到期时间和回调函数。</p>
+<h3>3. 添加定时器</h3>
+<p>在内核中，可以使用 <code>add_timer()</code> 函数来添加一个定时器。其代码如下所示：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">add_timer</span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">timer_list</span><span class="w"> </span><span class="o">*</span><span class="n">timer</span><span class="p">)</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">flags</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 上锁  </span>
+<span class="w">    </span><span class="n">spin_lock_irqsave</span><span class="p">(</span><span class="o">&amp;</span><span class="n">timerlist_lock</span><span class="p">,</span><span class="w"> </span><span class="n">flags</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="p">...</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 向内核添加定时器  </span>
+<span class="w">    </span><span class="n">internal_add_timer</span><span class="p">(</span><span class="n">timer</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 解锁  </span>
+<span class="w">    </span><span class="n">spin_unlock_irqrestore</span><span class="p">(</span><span class="o">&amp;</span><span class="n">timerlist_lock</span><span class="p">,</span><span class="w"> </span><span class="n">flags</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>从上面代码可以看出，<code>add_timer()</code> 函数主要通过调用 <code>internal_add_timer()</code> 函数来添加定时器。我们继续来分析 <code>internal_add_timer()</code> 函数的实现，代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">internal_add_timer</span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">timer_list</span><span class="w"> </span><span class="o">*</span><span class="n">timer</span><span class="p">)</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">expires</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">timer</span><span class="o">-&gt;</span><span class="n">expires</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">idx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">expires</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">timer_jiffies</span><span class="p">;</span><span class="w"> </span><span class="c1">// 多少毫秒数后到期  </span>
+
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">list_head</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">vec</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">idx</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">TVR_SIZE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">expires</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">TVR_MASK</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="n">vec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tv1</span><span class="p">.</span><span class="n">vec</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">i</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">idx</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="p">(</span><span class="n">TVR_BITS</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">TVN_BITS</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">expires</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">TVR_BITS</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">TVN_MASK</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="n">vec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tv2</span><span class="p">.</span><span class="n">vec</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">i</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">idx</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="p">(</span><span class="n">TVR_BITS</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">TVN_BITS</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">expires</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="p">(</span><span class="n">TVR_BITS</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">TVN_BITS</span><span class="p">))</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">TVN_MASK</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="n">vec</span><span class="w"> </span><span class="o">=</span><span class="w">  </span><span class="n">tv3</span><span class="p">.</span><span class="n">vec</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">i</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">idx</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="p">(</span><span class="n">TVR_BITS</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">TVN_BITS</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">expires</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="p">(</span><span class="n">TVR_BITS</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">TVN_BITS</span><span class="p">))</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">TVN_MASK</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="n">vec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tv4</span><span class="p">.</span><span class="n">vec</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">i</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="kt">signed</span><span class="w"> </span><span class="kt">long</span><span class="p">)</span><span class="w"> </span><span class="n">idx</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="n">vec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tv1</span><span class="p">.</span><span class="n">vec</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">tv1</span><span class="p">.</span><span class="n">index</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">idx</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="mh">0xffffffffUL</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">expires</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="p">(</span><span class="n">TVR_BITS</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">TVN_BITS</span><span class="p">))</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">TVN_MASK</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="n">vec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tv5</span><span class="p">.</span><span class="n">vec</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">i</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="n">INIT_LIST_HEAD</span><span class="p">(</span><span class="o">&amp;</span><span class="n">timer</span><span class="o">-&gt;</span><span class="n">list</span><span class="p">);</span><span class="w">  </span>
+<span class="w">        </span><span class="k">return</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">    </span><span class="n">list_add</span><span class="p">(</span><span class="o">&amp;</span><span class="n">timer</span><span class="o">-&gt;</span><span class="n">list</span><span class="p">,</span><span class="w"> </span><span class="n">vec</span><span class="o">-&gt;</span><span class="n">prev</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>internal_add_timer()</code> 函数首先会计算定时器还有多少毫秒到期，然后按照到期的毫秒数来选择对应的级别数组：</p>
+<ul>
+<li>如果到期时间小于256毫秒，那么将会添加到第一级数组中。</li>
+<li>如果到期时间大于等于256毫秒，并且小于16384毫米，那么将会添加到第二级数组中。</li>
+<li>其他等级如此类推。</li>
+</ul>
+<p>选择到合适的数组后，内核会调用 <code>list_add()</code> 函数将定时器添加到对应槽位的链表中。</p>
+<h3>4. 执行到期的定时器</h3>
+<p>内核会在时钟中断中通过调用 <code>run_timer_list()</code> 函数来执行到期的定时器，其实现如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">run_timer_list</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">((</span><span class="kt">long</span><span class="p">)(</span><span class="n">jiffies</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">timer_jiffies</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">struct</span><span class="w"> </span><span class="nc">list_head</span><span class="w"> </span><span class="o">*</span><span class="n">head</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">curr</span><span class="p">;</span>
+
+<span class="w">        </span><span class="c1">// 1. 如果第一级数组已经执行完一轮（到期指针变为0）</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">tv1</span><span class="p">.</span><span class="n">index</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="kt">int</span><span class="w"> </span><span class="n">n</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">            </span><span class="k">do</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">cascade_timers</span><span class="p">(</span><span class="n">tvecs</span><span class="p">[</span><span class="n">n</span><span class="p">]);</span>
+<span class="w">            </span><span class="p">}</span><span class="w"> </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">tvecs</span><span class="p">[</span><span class="n">n</span><span class="p">]</span><span class="o">-&gt;</span><span class="n">index</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">++</span><span class="n">n</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">NOOF_TVECS</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="nl">repeat</span><span class="p">:</span>
+<span class="w">        </span><span class="c1">// 2. 第一级数组当前到期指针指向的定时器列表</span>
+<span class="w">        </span><span class="n">head</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tv1</span><span class="p">.</span><span class="n">vec</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">tv1</span><span class="p">.</span><span class="n">index</span><span class="p">;</span>
+
+<span class="w">        </span><span class="c1">// 3. 遍历到期的定时器列表</span>
+<span class="w">        </span><span class="n">curr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">head</span><span class="o">-&gt;</span><span class="n">next</span><span class="p">;</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">curr</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">head</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">struct</span><span class="w"> </span><span class="nc">timer_list</span><span class="w"> </span><span class="o">*</span><span class="n">timer</span><span class="p">;</span>
+<span class="w">            </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">fn</span><span class="p">)(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="p">);</span>
+<span class="w">            </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">data</span><span class="p">;</span>
+
+<span class="w">            </span><span class="n">timer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">list_entry</span><span class="p">(</span><span class="n">curr</span><span class="p">,</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">timer_list</span><span class="p">,</span><span class="w"> </span><span class="n">list</span><span class="p">);</span>
+<span class="w">            </span><span class="n">fn</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">timer</span><span class="o">-&gt;</span><span class="n">function</span><span class="p">;</span>
+<span class="w">            </span><span class="n">data</span><span class="o">=</span><span class="w"> </span><span class="n">timer</span><span class="o">-&gt;</span><span class="n">data</span><span class="p">;</span>
+
+<span class="w">            </span><span class="c1">// 4. 把定时器从链表中删除</span>
+<span class="w">            </span><span class="n">detach_timer</span><span class="p">(</span><span class="n">timer</span><span class="p">);</span>
+<span class="w">            </span><span class="n">timer</span><span class="o">-&gt;</span><span class="n">list</span><span class="p">.</span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">timer</span><span class="o">-&gt;</span><span class="n">list</span><span class="p">.</span><span class="n">prev</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">            </span><span class="n">timer_enter</span><span class="p">(</span><span class="n">timer</span><span class="p">);</span>
+
+<span class="w">            </span><span class="n">spin_unlock_irq</span><span class="p">(</span><span class="o">&amp;</span><span class="n">timerlist_lock</span><span class="p">);</span>
+<span class="w">            </span><span class="c1">// 5. 执行定时器的回调函数</span>
+<span class="w">            </span><span class="n">fn</span><span class="p">(</span><span class="n">data</span><span class="p">);</span>
+<span class="w">            </span><span class="n">spin_lock_irq</span><span class="p">(</span><span class="o">&amp;</span><span class="n">timerlist_lock</span><span class="p">);</span>
+
+<span class="w">            </span><span class="n">timer_exit</span><span class="p">();</span>
+<span class="w">            </span><span class="k">goto</span><span class="w"> </span><span class="n">repeat</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="o">++</span><span class="n">timer_jiffies</span><span class="p">;</span>
+<span class="w">        </span><span class="c1">// 6. 将到期指针移动一个位置</span>
+<span class="w">        </span><span class="n">tv1</span><span class="p">.</span><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">tv1</span><span class="p">.</span><span class="n">index</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">TVR_MASK</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>run_timer_list()</code> 函数主要按照以下步骤来执行到期的定时器：</p>
+<ol>
+<li><p>如果第一级数组已经执行完一轮（也就是说，到期指针变为0时），通过调用 <code>cascade_timers()</code> 函数来计算其他等级当前到期指针指向的定时器列表（重新添加到内核中）。</p>
+</li>
+<li><p>遍历第一级数组的到期指针指向的定时器列表。</p>
+</li>
+<li><p>把定时器从链表中删除。</p>
+</li>
+<li><p>执行定时器的回调函数。</p>
+</li>
+<li><p>将到期指针移动一个位置。</p>
+</li>
+</ol>
+<p>从时间轮的原理可知，每当某一级数组执行完一轮后，就会移动下一级数组的到期指针，并且将指针指向的定时器列表重新添加到内核中，这个过程由 <code>cascade_timers()</code> 函数完成。代码如下所示：</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">cascade_timers</span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">timer_vec</span><span class="w"> </span><span class="o">*</span><span class="n">tv</span><span class="p">)</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">list_head</span><span class="w"> </span><span class="o">*</span><span class="n">head</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">curr</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">next</span><span class="p">;</span><span class="w"> </span>
+
+<span class="w">    </span><span class="n">head</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tv</span><span class="o">-&gt;</span><span class="n">vec</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">tv</span><span class="o">-&gt;</span><span class="n">index</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">curr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">head</span><span class="o">-&gt;</span><span class="n">next</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">    </span><span class="c1">// 1. 遍历定时器列表  </span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">curr</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">head</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="k">struct</span><span class="w"> </span><span class="nc">timer_list</span><span class="w"> </span><span class="o">*</span><span class="n">tmp</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="n">tmp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">list_entry</span><span class="p">(</span><span class="n">curr</span><span class="p">,</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">timer_list</span><span class="p">,</span><span class="w"> </span><span class="n">list</span><span class="p">);</span><span class="w">  </span>
+<span class="w">        </span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">curr</span><span class="o">-&gt;</span><span class="n">next</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="n">list_del</span><span class="p">(</span><span class="n">curr</span><span class="p">);</span><span class="w">  </span>
+<span class="w">        </span><span class="c1">// 2. 将定时器重新添加到内核中  </span>
+<span class="w">        </span><span class="n">internal_add_timer</span><span class="p">(</span><span class="n">tmp</span><span class="p">);</span><span class="w">  </span>
+<span class="w">        </span><span class="n">curr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">next</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="n">INIT_LIST_HEAD</span><span class="p">(</span><span class="n">head</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 3. 将到期指针移动到下一个位置  </span>
+<span class="w">    </span><span class="n">tv</span><span class="o">-&gt;</span><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">tv</span><span class="o">-&gt;</span><span class="n">index</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">TVN_MASK</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>总结</h3>
+<p>本文主要介绍低精度定时器的实现，低精度定时器是一种比较廉价（占用资源较低）的定时器，如果对定时器的到期时间精度不太高的情况下，可以优先使用低精度定时。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "低精度定时器原理.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

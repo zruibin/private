@@ -1,0 +1,181 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>C++高性能服务器网络框架设计细节 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="C++高性能服务器网络框架设计细节,C/C++,架构,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="C++高性能服务器网络框架设计细节" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>C++高性能服务器网络框架设计细节</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2019-09-17 14:41
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+<a href='../article/tag_jia_gou.html' class='article_tag'>架构</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://cloud.tencent.com/developer/article/1500153' target='blank'>C++高性能服务器网络框架设计细节</a></p></h4>
+<h3>在这篇文章中：</h3>
+<ul>
+<li>一、网络通信部件</li>
+<li>（一）、需要解决的问题</li>
+<li>（二）几种IO复用机制的比较</li>
+<li>（三）检测网络事件的正确姿势</li>
+<li>（四）被动关闭连接和主动关闭连接</li>
+<li>（五）发送缓冲区和接收缓冲区</li>
+</ul>
+<p>这篇文章我们将介绍服务器的开发，并从多个方面探究如何开发一款高性能高并发的服务器程序。需要注意的是一般大型服务器，其复杂程度在于其业务，而不是在于其代码工程的基本框架。大型服务器一般有多个服务组成，可能会支持 CDN，或者支持所谓的“分布式”等，这篇文章不会介绍这些东西，因为不管结构多么复杂的服务器，都是由单个服务器组成的。所以这篇文章的侧重点是讨论单个服务程序的结构，而且这里的结构指的也是单个服务器的网络通信层结构，如果你能真正地理解了我所说的，那么在这个基础的结构上面开展任何业务都是可以的，也可以将这种结构扩展成复杂的多个服务器组，例如“分布式”服务。文中的代码示例虽然是以 C++ 为例，但同样适合Java（我本人也是Java开发者），原理都是一样的，只不过Java可能在基本的操作系统网络通信API的基础上用虚拟机包裹了一层接口而已（Java甚至可能基于一些常用的网络通信框架思想提供了一些现成的 API，例如 NIO ）。有鉴于此，这篇文章不讨论那些大而空、泛泛而谈的技术术语，而是讲的是实实在在的能指导读者在实际工作中实践的编码方案或优化已有编码的方法。另外这里讨论的技术同时涉及 Windows 和 Linux 两个平台。</p>
+<p>　　所谓高性能就是服务器能流畅地处理各个客户端的连接并尽量低延迟地应答客户端的请求；所谓高并发，不仅指的是服务器可以同时支持多的客户端连接，而且这些客户端在连接期间内会不断与服务器有数据来往。网络上经常有各种网络库号称单个服务能同时支持百万甚至千万的并发，然后我实际去看了下，结果发现只是能同时支持很多的连接而已。如果一个服务器能单纯地接受ｎ个连接（ｎ可能很大），但是不能有条不紊地处理与这些连接之间的数据来往也没有任何意义，这种服务器框架只是“玩具型”的，对实际生产和应用没有任何意义。 　　
+　　
+　　这篇文章将从两个方面来介绍，一个是服务器中的基础的网络通信部件；另外一个是，如何利用这些基础通信部件整合成一个完整的高效的服务器框架。注意：本文以下内容中的客户端是相对概念，指的是连接到当前讨论的服务程序的终端，所以这里的客户端既可能是我们传统意义上的客户端程序，也可能是连接该服务的其他服务器程序。</p>
+<h4><strong>一、网络通信部件</strong></h4>
+<p>按上面介绍的思路，我们先从服务程序的网络通信部件开始介绍。</p>
+<h5><strong>(一）、需要解决的问题</strong></h5>
+<p>既然是服务器程序肯定会涉及到网络通信部分，那么服务器程序的网络通信模块要解决哪些问题？目前，网络上有很多网络通信框架，如 libevent、boost asio、ACE，但都网络通信的常见的技术手段都大同小异，至少要解决以下问题：</p>
+<ul>
+<li><strong>如何检测有新客户端连接？</strong></li>
+<li><strong>如何接受客户端连接？</strong></li>
+<li><strong>如何检测客户端是否有数据发来？</strong></li>
+<li><strong>如何收取客户端发来的数据？</strong></li>
+<li><strong>如何检测连接异常？发现连接异常之后，如何处理？</strong></li>
+<li><strong>如何给客户端发送数据？</strong></li>
+<li><strong>如何在给客户端发完数据后关闭连接？</strong> <ul>
+<li>稍微有点网络基础的人，都能回答上面说的其中几个问题，比如接收客户端连接用 socket API 的 accept 函数，收取客户端数据用 recv 函数，给客户端发送数据用 send 函数，检测客户端是否有新连接和客户端是否有新数据可以用 IO multiplexing 技术（IO复用）的 select、poll、epoll 等 socket API。确实是这样的，这些基础的socket API 构成了服务器网络通信的地基，不管网络通信框架设计的如何巧妙，都是在这些基础的 socket API 的基础上构建的。但是如何巧妙地组织这些基础的 socket API，才是问题的关键。我们说服务器很高效，支持高并发，实际上只是一个技术实现手段，不管怎样，从软件开发的角度来讲无非就是一个程序而已，所以，只要程序能最大可能地满足“尽量减少等待或者不等待”这一原则就是高效的，也就是说高效不是“忙的忙死，闲的闲死”，而是大家都可以闲着，但是如果有活要干，大家尽量一起干，而不是一部分忙着依次做事情 123456789，另外一部分闲在那里无所事事。说的可能有点抽象，下面我们来举一些例子具体来说明一下。 例如：</li>
+</ul>
+</li>
+<li>默认情况下，recv 函数如果没有数据的时候，线程就会阻塞在那里；</li>
+<li>默认情况下，send 函数，如果 tcp 窗口不是足够大，数据发不出去也会阻塞在那里；</li>
+<li>connect 函数默认连接另外一端的时候，也会阻塞在那里；</li>
+<li>又或者是给对端发送一份数据，需要等待对端回答，如果对方一直不应答，当前线程就阻塞在这里。 　　</li>
+</ul>
+<p>以上都不是高效服务器的开发思维方式，因为上面的例子都不满足“尽量减少等待”的原则，为什么一定要等待呢？有没用一种方法，这些过程不需要等待，最好是不仅不需要等待，而且这些事情完成之后能通知我。这样在这些本来用于等待的 CPU 时间片内，我就可以做一些其他的事情。有，也就是我们下文要讨论的 <strong>IO Multiplexing 技术</strong>（IO复用技术）。</p>
+<h5><strong>（二）几种IO复用机制的比较</strong></h5>
+<p>目前windows系统支持 select、WSAAsyncSelect、WSAEventSelect、完成端口（IOCP），Linux系统支持select、poll、epoll。这里我们不具体介绍每个具体的函数的用法，我们来讨论一点深层次的东西，以上列举的API函数可以分为两个层次：</p>
+<p><strong>层次一：select和poll</strong> <strong>层次二 ：WSAAsyncSelect、WSAEventSelect、完成端口（IOCP）、epoll</strong></p>
+<p>为什么这么分呢？先来介绍第一层次，select和poll函数本质上还是在一定时间内主动去查询socket句柄（可能是一个也可能是多个）上是否有事件，比如可读事件，可写事件或者出错事件，也就是说我们还是需要每隔一段时间内去主动去做这些检测，如果在这段时间内检测出一些事件来，我们这段时间就算没白花，但是倘若这段时间内没有事件呢？我们只能是做无用功了，说白了，还是在浪费时间，因为假如一个服务器有多个连接，在cpu时间片有限的情况下，我们花费了一定的时间检测了一部分soc
+ket连接，却发现它们什么事件都没有，而在这段时间内我们却有一些事情需要处理，那我们为什么要花时间去做这个检测呢？把这个时间用在做我们需要做的事情不好吗？所以对于服务器程序来说，要想高效，我们应该尽量避免花费时间主动去查询一些socket是否有事件，而是等这些socket有事件的时候告诉我们去处理。这也就是层次二的各个函数做的事情，它们实际相当于变主动查询是否有事件为当有事件时，系统会告诉我们，此时我们再去处理，也就是“好钢用在刀刃”上了。只不过层次二的函数通知我们的方式是各不相同，比如 WSAAsyncSelect 是利用 Windows 窗口消息队列的事件机制来通知我们设定的窗口过程函数，IOCP 是利用
+GetQueuedCompletionStatus 返回正确的状态，epoll 是 epoll_wait 函数返回而已。 例如，connect函数连接另外一端，如果用于连接 socket 是非阻塞的，那么 connect虽然不能立刻连接完成，但是也是会立刻返回，无需等待，等连接完成之后，WSAAsyncSelect 会返回 FD_CONNECT事件告诉我们连接成功，epoll 会产生 EPOLLOUT 事件，我们也能知道连接完成。甚至 socket 有数据可读时，WSAAsyncSelect 产生FD_READ 事件，epoll 产生 EPOLLIN 事件，等等。所以有了上面的讨论，我们就可以得到网络通信检测可读可写或者出错事件的正确姿势。这是我这里提出的第二个原则：尽量减少做无用功的时间。这个在服务程序资源够用的情况下可能体现不出来什么优势，但是如果有大量的任务要处理，这里就成了性能的一个瓶颈。</p>
+<h5><strong>（三）检测网络事件的正确姿势</strong></h5>
+<p>　　根据上面的介绍，第一，为了避免无意义的等待时间，第二，不采用主动查询各个 socket的事件，而是采用等待操作系统通知我们有事件的状态的策略。我们的socket都要设置成非阻塞的。在此基础上我们回到栏目（一）中提到的七个问题：</p>
+<p><strong>1. 如何检测有新客户端连接？</strong> 
+<strong>2. 如何接受客户端连接？</strong> 　　</p>
+<p>默认 accept 函数会阻塞在那里，如果 epoll 检测到侦听 socket 上有 EPOLLIN 事件，或者 WSAAsyncSelect 检测到有 FD_ACCEPT 事件，那么就表明此时有新连接到来，这个时候调用 accept 函数，就不会阻塞了。当然产生的新 socket 你应该也设置成非阻塞的。这样我们就能在新 socket 上收发数据了。</p>
+<p><strong>3. 如何检测客户端是否有数据发来？</strong></p>
+<p><strong>4. 如何收取客户端发来的数据？</strong> 　　</p>
+<p>同理，我们也应该在 socket 上有可读事件的时候才去收取数据，这样我们调用 recv 或者 read 函数时不用等待，至于一次性收多少数据好呢？我们可以根据自己的需求来决定，甚至你可以在一个循环里面反复 recv 或者 read，对于非阻塞模式的 socket，如果没有数据了，recv 或者 read 也会立刻返回，错误码 EWOULDBLOCK 会表明当前已经没有数据了。示例：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">bool</span><span class="w"> </span><span class="nf">CIUSocket::Recv</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">nRet</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="nb">true</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">char</span><span class="w"> </span><span class="n">buff</span><span class="p">[</span><span class="mi">512</span><span class="p">];</span>
+<span class="w">        </span><span class="n">nRet</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">::</span><span class="n">recv</span><span class="p">(</span><span class="n">m_hSocket</span><span class="p">,</span><span class="w"> </span><span class="n">buff</span><span class="p">,</span><span class="w"> </span><span class="mi">512</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">nRet</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">SOCKET_ERROR</span><span class="p">)</span><span class="w">                </span><span class="c1">//一旦出现错误就立刻关闭Socket</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">::</span><span class="n">WSAGetLastError</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">WSAEWOULDBLOCK</span><span class="p">)</span>
+<span class="w">                </span><span class="k">break</span><span class="p">;</span>
+<span class="w">            </span><span class="k">else</span>
+<span class="w">                </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">nRet</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span>
+<span class="w">            </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">        </span><span class="n">m_strRecvBuf</span><span class="p">.</span><span class="n">append</span><span class="p">(</span><span class="n">buff</span><span class="p">,</span><span class="w"> </span><span class="n">nRet</span><span class="p">);</span>
+<span class="w">        </span><span class="o">::</span><span class="n">Sleep</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>5. 如何检测连接异常？发现连接异常之后，如何处理？</strong> 　　</p>
+<p>同样当我们收到异常事件后例如 EPOLLERR 或关闭事件 FD_CLOSE，我们就知道了有异常产生，我们对异常的处理一般就是关闭对应的 socket。另外，如果 send/recv 或者 read/write 函数对一个 socket 进行操作时，如果返回 0，那说明对端已经关闭了 socket，此时这路连接也没必要存在了，我们也可以关闭对应的 socket。</p>
+<p><strong>6.如何给客户端发送数据？</strong> 　　</p>
+<p>这也是一道常见的网络通信面试题，某一年的腾讯后台开发职位就问到过这样的问题。给客户端发送数据，比收数据要稍微麻烦一点，也是需要讲点技巧的。首先我们不能像注册检测数据可读事件一样一开始就注册检测数据可写事件，因为如果检测可写的话，一般情况下只要对端正常收取数据，我们的socket就都是可写的，如果我们设置监听可写事件，会导致频繁地触发可写事件，但是我们此时并不一定有数据需要发送。所以正确的做法是：如果有数据要发送，则先尝试着去发送，如果发送不了或者只发送出去部分，剩下的我们需要将其缓存起来，然后再设置检测该socket上可写事件，下次可写事件产生时，再继续发送，如果还是不能完全发出去，则继续设置侦听可写事件，如此往复，一直到所有数据都发出去为止。一旦所有数据都发出去以后，我们要移除侦听可写事件，避免无用的可写事件通知。不知道你注意到没有，如果某次只发出去部分数据，剩下的数据应该暂且存起来，这个时候我们就需要一个缓冲区来存放这部分数据，这个缓冲区我们称为“发送缓冲区”。发送缓冲区不仅存放本次没有发完的数据，还用来存放在发送过程中，上层又传来的新的需要发送的数据。为了保证顺序，新的数据应该追加在当前剩下的数据的后面，发送的时候从发送缓冲区的头部开始发送。也就是说先来的先发送，后来的后发送。</p>
+<p><strong>7. 如何在给客户端发完数据后关闭连接？</strong> 　　</p>
+<p>这个问题比较难处理，因为这里的“发送完”不一定是真正的发送完，我们调用send或者write函数即使成功，也只是向操作系统的协议栈里面成功写入数据，至于能否被发出去、何时被发出去很难判断，发出去对方是否收到就更难判断了。所以，我们目前只能简单地认为 send 或者 write 返回我们发出数据的字节数大小，我们就认为“发完数据”了。然后调用close等socket API关闭连接。当然，你也可以调用 shutdown 函数来实现所谓的“<strong>半关闭</strong>”。关于关闭连接的话题，我们再单独开一个小的标题来专门讨论一下。</p>
+<h5><strong>（四）被动关闭连接和主动关闭连接</strong></h5>
+<p>　　在实际的应用中，被动关闭连接是由于我们检测到了连接的异常事件，比如 EPOLLERR，或者对端关闭连接，send 或 recv 返回 0，这个时候这路连接已经没有存在必要的意义了，我们被迫关闭连接。 而主动关闭连接，是我们主动调用 close/closesocket 来关闭连接。比如客户端给我们发送非法的数据，比如一些网络攻击的尝试性数据包。这个时候出于安全考虑，我们关闭 socket 连接。</p>
+<h5><strong>（五）发送缓冲区和接收缓冲区</strong></h5>
+<p>　　上面已经介绍了发送缓冲区了，并说明了其存在的意义。接收缓冲区也是一样的道理，当收到数据以后，我们可以直接进行解包，但是这样并不好，理由一：除非一些约定俗称的协议格式，比如 http 协议，大多数服务器的业务的协议都是不同的，也就是说一个数据包里面的数据格式的解读应该是业务层的事情，和网络通信层应该解耦，为了网络层更加通用，我们无法知道上层协议长成什么样子，因为不同的协议格式是不一样的，它们与具体的业务有关。理由二：即使知道协议格式，我们在网络层进行解包处理对应的业务，如果这个业务处理比较耗时，比如需要进行复杂的运算，或者连接数据库进行账号密码验证，那么我们的网络线程会需要大量时间来处理这些任务，这样其它网络事件可能没法及时处理。鉴于以上二点，我们确实需要一个接收缓冲区，将收取到的数据放到该缓冲区里面去，并由专门的业务线程或者业务逻辑去从接收缓冲区中取出数据，并解包处理业务。 说了这么多，那发送缓冲区和接收缓冲区该设计成多大的容量？这是一个老生常谈的问题了，因为我们经常遇到这样的问题：预分配的内存太小不够用，太大的话可能会造成浪费。怎么办呢？答案就是像 string、vector一样，设计出一个可以动态增长的缓冲区，按需分配，不够还可以扩展。
+需要特别注意的是，这里说的发送缓冲区和接收缓冲区是每一个socket连接都存在一个。这是我们最常见的设计方案。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "C++高性能服务器网络框架设计细节.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

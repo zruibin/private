@@ -1,0 +1,801 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>Linux多线程编程（不限Linux）与Linux Socket编程（不限Linux） - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="Linux多线程编程（不限Linux）与Linux Socket编程（不限Linux）,C/C++,Linux,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="Linux多线程编程（不限Linux）与Linux Socket编程（不限Linux）" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>Linux多线程编程（不限Linux）与Linux Socket编程（不限Linux）</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2016-07-14 13:08
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+<a href='../article/tag_linux.html' class='article_tag'>Linux</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='http://www.cnblogs.com/skynet/archive/2010/10/30/1865267.html' target='blank'>Linux多线程编程（不限Linux）</a></p></h4>
+<p>----本文一个例子展开，介绍Linux下面线程的操作、多线程的同步和互斥。</p>
+<h2>前言</h2>
+<p>线程？为什么有了进程还需要线程呢，他们有什么区别？使用线程有什么优势呢？还有多线程编程的一些细节问题，如线程之间怎样同步、互斥，这些东西将在本文中介绍。我在某QQ群里见到这样一道面试题：</p>
+<blockquote><p>是否熟悉POSIX多线程编程技术？如熟悉，编写程序完成如下功能：</p>
+</blockquote>
+<p>&gt;</p>
+<blockquote><p>1）有一int型全局变量g_Flag初始值为0；</p>
+</blockquote>
+<p>&gt;</p>
+<blockquote><p>2） 在主线称中起动线程1，打印"this is thread1"，并将g_Flag设置为1</p>
+</blockquote>
+<p>&gt;</p>
+<blockquote><p>3） 在主线称中启动线程2，打印"this is thread2"，并将g_Flag设置为2</p>
+</blockquote>
+<p>&gt;</p>
+<blockquote><p>4） 线程序1需要在线程2退出后才能退出</p>
+</blockquote>
+<p>&gt;</p>
+<blockquote><p>5） 主线程在检测到g_Flag从1变为2，或者从2变为1的时候退出</p>
+</blockquote>
+<p>我们带着这题开始这篇文章，结束之后，大家就都会做了。本文的框架如下：</p>
+<ul>
+<li>1、进程与线程 </li>
+<li>2、使用线程的理由 </li>
+<li>3、有关线程操作的函数 </li>
+<li>4、线程之间的互斥 </li>
+<li>5、线程之间的同步</li>
+<li>6、试题最终代码</li>
+</ul>
+<h2>1、进程与线程</h2>
+<p>进程是程序执行时的一个实例，即它是程序已经执行到何种程度的数据结构的汇集。从内核的观点看，进程的目的就是担当分配系统资源（CPU时间、内存等）的基本单位。</p>
+<p>线程是进程的一个执行流，是CPU调度和分派的基本单位，它是比进程更小的能独立运行的基本单位。一个进程由几个线程组成（拥有很多相对独立的执行流的用户程序共享应用程序的大部分数据结构），线程与同属一个进程的其他的线程共享进程所拥有的全部资源。</p>
+<blockquote><p>"进程----资源分配的最小单位，线程----程序执行的最小单位"</p>
+</blockquote>
+<p>进程有独立的地址空间，一个进程崩溃后，在保护模式下不会对其它进程产生影响，而线程只是一个进程中的不同执行路径。线程有自己的堆栈和局部变量，但线程没有单独的地址空间，一个线程死掉就等于整个进程死掉，所以多进程的程序要比多线程的程序健壮，但在进程切换时，耗费资源较大，效率要差一些。但对于一些要求同时进行并且又要共享某些变量的并发操作，只能用线程，不能用进程。</p>
+<h2>2、使用线程的理由</h2>
+<p>从上面我们知道了进程与线程的区别，其实这些区别也就是我们使用线程的理由。总的来说就是：进程有独立的地址空间，线程没有单独的地址空间（同一进程内的线程共享进程的地址空间）。（下面的内容摘自<a href="http://fanqiang.chinaunix.net/a4/b8/20010811/0905001105.html">Linux下的多线程编程</a>）</p>
+<p>使用多线程的<strong>理由之一</strong>是和进程相比，它是一种非常"节俭"的多任务操作方式。我们知道，在Linux系统下，启动一个新的进程必须分配给它独立的地址空间，建立众多的数据表来维护它的代码段、堆栈段和数据段，这是一种"昂贵"的多任务工作方式。而运行于一个进程中的多个线程，它们彼此之间使用相同的地址空间，共享大部分数据，启动一个线程所花费的空间远远小于启动一个进程所花费的空间，而且，线程间彼此切换所需的时间也远远小于进程间切换所需要的时间。据统计，总的说来，一个进程的开销大约是一个线程开销的30倍左右，当然，在具体的系统上，这个数据可能会有较大的区别。</p>
+<p>使用多线程的<strong>理由之二</strong>是线程间方便的通信机制。对不同进程来说，它们具有独立的数据空间，要进行数据的传递只能通过通信的方式进行，这种方式不仅费时，而且很不方便。线程则不然，由于同一进程下的线程之间共享数据空间，所以一个线程的数据可以直接为其它线程所用，这不仅快捷，而且方便。当然，数据的共享也带来其他一些问题，有的变量不能同时被两个线程所修改，有的子程序中声明为static的数据更有可能给多线程程序带来灾难性的打击，这些正是编写多线程程序时最需要注意的地方。</p>
+<p>除了以上所说的优点外，不和进程比较，多线程程序作为一种多任务、并发的工作方式，当然有以下的优点：</p>
+<ul>
+<li>提高应用程序响应。这对图形界面的程序尤其有意义，当一个操作耗时很长时，整个系统都会等待这个操作，此时程序不会响应键盘、鼠标、菜单的操作，而使用多线程技术，将耗时长的操作（time consuming）置于一个新的线程，可以避免这种尴尬的情况。 </li>
+<li>使多CPU系统更加有效。操作系统会保证当线程数不大于CPU数目时，不同的线程运行于不同的CPU上。 </li>
+<li>改善程序结构。一个既长又复杂的进程可以考虑分为多个线程，成为几个独立或半独立的运行部分，这样的程序会利于理解和修改。 </li>
+</ul>
+<p>=============================</p>
+<p>从函数调用上来说，进程创建使用fork()操作；线程创建使用clone()操作。Richard Stevens大师这样说过：</p>
+<ul>
+<li><p><code>fork</code> is expensive. Memory is copied from the parent to the child, all descriptors are duplicated in the child, and so on. Current implementations use a technique called copy-on-write, which avoids a copy of the parent's data space to the child until the child needs its own copy. But, regardless of this optimization, <code>fork</code> is expensive.</p>
+</li>
+<li><p>IPC is required to pass information between the parent and child after the <code>fork</code>. Passing information from the parent to the child before the <code>fork</code> is easy, since the child starts with a copy of the parent's data space and with a copy of all the parent's descriptors. But, returning information from the child to the parent takes more work.</p>
+</li>
+</ul>
+<p>Threads help with both problems. Threads are sometimes called lightweight
+processes since a thread is "lighter weight" than a process. That is, thread
+creation can be 10-100 times faster than process creation.</p>
+<p>All threads within a process share the same global memory. This makes the
+sharing of information easy between the threads, but along with this
+simplicity comes the problem of synchronization.</p>
+<p>=============================</p>
+<h2>3、有关线程操作的函数</h2>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;pthread.h&gt;</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">pthread_create</span><span class="p">(</span><span class="n">pthread_t</span><span class="w"> </span><span class="o">*</span><span class="n">tid</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">pthread_attr_t</span><span class="w"> </span><span class="o">*</span><span class="n">attr</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="p">(</span><span class="o">*</span><span class="n">func</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="p">),</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">arg</span><span class="p">);</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">pthread_join</span><span class="w"> </span><span class="p">(</span><span class="n">pthread_t</span><span class="w"> </span><span class="n">tid</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">**</span><span class="w"> </span><span class="n">status</span><span class="p">);</span>
+
+<span class="n">pthread_t</span><span class="w"> </span><span class="nf">pthread_self</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">);</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">pthread_detach</span><span class="w"> </span><span class="p">(</span><span class="n">pthread_t</span><span class="w"> </span><span class="n">tid</span><span class="p">);</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">pthread_exit</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">status</span><span class="p">);</span>
+</code></pre></div>
+<p>pthread_create用于创建一个线程，成功返回0，否则返回Exxx（为正数）。</p>
+<ul>
+<li>pthread_t <em>tid：线程id的类型为pthread_t，通常为无符号整型，当调用pthread_create成功时，通过</em>tid指针返回。 </li>
+<li>const pthread_attr_t *attr：指定创建线程的属性，如线程优先级、初始栈大小、是否为守护进程等。可以使用NULL来使用默认值，通常情况下我们都是使用默认值。 </li>
+<li>void <em>(</em>func) (void *)：函数指针func，指定当新的线程创建之后，将执行的函数。 </li>
+<li>void *arg：线程将执行的函数的参数。如果想传递多个参数，请将它们封装在一个结构体中。 </li>
+</ul>
+<p>pthread_join用于等待某个线程退出，成功返回0，否则返回Exxx（为正数）。</p>
+<ul>
+<li>pthread_t tid：指定要等待的线程ID </li>
+<li>void ** status：如果不为NULL，那么线程的返回值存储在status指向的空间中（这就是为什么status是二级指针的原因！这种才参数也称为"值-结果"参数）。 </li>
+</ul>
+<p>pthread_self用于返回当前线程的ID。</p>
+<p>pthread_detach用于是指定线程变为<strong>分离</strong>状态，就像进程脱离终端而变为后台进程类似。成功返回0，否则返回Exxx（为正数）。变为分离状态的线
+程，如果线程退出，它的所有资源将全部释放。而如果不是分离状态，线程必须保留它的线程ID，退出状态直到其它线程对它调用了pthread_join。</p>
+<blockquote><p>进程也是类似，这也是当我们打开进程管理器的时候，发现有很多僵死进程的原因！也是为什么一定要有僵死这个进程状态。</p>
+</blockquote>
+<p>pthread_exit用于终止线程，可以指定返回值，以便其他线程通过pthread_join函数获取该线程的返回值。</p>
+<ul>
+<li>void *status：指针线程终止的返回值。 </li>
+</ul>
+<p>知道了这些函数之后，我们试图来完成本文一开始的问题：</p>
+<p>1）有一int型全局变量g_Flag初始值为0；</p>
+<p>2）在主线称中起动线程1，打印"this is thread1"，并将g_Flag设置为1</p>
+<p>3）在主线称中启动线程2，打印"this is thread2"，并将g_Flag设置为2</p>
+<p>这3点很简单嘛！！！不就是调用pthread_create创建线程。代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/*</span>
+<span class="cm"> * 1）有一int型全局变量g_Flag初始值为0；</span>
+<span class="cm"> *</span>
+<span class="cm"> * 2）在主线称中起动线程1，打印&quot;this is thread1&quot;，并将g_Flag设置为1</span>
+<span class="cm"> *</span>
+<span class="cm"> * 3）在主线称中启动线程2，打印&quot;this is thread2&quot;，并将g_Flag设置为2</span>
+<span class="cm"> *</span>
+<span class="cm"> */</span>
+<span class="cp">#include</span><span class="cpf">&lt;stdio.h&gt;</span>
+<span class="cp">#include</span><span class="cpf">&lt;stdlib.h&gt;</span>
+<span class="cp">#include</span><span class="cpf">&lt;pthread.h&gt;</span>
+<span class="cp">#include</span><span class="cpf">&lt;errno.h&gt;</span>
+<span class="cp">#include</span><span class="cpf">&lt;unistd.h&gt;</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="n">g_Flag</span><span class="o">=</span><span class="mi">0</span><span class="p">;</span>
+
+<span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="nf">thread1</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">);</span>
+<span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="nf">thread2</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">);</span>
+
+<span class="cm">/*</span>
+<span class="cm"> * when program is started, a single thread is created, called the initial thread or main thread.</span>
+<span class="cm"> * Additional threads are created by pthread_create.</span>
+<span class="cm"> * So we just need to create two thread in main().</span>
+<span class="cm"> */</span>
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="o">**</span><span class="w"> </span><span class="n">argv</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;enter main</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="n">pthread_t</span><span class="w"> </span><span class="n">tid1</span><span class="p">,</span><span class="w"> </span><span class="n">tid2</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">rc1</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">rc2</span><span class="o">=</span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="n">rc2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pthread_create</span><span class="p">(</span><span class="o">&amp;</span><span class="n">tid2</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="n">thread2</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="p">(</span><span class="n">rc2</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">        </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;%s: %d</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="n">__func__</span><span class="p">,</span><span class="w"> </span><span class="n">strerror</span><span class="p">(</span><span class="n">rc2</span><span class="p">));</span>
+<span class="w">    </span><span class="n">rc1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pthread_create</span><span class="p">(</span><span class="o">&amp;</span><span class="n">tid1</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="n">thread1</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">tid2</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="p">(</span><span class="n">rc1</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">        </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;%s: %d</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="n">__func__</span><span class="p">,</span><span class="w"> </span><span class="n">strerror</span><span class="p">(</span><span class="n">rc1</span><span class="p">));</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;leave main</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span><span class="w">    </span>
+<span class="p">}</span>
+
+<span class="cm">/*</span>
+<span class="cm"> * thread1() will be execute by thread1, after pthread_create()</span>
+<span class="cm"> * it will set g_Flag = 1;</span>
+<span class="cm"> */</span>
+<span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="nf">thread1</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">arg</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;enter thread1</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;this is thread1, g_Flag: %d, thread id is %u</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="n">g_Flag</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="n">pthread_self</span><span class="p">());</span>
+<span class="w">    </span><span class="n">g_Flag</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;this is thread1, g_Flag: %d, thread id is %u</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="n">g_Flag</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="n">pthread_self</span><span class="p">());</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;leave thread1</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="n">pthread_exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="cm">/*</span>
+<span class="cm"> * thread2() will be execute by thread2, after pthread_create()</span>
+<span class="cm"> * it will set g_Flag = 2;</span>
+<span class="cm"> */</span>
+<span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="nf">thread2</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">arg</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;enter thread2</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;this is thread2, g_Flag: %d, thread id is %u</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="n">g_Flag</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="n">pthread_self</span><span class="p">());</span>
+<span class="w">    </span><span class="n">g_Flag</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;this is thread1, g_Flag: %d, thread id is %u</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="n">g_Flag</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="n">pthread_self</span><span class="p">());</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;leave thread2</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="n">pthread_exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这样就完成了1）、2）、3）这三点要求。编译执行得如下结果：</p>
+<div class="highlight"><pre><code><span></span><span class="n">netsky</span><span class="err">@</span><span class="n">ubuntu</span><span class="o">:~/</span><span class="n">workspace</span><span class="o">/</span><span class="n">pthead_test$</span><span class="w"> </span><span class="n">gcc</span><span class="w"> </span><span class="o">-</span><span class="n">lpthread</span><span class="w"> </span><span class="n">test</span><span class="p">.</span><span class="n">c</span>
+</code></pre></div>
+<p>如果程序中使用到了pthread库中的函数，除了要#include<pthread.h>，在编译的时候还有加上-lpthread 选项。</p>
+<div class="highlight"><pre><code><span></span><span class="n">netsky</span><span class="err">@</span><span class="n">ubuntu</span><span class="o">:~/</span><span class="n">workspace</span><span class="o">/</span><span class="n">pthead_test$</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="n">a</span><span class="p">.</span><span class="n">out</span><span class="w">  </span>
+<span class="n">enter</span><span class="w"> </span><span class="n">main</span><span class="w">  </span>
+<span class="n">enter</span><span class="w"> </span><span class="n">thread2</span><span class="w">  </span>
+<span class="n">this</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">thread2</span><span class="p">,</span><span class="w"> </span><span class="n">g_Flag</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="kr">thread</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="mi">3079588720</span><span class="w">  </span>
+<span class="n">this</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">thread1</span><span class="p">,</span><span class="w"> </span><span class="n">g_Flag</span><span class="o">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="kr">thread</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="mi">3079588720</span><span class="w">  </span>
+<span class="n">leave</span><span class="w"> </span><span class="n">thread2</span><span class="w">  </span>
+<span class="n">leave</span><span class="w"> </span><span class="n">main</span><span class="w">  </span>
+<span class="n">enter</span><span class="w"> </span><span class="n">thread1</span><span class="w">  </span>
+<span class="n">this</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">thread1</span><span class="p">,</span><span class="w"> </span><span class="n">g_Flag</span><span class="o">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="kr">thread</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="mi">3071196016</span><span class="w">  </span>
+<span class="n">this</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">thread1</span><span class="p">,</span><span class="w"> </span><span class="n">g_Flag</span><span class="o">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="kr">thread</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="mi">3071196016</span><span class="w">  </span>
+<span class="n">leave</span><span class="w"> </span><span class="n">thread1</span>
+</code></pre></div>
+<p>但是运行结果不一定是上面的，还有可能是：</p>
+<div class="highlight"><pre><code><span></span><span class="n">netsky</span><span class="err">@</span><span class="n">ubuntu</span><span class="o">:~/</span><span class="n">workspace</span><span class="o">/</span><span class="n">pthead_test$</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="n">a</span><span class="p">.</span><span class="n">out</span><span class="w">  </span>
+<span class="n">enter</span><span class="w"> </span><span class="n">main</span><span class="w">  </span>
+<span class="n">leave</span><span class="w"> </span><span class="n">main</span><span class="w">  </span>
+<span class="n">enter</span><span class="w"> </span><span class="n">thread1</span><span class="w">  </span>
+<span class="n">this</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">thread1</span><span class="p">,</span><span class="w"> </span><span class="n">g_Flag</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="kr">thread</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="mi">3069176688</span><span class="w">  </span>
+<span class="n">this</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">thread1</span><span class="p">,</span><span class="w"> </span><span class="n">g_Flag</span><span class="o">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="kr">thread</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="mi">3069176688</span><span class="w">  </span>
+<span class="n">leave</span><span class="w"> </span><span class="n">thread1</span>
+</code></pre></div>
+<p>或者是：</p>
+<div class="highlight"><pre><code><span></span><span class="n">netsky</span><span class="err">@</span><span class="n">ubuntu</span><span class="o">:~/</span><span class="n">workspace</span><span class="o">/</span><span class="n">pthead_test$</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="n">a</span><span class="p">.</span><span class="n">out</span><span class="w">  </span>
+<span class="n">enter</span><span class="w"> </span><span class="n">main</span><span class="w">  </span>
+<span class="n">leave</span><span class="w"> </span><span class="n">main</span>
+</code></pre></div>
+<p>等等。这也很好理解因为，这取决于主线程main函数何时终止，线程thread1、thread2是否能够来得急执行它们的函数。这也是多线程编程时要注意的问题，因为有可能一个线程会影响到整个进程中的所有其它线程！如果我们在main函数退出前，sleep()一段时间，就可以保证thread1、thread2来得及执行
+。</p>
+<blockquote><p>Attention:大家肯定已经注意到了，我们在线程函数thread1()、thread2()执行完之前都调用了pthread_exit。如果我是调用exit()又或者是return会怎样呢？自己动手试试吧！</p>
+</blockquote>
+<p>&gt;</p>
+<blockquote><p>pthread_exit()用于线程退出，可以指定返回值，以便其他线程通过pthread_join（）函数获取该线程的返回值。<br>
+return是函数返回，只有线程函数return，线程才会退出。<br>
+exit是进程退出，如果在线程函数中调用exit，进程中的所有函数都会退出！</p>
+</blockquote>
+<p>"4） 线程序1需要在线程2退出后才能退出"第4点也很容易解决，直接在thread1的函数退出之前调用pthread_join就OK了。</p>
+<h2>4、线程之间的互斥</h2>
+<p>上面的代码似乎很好的解决了问题的前面4点要求，其实不然！！！因为g_Flag是一个全局变量，线程thread1和thread2可以同时对它进行操作，需要对它
+进行加锁保护，thread1和thread2要互斥访问才行。下面我们就介绍如何加锁保护----互斥锁。</p>
+<blockquote><h5><strong>互斥锁：</strong></h5>
+</blockquote>
+<p>&gt;</p>
+<blockquote><p>使用互斥锁（互斥）可以使线程按顺序执行。通常，互斥锁通过确保一次只有一个线程执行代码的临界段来同步多个线程。互斥锁还可以保护单线程代码。</p>
+</blockquote>
+<p>互斥锁的相关操作函数如下：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;pthread.h&gt;</span><span class="c1"> </span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">pthread_mutex_lock</span><span class="p">(</span><span class="n">pthread_mutex_t</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">mptr</span><span class="p">);</span><span class="w"> </span>
+<span class="kt">int</span><span class="w"> </span><span class="nf">pthread_mutex_unlock</span><span class="p">(</span><span class="n">pthread_mutex_t</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">mptr</span><span class="p">);</span><span class="w"> </span>
+<span class="c1">//Both return: 0 if OK, positive Exxx value on error</span>
+</code></pre></div>
+<p>在对临界资源进行操作之前需要pthread_mutex_lock先加锁，操作完之后pthread_mutex_unlock再解锁。而且在这之前需要声明一个p
+thread_mutex_t类型的变量，用作前面两个函数的参数。具体代码见第5节。</p>
+<h2>5、线程之间的同步</h2>
+<p>第5点----主线程在检测到g_Flag从1变为2，或者从2变为1的时候退出。就需要用到线程同步技术！线程同步需要条件变量。</p>
+<blockquote><h5><strong>条件变量：</strong></h5>
+</blockquote>
+<p>&gt;</p>
+<blockquote><p>使用条件变量可以以原子方式阻塞线程，直到某个特定条件为真为止。条件变量始终与互斥锁一起使用。对条件的测试是在互斥锁（互斥）的保护下进行的。</p>
+</blockquote>
+<p>&gt;</p>
+<blockquote><p>如果条件为假，线程通常会基于条件变量阻塞，并以原子方式释放等待条件变化的互斥锁。如果另一个线程更改了条件，该线程可能会向相关的条件变量发出信号，从而使一
+个或多个等待的线程执行以下操作：</p>
+</blockquote>
+<p>&gt;</p>
+<blockquote><ul>
+<li><p>唤醒</p>
+</li>
+<li><p>再次获取互斥锁</p>
+</li>
+<li><p>重新评估条件</p>
+</li>
+</ul>
+</blockquote>
+<p>&gt;</p>
+<blockquote><p>在以下情况下，条件变量可用于在进程之间同步线程：</p>
+</blockquote>
+<p>&gt;</p>
+<blockquote><ul>
+<li><p>线程是在可以写入的内存中分配的</p>
+</li>
+<li><p>内存由协作进程共享</p>
+</li>
+</ul>
+</blockquote>
+<p>"使用条件变量可以以原子方式阻塞线程，直到某个特定条件为真为止。"即可用到第5点，主线程main函数阻塞于等待g_Flag从1变为2，或者从2变为1。条件变
+量的相关函数如下：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;pthread.h&gt;</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">pthread_cond_wait</span><span class="p">(</span><span class="n">pthread_cond_t</span><span class="w"> </span><span class="o">*</span><span class="n">cptr</span><span class="p">,</span><span class="w"> </span><span class="n">pthread_mutex_t</span><span class="w"> </span><span class="o">*</span><span class="n">mptr</span><span class="p">);</span><span class="w"> </span>
+<span class="kt">int</span><span class="w"> </span><span class="nf">pthread_cond_signal</span><span class="p">(</span><span class="n">pthread_cond_t</span><span class="w"> </span><span class="o">*</span><span class="n">cptr</span><span class="p">);</span><span class="w"> </span>
+<span class="c1">//Both return: 0 if OK, positive Exxx value on error</span>
+</code></pre></div>
+<p>pthread_cond_wait用于等待某个特定的条件为真，pthread_cond_signal用于通知阻塞的线程某个特定的条件为真了。在调用者两个函数
+之前需要声明一个pthread_cond_t类型的变量，用于这两个函数的参数。</p>
+<p>为什么条件变量始终与互斥锁一起使用，对条件的测试是在互斥锁（互斥）的保护下进行的呢？因为"某个特性条件"通常是在多个线程之间共享的某个变量。互斥锁允许这个变
+量可以在不同的线程中设置和检测。</p>
+<p>通常，pthread_cond_wait只是唤醒等待某个条件变量的一个线程。如果需要唤醒所有等待某个条件变量的线程，需要调用：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">pthread_cond_broadcast</span><span class="w"> </span><span class="p">(</span><span class="n">pthread_cond_t</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">cptr</span><span class="p">);</span>
+</code></pre></div>
+<p>默认情况下面，阻塞的线程会一直等待，知道某个条件变量为真。如果想设置最大的阻塞时间可以调用：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">pthread_cond_timedwait</span><span class="w"> </span><span class="p">(</span><span class="n">pthread_cond_t</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">cptr</span><span class="p">,</span><span class="w"> </span><span class="n">pthread_mutex_t</span><span class="w"> </span><span class="o">*</span><span class="n">mptr</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">timespec</span><span class="w"> </span><span class="o">*</span><span class="n">abstime</span><span class="p">);</span>
+</code></pre></div>
+<p>如果时间到了，条件变量还没有为真，仍然返回，返回值为<code>ETIME。</code></p>
+<h2>6、试题最终代码</h2>
+<p>通过前面的介绍，我们可以轻松的写出代码了，如下所示：</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/*</span>
+<span class="cm"> 是否熟悉POSIX多线程编程技术？如熟悉，编写程序完成如下功能：</span>
+<span class="cm">  1）有一int型全局变量g_Flag初始值为0；</span>
+<span class="cm">  2）在主线称中起动线程1，打印&quot;this is thread1&quot;，并将g_Flag设置为1</span>
+<span class="cm">  3）在主线称中启动线程2，打印&quot;this is thread2&quot;，并将g_Flag设置为2</span>
+<span class="cm">  4）线程序1需要在线程2退出后才能退出</span>
+<span class="cm">  5）主线程在检测到g_Flag从1变为2，或者从2变为1的时候退出</span>
+<span class="cm">*/</span>
+<span class="cp">#include</span><span class="cpf">&lt;stdio.h&gt;</span>
+<span class="cp">#include</span><span class="cpf">&lt;stdlib.h&gt;</span>
+<span class="cp">#include</span><span class="cpf">&lt;pthread.h&gt;</span>
+<span class="cp">#include</span><span class="cpf">&lt;errno.h&gt;</span>
+<span class="cp">#include</span><span class="cpf">&lt;unistd.h&gt;</span>
+
+<span class="k">typedef</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">fun</span><span class="p">)(</span><span class="kt">void</span><span class="o">*</span><span class="p">);</span>
+<span class="kt">int</span><span class="w"> </span><span class="n">g_Flag</span><span class="o">=</span><span class="mi">0</span><span class="p">;</span>
+
+<span class="k">static</span><span class="w"> </span><span class="n">pthread_mutex_t</span><span class="w"> </span><span class="n">mutex</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">PTHREAD_MUTEX_INITIALIZER</span><span class="p">;</span>
+<span class="k">static</span><span class="w"> </span><span class="n">pthread_cond_t</span><span class="w"> </span><span class="n">cond</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">PTHREAD_COND_INITIALIZER</span><span class="p">;</span>
+
+<span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="nf">thread1</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">);</span>
+<span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="nf">thread2</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">);</span>
+
+<span class="cm">/*</span>
+<span class="cm"> *  when program is started, a single thread is created, called the initial thread or main thread.</span>
+<span class="cm"> *  Additional threads are created by pthread_create.</span>
+<span class="cm"> *  So we just need to create two thread in main().</span>
+<span class="cm"> */</span>
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="o">**</span><span class="w"> </span><span class="n">argv</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;enter main</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="n">pthread_t</span><span class="w"> </span><span class="n">tid1</span><span class="p">,</span><span class="w"> </span><span class="n">tid2</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">rc1</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">rc2</span><span class="o">=</span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="n">rc2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pthread_create</span><span class="p">(</span><span class="o">&amp;</span><span class="n">tid2</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="n">thread2</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="p">(</span><span class="n">rc2</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">        </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;%s: %d</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="n">__func__</span><span class="p">,</span><span class="w"> </span><span class="n">strerror</span><span class="p">(</span><span class="n">rc2</span><span class="p">));</span>
+<span class="w">    </span><span class="n">rc1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pthread_create</span><span class="p">(</span><span class="o">&amp;</span><span class="n">tid1</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="n">thread1</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">tid2</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="p">(</span><span class="n">rc1</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">        </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;%s: %d</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="n">__func__</span><span class="p">,</span><span class="w"> </span><span class="n">strerror</span><span class="p">(</span><span class="n">rc1</span><span class="p">));</span>
+<span class="w">    </span><span class="n">pthread_cond_wait</span><span class="p">(</span><span class="o">&amp;</span><span class="n">cond</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">mutex</span><span class="p">);</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;leave main</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span><span class="w">    </span>
+<span class="p">}</span>
+
+<span class="cm">/*</span>
+<span class="cm"> * thread1() will be execute by thread1, after pthread_create()</span>
+<span class="cm"> * it will set g_Flag = 1;</span>
+<span class="cm"> */</span>
+<span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="nf">thread1</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">arg</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;enter thread1</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;this is thread1, g_Flag: %d, thread id is %u</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="n">g_Flag</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="n">pthread_self</span><span class="p">());</span>
+<span class="w">    </span><span class="n">pthread_mutex_lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">mutex</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="p">(</span><span class="n">g_Flag</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span>
+<span class="w">        </span><span class="n">pthread_cond_signal</span><span class="p">(</span><span class="o">&amp;</span><span class="n">cond</span><span class="p">);</span>
+<span class="w">    </span><span class="n">g_Flag</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;this is thread1, g_Flag: %d, thread id is %u</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="n">g_Flag</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="n">pthread_self</span><span class="p">());</span>
+<span class="w">    </span><span class="n">pthread_mutex_unlock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">mutex</span><span class="p">);</span>
+<span class="w">    </span><span class="n">pthread_join</span><span class="p">(</span><span class="o">*</span><span class="p">(</span><span class="n">pthread_t</span><span class="o">*</span><span class="p">)</span><span class="n">arg</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">);</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;leave thread1</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="n">pthread_exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="cm">/*</span>
+<span class="cm"> * thread2() will be execute by thread2, after pthread_create()</span>
+<span class="cm"> * it will set g_Flag = 2;</span>
+<span class="cm"> */</span>
+<span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="nf">thread2</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">arg</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;enter thread2</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;this is thread2, g_Flag: %d, thread id is %u</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="n">g_Flag</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="n">pthread_self</span><span class="p">());</span>
+<span class="w">    </span><span class="n">pthread_mutex_lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">mutex</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="p">(</span><span class="n">g_Flag</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span>
+<span class="w">        </span><span class="n">pthread_cond_signal</span><span class="p">(</span><span class="o">&amp;</span><span class="n">cond</span><span class="p">);</span>
+<span class="w">    </span><span class="n">g_Flag</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;this is thread2, g_Flag: %d, thread id is %u</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="n">g_Flag</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="n">pthread_self</span><span class="p">());</span>
+<span class="w">    </span><span class="n">pthread_mutex_unlock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">mutex</span><span class="p">);</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;leave thread2</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="n">pthread_exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>编译运行可以得到符合要求的结果！</p>
+<p>----这篇日志就算是献给我自己生日的礼物！</p>
+<p>加油，努力，不要放弃！</p>
+<hr>
+
+
+
+
+<h4><p>原文出处：<a href='http://www.cnblogs.com/skynet/archive/2010/12/12/1903949.html' target='blank'>Linux Socket编程（不限Linux）</a></p></h4>
+<p>"一切皆Socket！"</p>
+<p>话虽些许夸张，但是事实也是，现在的网络编程几乎都是用的socket。</p>
+<p>----有感于实际编程和开源项目研究。</p>
+<p>我们深谙信息交流的价值，那网络中进程之间如何通信，如我们每天打开浏览器浏览网页时，浏览器的进程怎么与web服务器通信的？当你用QQ聊天时，QQ进程怎么与服务
+器或你好友所在的QQ进程通信？这些都得靠socket？那什么是socket？socket的类型有哪些？还有socket的基本函数，这些都是本文想介绍的。本文
+的主要内容如下：</p>
+<ul>
+<li><p>1、网络中进程之间如何通信？</p>
+</li>
+<li><p>2、Socket是什么？</p>
+</li>
+<li><p>3、socket的基本操作</p>
+<ul>
+<li><p>3.1、socket()函数</p>
+</li>
+<li><p>3.2、bind()函数</p>
+</li>
+<li><p>3.3、listen()、connect()函数</p>
+</li>
+<li><p>3.4、accept()函数</p>
+</li>
+<li><p>3.5、read()、write()函数等</p>
+</li>
+<li><p>3.6、close()函数</p>
+</li>
+</ul>
+</li>
+<li><p>4、socket中TCP的三次握手建立连接详解</p>
+</li>
+<li><p>5、socket中TCP的四次握手释放连接详解</p>
+</li>
+<li><p>6、一个例子（实践一下）</p>
+</li>
+<li><p>7、留下一个问题，欢迎大家回帖回答！！！</p>
+</li>
+</ul>
+<h2>1、网络中进程之间如何通信？</h2>
+<p>本地的进程间通信（IPC）有很多种方式，但可以总结为下面4类：</p>
+<ul>
+<li><p>消息传递（管道、FIFO、消息队列）</p>
+</li>
+<li><p>同步（互斥量、条件变量、读写锁、文件和写记录锁、信号量）</p>
+</li>
+<li><p>共享内存（匿名的和具名的）</p>
+</li>
+<li><p>远程过程调用（Solaris门和Sun RPC）</p>
+</li>
+</ul>
+<p>但这些都不是本文的主题！我们要讨论的是网络中进程之间如何通信？首要解决的问题是如何唯一标识一个进程，否则通信无从谈起！在本地可以通过进程PID来唯一标识一个进程，但是在网络中这是行不通的。其实TCP/IP协议族已经帮我们解决了这个问题，网络层的"<strong>ip地址</strong>"可以唯一标识网络中的主机，而传输层的"<strong>协议+端口</strong>"可以唯一标识主机中的应用程序（进程）。这样利用三元组（ip地址，协议，端口）就可以标识网络的进程了，网络中的进程通信就可以利用这个标志与其它进程进行交互。</p>
+<p>使用TCP/IP协议的应用程序通常采用应用编程接口：UNIX  BSD的套接字（socket）和UNIX System V的TLI（已经被淘汰），来实现网络进程之间的通信。就目前而言，几乎所有的应用程序都是采用socket，而现在又是网络时代，网络中进程通信是无处不在，这就是我为什么说"一切皆socket"。</p>
+<h2>2、什么是Socket？</h2>
+<p>上面我们已经知道网络中的进程是通过socket来通信的，那什么是socket呢？socket起源于Unix，而Unix/Linux基本哲学之一就是"一切皆文件"，都可以用"打开open -&gt; 读写write/read -&gt; 关闭close"模式来操作。我的理解就是Socket就是该模式的一个实现，socket即是一种特殊的文件，一些socket函数就是对其进行的操作（读/写IO、打开、关闭），这些函数我们在后面进行介绍。</p>
+<blockquote><h4>socket一词的起源</h4>
+</blockquote>
+<p>&gt;</p>
+<blockquote><p>在组网领域的首次使用是在1970年2月12日发布的文献<a href="http://datatracker.ietf.org/doc/rfc33/">IETF RFC33</a>中发现的，撰写者为Stephen Carr、Steve
+Crocker和Vint Cerf。根据美国计算机历史博物馆的记载，Croker写道："命名空间的元素都可称为套接字接口。一个套接字接口构成一个连接的一端，而一个连接可完全由一对套接字接口规定。"计算机历史博物馆补充道："这比BSD的套接字接口定义早了大约12年。"</p>
+</blockquote>
+<h2>3、socket的基本操作</h2>
+<p>既然socket是"open--write/read--close"模式的一种实现，那么socket就提供了这些操作对应的函数接口。下面以TCP为例，介绍几个基本的socket接口函数。</p>
+<h3>3.1、socket()函数</h3>
+<div class="highlight"><pre><code><span></span><span class="kt">int</span><span class="w"> </span><span class="o">**</span><span class="n">socket</span><span class="o">**</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">domain</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">type</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">protocol</span><span class="p">);</span>
+</code></pre></div>
+<p>socket函数对应于普通文件的打开操作。普通文件的打开操作返回一个文件描述字，而<strong>socket()</strong>用于创建一个socket描述符（socket descriptor），它唯一标识一个socket。这个socket描述字跟文件描述字一样，后续的操作都有用到它，把它作为参数，通过它来进行一些读写操作。</p>
+<p>正如可以给fopen的传入不同参数值，以打开不同的文件。创建socket的时候，也可以指定不同的参数创建不同的socket描述符，socket函数的三个参数分别为：</p>
+<ul>
+<li>domain：即协议域，又称为协议族（family）。常用的协议族有，AF_INET、AF_INET6、AF_LOCAL（或称AF_UNIX，Unix域socket）、AF_ROUTE等等。协议族决定了socket的地址类型，在通信中必须采用对应的地址，如AF_INET决定了要用ipv4地址（32位的）与端口号（16位的）的组合、AF_UNIX决定了要用一个绝对路径名作为地址。 </li>
+<li>type：指定socket类型。常用的socket类型有，SOCK_STREAM、SOCK_DGRAM、SOCK_RAW、SOCK_PACKET、SOCK_SEQPACKET等等（socket的类型有哪些？）。 </li>
+<li>protocol：故名思意，就是指定协议。常用的协议有，IPPROTO_TCP、IPPTOTO_UDP、IPPROTO_SCTP、IPPROTO_TIPC等，它们分别对应TCP传输协议、UDP传输协议、STCP传输协议、TIPC传输协议（这个协议我将会单独开篇讨论！）。 </li>
+</ul>
+<p>注意：并不是上面的type和protocol可以随意组合的，如SOCK_STREAM不可以跟IPPROTO_UDP组合。当protocol为0时，会自动选择type类型对应的默认协议。</p>
+<p>当我们调用<strong>socket</strong>创建一个socket时，返回的socket描述字它存在于协议族（address family，AF_XXX）空间中，但没有一个具体的地址。如果想要给它赋值一个地址，就必须调用bind()函数，否则就当调用connect()、listen()时系统会自动随机分配一个端口。</p>
+<h3>3.2、bind()函数</h3>
+<p>正如上面所说bind()函数把一个地址族中的特定地址赋给socket。例如对应AF_INET、AF_INET6就是把一个ipv4或ipv6地址和端口号组合赋给socket。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">bind</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">sockfd</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr</span><span class="w"> </span><span class="o">*</span><span class="n">addr</span><span class="p">,</span><span class="w"> </span><span class="kt">socklen_t</span><span class="w"> </span><span class="n">addrlen</span><span class="p">);</span>
+</code></pre></div>
+<p>函数的三个参数分别为：</p>
+<ul>
+<li>sockfd：即socket描述字，它是通过socket()函数创建了，唯一标识一个socket。bind()函数就是将给这个描述字绑定一个名字。 </li>
+<li><p>addr：一个const struct sockaddr *指针，指向要绑定给sockfd的协议地址。这个地址结构根据地址创建socket时的地址协议族的不同而不同，如ipv4对应的是：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr_in</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">sa_family_t</span><span class="w">    </span><span class="n">sin_family</span><span class="p">;</span><span class="w"> </span><span class="cm">/* address family: AF_INET */</span>
+<span class="w">    </span><span class="n">in_port_t</span><span class="w">      </span><span class="n">sin_port</span><span class="p">;</span><span class="w">   </span><span class="cm">/* port in network byte order */</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">in_addr</span><span class="w"> </span><span class="n">sin_addr</span><span class="p">;</span><span class="w">   </span><span class="cm">/* internet address */</span>
+<span class="p">};</span>
+
+<span class="cm">/* Internet address. */</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">in_addr</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w">       </span><span class="n">s_addr</span><span class="p">;</span><span class="w">     </span><span class="cm">/* address in network byte order */</span>
+<span class="p">};</span>
+</code></pre></div>
+</li>
+</ul>
+<p>ipv6对应的是：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr_in6</span><span class="w"> </span><span class="p">{</span><span class="w"> </span>
+<span class="w">    </span><span class="n">sa_family_t</span><span class="w">     </span><span class="n">sin6_family</span><span class="p">;</span><span class="w">   </span><span class="cm">/* AF_INET6 */</span><span class="w"> </span>
+<span class="w">    </span><span class="n">in_port_t</span><span class="w">       </span><span class="n">sin6_port</span><span class="p">;</span><span class="w">     </span><span class="cm">/* port number */</span><span class="w"> </span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w">        </span><span class="n">sin6_flowinfo</span><span class="p">;</span><span class="w"> </span><span class="cm">/* IPv6 flow information */</span><span class="w"> </span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">in6_addr</span><span class="w"> </span><span class="n">sin6_addr</span><span class="p">;</span><span class="w">     </span><span class="cm">/* IPv6 address */</span><span class="w"> </span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w">        </span><span class="n">sin6_scope_id</span><span class="p">;</span><span class="w"> </span><span class="cm">/* Scope ID (new in 2.4) */</span><span class="w"> </span>
+<span class="p">};</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">in6_addr</span><span class="w"> </span><span class="p">{</span><span class="w"> </span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">char</span><span class="w">   </span><span class="n">s6_addr</span><span class="p">[</span><span class="mi">16</span><span class="p">];</span><span class="w">   </span><span class="cm">/* IPv6 address */</span><span class="w"> </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>Unix域对应的是：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#define UNIX_PATH_MAX    108</span>
+
+<span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr_un</span><span class="w"> </span><span class="p">{</span><span class="w"> </span>
+<span class="w">    </span><span class="n">sa_family_t</span><span class="w"> </span><span class="n">sun_family</span><span class="p">;</span><span class="w">               </span><span class="cm">/* AF_UNIX */</span><span class="w"> </span>
+<span class="w">    </span><span class="kt">char</span><span class="w">        </span><span class="n">sun_path</span><span class="p">[</span><span class="n">UNIX_PATH_MAX</span><span class="p">];</span><span class="w">  </span><span class="cm">/* pathname */</span><span class="w"> </span>
+<span class="p">};</span>
+</code></pre></div>
+<ul>
+<li>addrlen：对应的是地址的长度。 </li>
+</ul>
+<p>通常服务器在启动的时候都会绑定一个众所周知的地址（如ip地址+端口号），用于提供服务，客户就可以通过它来接连服务器；而客户端就不用指定，有系统自动分配一个端口号和自身的ip地址组合。这就是为什么通常服务器端在listen之前会调用bind()，而客户端就不会调用，而是在connect()时由系统随机生成一个。</p>
+<blockquote><h4>网络字节序与主机字节序</h4>
+</blockquote>
+<p>&gt;</p>
+<blockquote><p><strong>主机字节序</strong>就是我们平常说的大端和小端模式：不同的CPU有不同的字节序类型，这些字节序是指整数在内存中保存的顺序，这个叫做主机序
+。引用标准的Big-Endian和Little-Endian的定义如下：</p>
+</blockquote>
+<p>&gt;</p>
+<blockquote><p>　　a) Little-Endian就是低位字节排放在内存的低地址端，高位字节排放在内存的高地址端。</p>
+</blockquote>
+<p>&gt;</p>
+<blockquote><p>　　b) Big-Endian就是高位字节排放在内存的低地址端，低位字节排放在内存的高地址端。</p>
+</blockquote>
+<p>&gt;</p>
+<blockquote><p><strong>网络字节序</strong>：4个字节的32 bit值以下面的次序传输：首先是0～7bit，其次8～15bit，然后16～23bit，最后是24~31bit。这种传输次序称作大端字节序。<strong>由于TCP/IP首部中所有的二进制整数在网络中传输时都要求以这种次序，因此它又称作网络字节序。</strong>字节序，顾名思义字节的顺序，就是大于一个字节类型的数据在内存中的存放顺序，一个字节的数据没有顺序的问题了。</p>
+</blockquote>
+<p>&gt;</p>
+<blockquote><p>所以：在将一个地址绑定到socket的时候，请先将主机字节序转换成为网络字节序，而不要假定主机字节序跟网络字节序一样使用的是Big-Endian。由于这个问题曾引发过血案！公司项目代码中由于存在这个问题，导致了很多莫名其妙的问题，所以请谨记对主机字节序不要做任何假定，务必将其转化为网络字节序再赋给socke
+t。</p>
+</blockquote>
+<h3>3.3、listen()、connect()函数</h3>
+<p>如果作为一个服务器，在调用socket()、bind()之后就会调用listen()来监听这个socket，如果客户端这时调用connect()发出连接请求，服务器端就会接收到这个请求。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">listen</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">sockfd</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">backlog</span><span class="p">);</span>
+<span class="kt">int</span><span class="w"> </span><span class="nf">connect</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">sockfd</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr</span><span class="w"> </span><span class="o">*</span><span class="n">addr</span><span class="p">,</span><span class="w"> </span><span class="kt">socklen_t</span><span class="w"> </span><span class="n">addrlen</span><span class="p">);</span>
+</code></pre></div>
+<p>listen函数的第一个参数即为要监听的socket描述字，第二个参数为相应socket可以排队的最大连接个数。socket()函数创建的socket默认是一个主动类型的，listen函数将socket变为被动类型的，等待客户的连接请求。</p>
+<p>connect函数的第一个参数即为客户端的socket描述字，第二参数为服务器的socket地址，第三个参数为socket地址的长度。客户端通过调用connect函数来建立与TCP服务器的连接。</p>
+<h3>3.4、accept()函数</h3>
+<p>TCP服务器端依次调用socket()、bind()、listen()之后，就会监听指定的socket地址了。TCP客户端依次调用socket()、connect()之后就想TCP服务器发送了一个连接请求。TCP服务器监听到这个请求之后，就会调用accept()函数取接收请求，这样连接就建立好了。之后就可以开始网络I/O操作了，即类同于普通文件的读写I/O操作。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">accept</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">sockfd</span><span class="p">,</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr</span><span class="w"> </span><span class="o">*</span><span class="n">addr</span><span class="p">,</span><span class="w"> </span><span class="kt">socklen_t</span><span class="w"> </span><span class="o">*</span><span class="n">addrlen</span><span class="p">);</span>
+</code></pre></div>
+<p>accept函数的第一个参数为服务器的socket描述字，第二个参数为指向struct sockaddr *的指针，用于返回客户端的协议地址，第三个参数为协议地址的长度。如果accpet成功，那么其返回值是由内核自动生成的一个全新的描述字，代表与返回客户的TCP连接。</p>
+<p>注意：accept的第一个参数为服务器的socket描述字，是服务器开始调用socket()函数生成的，称为监听socket描述字；而accept函数返回的是已连接的socket描述字。一个服务器通常通常仅仅只创建一个监听socket描述字，它在该服务器的生命周期内一直存在。内核为每个由服务器进程接受的客户连接
+创建了一个已连接socket描述字，当服务器完成了对某个客户的服务，相应的已连接socket描述字就被关闭。</p>
+<h3>3.5、read()、write()等函数</h3>
+<p>万事具备只欠东风，至此服务器与客户已经建立好连接了。可以调用网络I/O进行读写操作了，即实现了网咯中不同进程之间的通信！网络I/O操作有下面几组：</p>
+<ul>
+<li>read()/write() </li>
+<li>recv()/send() </li>
+<li>readv()/writev() </li>
+<li>recvmsg()/sendmsg()</li>
+<li>recvfrom()/sendto()</li>
+</ul>
+<p>我推荐使用recvmsg()/sendmsg()函数，这两个函数是最通用的I/O函数，实际上可以把上面的其它函数都替换成这两个函数。它们的声明如下：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;unistd.h&gt;</span>
+
+<span class="kt">ssize_t</span><span class="w"> </span><span class="nf">read</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">fd</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">count</span><span class="p">);</span>
+<span class="kt">ssize_t</span><span class="w"> </span><span class="nf">write</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">fd</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">count</span><span class="p">);</span>
+
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;sys/types.h&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;sys/socket.h&gt;</span>
+
+<span class="kt">ssize_t</span><span class="w"> </span><span class="nf">send</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">sockfd</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">len</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">flags</span><span class="p">);</span>
+<span class="kt">ssize_t</span><span class="w"> </span><span class="nf">recv</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">sockfd</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">len</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">flags</span><span class="p">);</span>
+<span class="kt">ssize_t</span><span class="w"> </span><span class="nf">sendto</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">sockfd</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">len</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">flags</span><span class="p">,</span>
+<span class="w">              </span><span class="k">const</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr</span><span class="w"> </span><span class="o">*</span><span class="n">dest_addr</span><span class="p">,</span><span class="w"> </span><span class="kt">socklen_t</span><span class="w"> </span><span class="n">addrlen</span><span class="p">);</span>
+<span class="kt">ssize_t</span><span class="w"> </span><span class="nf">recvfrom</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">sockfd</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">len</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">flags</span><span class="p">,</span>
+<span class="w">                </span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr</span><span class="w"> </span><span class="o">*</span><span class="n">src_addr</span><span class="p">,</span><span class="w"> </span><span class="kt">socklen_t</span><span class="w"> </span><span class="o">*</span><span class="n">addrlen</span><span class="p">);</span>
+<span class="kt">ssize_t</span><span class="w"> </span><span class="nf">sendmsg</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">sockfd</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">msghdr</span><span class="w"> </span><span class="o">*</span><span class="n">msg</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">flags</span><span class="p">);</span>
+<span class="kt">ssize_t</span><span class="w"> </span><span class="nf">recvmsg</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">sockfd</span><span class="p">,</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">msghdr</span><span class="w"> </span><span class="o">*</span><span class="n">msg</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">flags</span><span class="p">);</span>
+</code></pre></div>
+<p>read函数是负责从fd中读取内容.当读成功时，read返回实际所读的字节数，如果返回的值是0表示已经读到文件的结束了，小于0表示出现了错误。如果错误为EINTR说明读是由中断引起的，如果是ECONNREST表示网络连接出了问题。</p>
+<p>write函数将buf中的nbytes字节内容写入文件描述符fd.成功时返回写的字节数。失败时返回-1，并设置errno变量。 在网络程序中，当我们向套接字文件描述符写时有俩种可能。1)write的返回值大于0，表示写了部分或者是全部的数据。2)返回的值小于0，此时出现了错误。我们要根据错误类型来处理。如果错误
+为EINTR表示在写的时候出现了中断错误。如果为EPIPE表示网络连接出现了问题(对方已经关闭了连接)。</p>
+<p>其它的我就不一一介绍这几对I/O函数了，具体参见man文档或者baidu、Google，下面的例子中将使用到send/recv。</p>
+<h3>3.6、close()函数</h3>
+<p>在服务器与客户端建立连接之后，会进行一些读写操作，完成了读写操作就要关闭相应的socket描述字，好比操作完打开的文件要调用fclose关闭打开的文件。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;unistd.h&gt;</span>
+<span class="kt">int</span><span class="w"> </span><span class="nf">close</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">fd</span><span class="p">);</span>
+</code></pre></div>
+<p>close一个TCP socket的缺省行为时把该socket标记为以关闭，然后立即返回到调用进程。该描述字不能再由调用进程使用，也就是说不能再作为read或write的第一个参数。</p>
+<p>注意：close操作只是使相应socket描述字的引用计数-1，只有当引用计数为0的时候，才会触发TCP客户端向服务器发送终止连接请求。</p>
+<h2>4、socket中TCP的三次握手建立连接详解</h2>
+<p>我们知道tcp建立连接要进行"三次握手"，即交换三个分组。大致流程如下：</p>
+<ul>
+<li>客户端向服务器发送一个SYN J </li>
+<li>服务器向客户端响应一个SYN K，并对SYN J进行确认ACK J+1 </li>
+<li>客户端再想服务器发一个确认ACK K+1 </li>
+</ul>
+<p>只有就完了三次握手，但是这个三次握手发生在socket的那几个函数中呢？请看下图：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/201012122157476286.png" alt="image"></p>
+<p>图1、socket中发送的TCP三次握手</p>
+<p>从图中可以看出，当客户端调用connect时，触发了连接请求，向服务器发送了SYN J包，这时connect进入阻塞状态；服务器监听到连接请求，即收到SYNJ包，调用accept函数接收请求向客户端发送SYN K ，ACK J+1，这时accept进入阻塞状态；客户端收到服务器的SYN K ，ACKJ+1之后，这时connect返回，并对SYN K进行确认；服务器收到ACK K+1时，accept返回，至此三次握手完毕，连接建立。</p>
+<blockquote><p>总结：客户端的connect在三次握手的第二个次返回，而服务器端的accept在三次握手的第三次返回。</p>
+</blockquote>
+<h2>5、socket中TCP的四次握手释放连接详解</h2>
+<p>上面介绍了socket中TCP的三次握手建立过程，及其涉及的socket函数。现在我们介绍socket中的四次握手释放连接的过程，请看下图：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/201012122157494693.png" alt="image"></p>
+<p>图2、socket中发送的TCP四次握手</p>
+<p>图示过程如下：</p>
+<ul>
+<li><p>某个应用进程首先调用close主动关闭连接，这时TCP发送一个FIN M；</p>
+</li>
+<li><p>另一端接收到FIN M之后，执行被动关闭，对这个FIN进行确认。它的接收也作为文件结束符传递给应用进程，因为FIN的接收意味着应用进程在相应的连接上再也接收不到额外数据；</p>
+</li>
+<li><p>一段时间之后，接收到文件结束符的应用进程调用close关闭它的socket。这导致它的TCP也发送一个FIN N；</p>
+</li>
+<li><p>接收到这个FIN的源发送端TCP对它进行确认。</p>
+</li>
+</ul>
+<p>这样每个方向上都有一个FIN和ACK。</p>
+<h2>6、一个例子（实践一下）</h2>
+<p>说了这么多了，动手实践一下。下面编写一个简单的服务器、客户端（使用TCP）----服务器端一直监听本机的6666号端口，如果收到连接请求，将接收请求并接收客户端发来的消息；客户端与服务器端建立连接并发送一条消息。</p>
+<p>服务器端代码：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="cpf">&lt;stdio.h&gt;</span><span class="c1">  </span>
+<span class="cp">#include</span><span class="cpf">&lt;stdlib.h&gt;</span><span class="c1">  </span>
+<span class="cp">#include</span><span class="cpf">&lt;string.h&gt;</span><span class="c1">  </span>
+<span class="cp">#include</span><span class="cpf">&lt;errno.h&gt;</span><span class="c1">  </span>
+<span class="cp">#include</span><span class="cpf">&lt;sys/types.h&gt;</span><span class="c1">  </span>
+<span class="cp">#include</span><span class="cpf">&lt;sys/socket.h&gt;</span><span class="c1">  </span>
+<span class="cp">#include</span><span class="cpf">&lt;netinet/in.h&gt;</span><span class="c1">  </span>
+
+<span class="cp">#define MAXLINE 4096  </span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="o">**</span><span class="w"> </span><span class="n">argv</span><span class="p">)</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w">    </span><span class="n">listenfd</span><span class="p">,</span><span class="w"> </span><span class="n">connfd</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr_in</span><span class="w">     </span><span class="n">servaddr</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">char</span><span class="w">    </span><span class="n">buff</span><span class="p">[</span><span class="mi">4096</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w">     </span><span class="n">n</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">    </span><span class="k">if</span><span class="p">(</span><span class="w"> </span><span class="p">(</span><span class="n">listenfd</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">socket</span><span class="p">(</span><span class="n">AF_INET</span><span class="p">,</span><span class="w"> </span><span class="n">SOCK_STREAM</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">))</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">-1</span><span class="w"> </span><span class="p">){</span><span class="w">  </span>
+<span class="w">        </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;create socket error: %s(errno: %d)</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="n">strerror</span><span class="p">(</span><span class="n">errno</span><span class="p">),</span><span class="n">errno</span><span class="p">);</span><span class="w">  </span>
+<span class="w">        </span><span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">    </span><span class="n">memset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">servaddr</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">servaddr</span><span class="p">));</span><span class="w">  </span>
+<span class="w">    </span><span class="n">servaddr</span><span class="p">.</span><span class="n">sin_family</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">AF_INET</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">servaddr</span><span class="p">.</span><span class="n">sin_addr</span><span class="p">.</span><span class="n">s_addr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">htonl</span><span class="p">(</span><span class="n">INADDR_ANY</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="n">servaddr</span><span class="p">.</span><span class="n">sin_port</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">htons</span><span class="p">(</span><span class="mi">6666</span><span class="p">);</span><span class="w">  </span>
+
+<span class="w">    </span><span class="k">if</span><span class="p">(</span><span class="w"> </span><span class="n">bind</span><span class="p">(</span><span class="n">listenfd</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">servaddr</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">servaddr</span><span class="p">))</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">-1</span><span class="p">){</span><span class="w">  </span>
+<span class="w">        </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;bind socket error: %s(errno: %d)</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="n">strerror</span><span class="p">(</span><span class="n">errno</span><span class="p">),</span><span class="n">errno</span><span class="p">);</span><span class="w">  </span>
+<span class="w">        </span><span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">    </span><span class="k">if</span><span class="p">(</span><span class="w"> </span><span class="n">listen</span><span class="p">(</span><span class="n">listenfd</span><span class="p">,</span><span class="w"> </span><span class="mi">10</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">-1</span><span class="p">){</span><span class="w">  </span>
+<span class="w">        </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;listen socket error: %s(errno: %d)</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="n">strerror</span><span class="p">(</span><span class="n">errno</span><span class="p">),</span><span class="n">errno</span><span class="p">);</span><span class="w">  </span>
+<span class="w">        </span><span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;======waiting for client&#39;s request======</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">while</span><span class="p">(</span><span class="mi">1</span><span class="p">){</span><span class="w">  </span>
+<span class="w">        </span><span class="k">if</span><span class="p">(</span><span class="w"> </span><span class="p">(</span><span class="n">connfd</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">accept</span><span class="p">(</span><span class="n">listenfd</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr</span><span class="o">*</span><span class="p">)</span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">))</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">-1</span><span class="p">){</span><span class="w">  </span>
+<span class="w">            </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;accept socket error: %s(errno: %d)&quot;</span><span class="p">,</span><span class="n">strerror</span><span class="p">(</span><span class="n">errno</span><span class="p">),</span><span class="n">errno</span><span class="p">);</span><span class="w">  </span>
+<span class="w">            </span><span class="k">continue</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="p">}</span><span class="w">  </span>
+<span class="w">        </span><span class="n">n</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">recv</span><span class="p">(</span><span class="n">connfd</span><span class="p">,</span><span class="w"> </span><span class="n">buff</span><span class="p">,</span><span class="w"> </span><span class="n">MAXLINE</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w">  </span>
+<span class="w">        </span><span class="n">buff</span><span class="p">[</span><span class="n">n</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sc">&#39;\0&#39;</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;recv msg from client: %s</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">buff</span><span class="p">);</span><span class="w">  </span>
+<span class="w">        </span><span class="n">close</span><span class="p">(</span><span class="n">connfd</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">    </span><span class="n">close</span><span class="p">(</span><span class="n">listenfd</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>客户端代码：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="cpf">&lt;stdio.h&gt;</span><span class="c1">  </span>
+<span class="cp">#include</span><span class="cpf">&lt;stdlib.h&gt;</span><span class="c1">  </span>
+<span class="cp">#include</span><span class="cpf">&lt;string.h&gt;</span><span class="c1">  </span>
+<span class="cp">#include</span><span class="cpf">&lt;errno.h&gt;</span><span class="c1">  </span>
+<span class="cp">#include</span><span class="cpf">&lt;sys/types.h&gt;</span><span class="c1">  </span>
+<span class="cp">#include</span><span class="cpf">&lt;sys/socket.h&gt;</span><span class="c1">  </span>
+<span class="cp">#include</span><span class="cpf">&lt;netinet/in.h&gt;</span><span class="c1">  </span>
+
+<span class="cp">#define MAXLINE 4096  </span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="o">**</span><span class="w"> </span><span class="n">argv</span><span class="p">)</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">int</span><span class="w">    </span><span class="n">sockfd</span><span class="p">,</span><span class="w"> </span><span class="n">n</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">char</span><span class="w">    </span><span class="n">recvline</span><span class="p">[</span><span class="mi">4096</span><span class="p">],</span><span class="w"> </span><span class="n">sendline</span><span class="p">[</span><span class="mi">4096</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr_in</span><span class="w">    </span><span class="n">servaddr</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">    </span><span class="k">if</span><span class="p">(</span><span class="w"> </span><span class="n">argc</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">2</span><span class="p">){</span><span class="w">  </span>
+<span class="w">        </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;usage: ./client &lt;ipaddress&gt;</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w">  </span>
+<span class="w">        </span><span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">    </span><span class="k">if</span><span class="p">(</span><span class="w"> </span><span class="p">(</span><span class="n">sockfd</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">socket</span><span class="p">(</span><span class="n">AF_INET</span><span class="p">,</span><span class="w"> </span><span class="n">SOCK_STREAM</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">))</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">){</span><span class="w">  </span>
+<span class="w">        </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;create socket error: %s(errno: %d)</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">strerror</span><span class="p">(</span><span class="n">errno</span><span class="p">),</span><span class="n">errno</span><span class="p">);</span><span class="w">  </span>
+<span class="w">        </span><span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">    </span><span class="n">memset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">servaddr</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">servaddr</span><span class="p">));</span><span class="w">  </span>
+<span class="w">    </span><span class="n">servaddr</span><span class="p">.</span><span class="n">sin_family</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">AF_INET</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">servaddr</span><span class="p">.</span><span class="n">sin_port</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">htons</span><span class="p">(</span><span class="mi">6666</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="p">(</span><span class="w"> </span><span class="n">inet_pton</span><span class="p">(</span><span class="n">AF_INET</span><span class="p">,</span><span class="w"> </span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span><span class="w"> </span><span class="o">&amp;</span><span class="n">servaddr</span><span class="p">.</span><span class="n">sin_addr</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="mi">0</span><span class="p">){</span><span class="w">  </span>
+<span class="w">        </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;inet_pton error for %s</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]);</span><span class="w">  </span>
+<span class="w">        </span><span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">    </span><span class="k">if</span><span class="p">(</span><span class="w"> </span><span class="n">connect</span><span class="p">(</span><span class="n">sockfd</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">servaddr</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">servaddr</span><span class="p">))</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">){</span><span class="w">  </span>
+<span class="w">        </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;connect error: %s(errno: %d)</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="n">strerror</span><span class="p">(</span><span class="n">errno</span><span class="p">),</span><span class="n">errno</span><span class="p">);</span><span class="w">  </span>
+<span class="w">        </span><span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;send msg to server: </span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="n">fgets</span><span class="p">(</span><span class="n">sendline</span><span class="p">,</span><span class="w"> </span><span class="mi">4096</span><span class="p">,</span><span class="w"> </span><span class="n">stdin</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="p">(</span><span class="w"> </span><span class="n">send</span><span class="p">(</span><span class="n">sockfd</span><span class="p">,</span><span class="w"> </span><span class="n">sendline</span><span class="p">,</span><span class="w"> </span><span class="n">strlen</span><span class="p">(</span><span class="n">sendline</span><span class="p">),</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w">  </span>
+<span class="w">    </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;send msg error: %s(errno: %d)</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">strerror</span><span class="p">(</span><span class="n">errno</span><span class="p">),</span><span class="w"> </span><span class="n">errno</span><span class="p">);</span><span class="w">  </span>
+<span class="w">        </span><span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">    </span><span class="n">close</span><span class="p">(</span><span class="n">sockfd</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>当然上面的代码很简单，也有很多缺点，这就只是简单的演示socket的基本函数使用。其实不管有多复杂的网络程序，都使用的这些基本函数。上面的服务器使用的是迭代模式的，即只有处理完一个客户端请求才会去处理下一个客户端的请求，这样的服务器处理能力是很弱的，现实中的服务器都需要有并发处理能力！为了需要并发处理，服务器需要fork()一个新的进程或者线程去处理请求等。</p>
+<h2>7、动动手</h2>
+<p>留下一个问题，欢迎大家回帖回答！！！是否熟悉Linux下网络编程？如熟悉，编写如下程序完成如下功能：</p>
+<p>服务器端：</p>
+<p>接收地址192.168.100.2的客户端信息，如信息为"Client Query"，则打印"Receive Query"</p>
+<p>客户端：</p>
+<p>向地址192.168.100.168的服务器端顺序发送信息"Client Query test"，"Cleint Query"，"Client Query Quit"，然后退出。</p>
+<p>题目中出现的ip地址可以根据实际情况定。</p>
+<p>----本文只是介绍了简单的socket编程。</p>
+<p>更为复杂的需要自己继续深入。</p>
+<h5><a href="http://www.cnblogs.com/skynet/archive/2010/12/04/1881236.html">（unix domain socket）使用udp发送&gt;=128K的消息会报ENOBUFS的错误</a>（一个实际socket编程中遇到的问题，希望对你有帮助）</h5>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "Linux多线程编程（不限Linux）与Linux Socket编程（不限Linux）.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

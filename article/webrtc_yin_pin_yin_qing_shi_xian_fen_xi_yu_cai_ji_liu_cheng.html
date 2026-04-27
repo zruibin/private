@@ -1,0 +1,1153 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>WebRTC音频引擎实现分析与采集流程 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="WebRTC音频引擎实现分析与采集流程,C/C++,WebRTC,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="WebRTC音频引擎实现分析<br>WebRTC音频采集至发送流程（iOS版）<br>WebRTC音频AGC/AEC/NS各平台设置源码分析" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>WebRTC音频引擎实现分析与采集流程</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2020-04-02 20:51
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+<a href='../article/tag_webrtc.html' class='article_tag'>WebRTC</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://www.jianshu.com/p/5a8a91cd84ef' target='blank'>WebRTC音频引擎实现分析</a></p></h4>
+<p>WebRTC的音频引擎作为两大基础多媒体引擎之一，实现了音频数据的采集、前处理、编码、发送、接收、解码、混音、后处理、播放等一系列处理流程。本文在深入分析WebRTC源代码的基础上，学习并总结其音频引擎的实现框架和细节。</p>
+<h4>1. WebRTC音频引擎整体架构</h4>
+<p>WebRTC音频引擎的实现代码主要分布在如下几个源码目录中：</p>
+<div class="highlight"><pre><code><span></span><span class="n">webrtc</span><span class="o">/</span><span class="n">audio</span>
+<span class="n">webrtc</span><span class="o">/</span><span class="n">common_audio</span>
+<span class="n">webrtc</span><span class="o">/</span><span class="n">media</span><span class="o">/</span><span class="n">engine</span>
+<span class="n">webrtc</span><span class="o">/</span><span class="n">voice_engine</span>
+<span class="n">webrtc</span><span class="o">/</span><span class="n">module</span><span class="o">/</span><span class="n">audio_coding</span>
+<span class="n">webrtc</span><span class="o">/</span><span class="n">module</span><span class="o">/</span><span class="n">audio_conference_mixer</span>
+<span class="n">webrtc</span><span class="o">/</span><span class="n">module</span><span class="o">/</span><span class="n">audio_device</span>
+<span class="n">webrtc</span><span class="o">/</span><span class="n">module</span><span class="o">/</span><span class="n">audio_processing</span>
+</code></pre></div>
+<p>WebRTC音频引擎的整体架构如图1所示。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200402-205120-0.png" alt=""></p>
+<p>从整个WebRTC框架结构来看，音频引擎和和视频引擎都位于比较底层的位置，负责音视频数据的采集、编解码、渲染播放等工作。音视频引擎的上一层是多媒体引擎WebRtcMediaEngine2，是对底层音视频引擎VideoEngine的进一步高层抽象，由WebRtcVoiceEngine对VoiceEngine进行封装，WebRtcVideoEngine2对VideoEngine进行封装。</p>
+<p>在内部实现上，音频引擎VoiceEngineImpl通过一系列对象来实现音频处理，包括VoEAudioProcessingImpl、VoECodecImpl、VoENetworkImpl等等，每个对象负责具体某方面功能，例如VoEAudioProcessingImpl负责调用底层AudioProcessing模块对音频数据进行预处理。在这些功能对象中，比较重要的有VoEBaseImpl、SharedData和Channel。其中VoEBaseImpl是连接音频设备AudioDevice和音频引擎VoiceEngineImpl的纽带，是音频数据流水线上的重要一站；SharedData是一个聚合类，持有一系列重要对象；Channel则代表一路音频数据，负责大部分对该路数据的重要操作，包括音频数据的前处理、编解码、发送和接收、后处理、混音等等。</p>
+<p>从功能依赖上讲，VoiceEngineImpl依赖五个重要的底层功能模块：音频数据采集和播放AudioDeviceModule 、音频数据预处理AudioProcessing、音频数据编解码AudioCodingModule、接收端音频数据缓冲区NetEq、接收端混音AudioConferenceMixer。此外音频数据编解码还依赖一系列音频编解码器如G711、G722、Opus等等。在发送端，音频数据由AudioDevice采集得到，经过AudioProcessing预处理后，到达AudioCodingModule进行编码，然后由RTPRTCP模块发送到网络。在接收端，音频数据经过RTPRTCP模块接收后到达AudioCodingModule，存储在NetEq中进行抖动控制和错误消除，然后解码。解码后的数据经过AudioConferenceMixer进行混音，最终发送到AudioDeviceModule进行播放。</p>
+<h4>2. WebRTC音频引擎重要数据结构</h4>
+<p>本节在第一节的基础上，静态分析WebRTC音频引擎实现上的一些重要数据结构。为了便于理解，采用从高层到底层的顺序进行分析。</p>
+<p>WebRtcMediaEngine2在MediaEngine层对底层的音视频引擎进行封装，分别是WebRtcVoiceEngine和WebRtcVideoEngine2。而WebRtcVoiceEngine则封装了音频引擎层的VoiceEngineImpl对象。VoiceEngineImpl以多继承方式聚集一系列接口，包括SharedData、VoEAudioProcessingImpl、VoECodecImpl、VoENetworkImpl、VoEBaseImpl等等。</p>
+<p>SharedData是一个聚合类，内部包括ChannelManager、AudioDeviceModule、OutputMixer、TransmitMixer、AudioProcess等对象，大部分关于VoiceEngineImpl的操作最终都会经过SharedData委托给内部对象。在创建SharedData对象时，其构造函数会创建一个名为“VoiceProcessThread”的线程，该线程用以处理音频引擎的周期性事务。</p>
+<p>VoEBaseImpl是连接底层音频采集播放模块AudioDeviceModule和音频引擎内部音频通道Channel的重要纽带。它实现三个接口：VoEBase负责创建Channel、启动/停止音频数据的发送/接收；AudioTransport负责AudioDeviceModule模块和Channel之间数据传送，包括采集后的音频数据发送到Channel进行编码、从Channel拉取解码后的音频数据进行播放；AudioDeviceObserver负责把AudioDeviceModule工作过程中出现的错误和警告向上层报告。</p>
+<p>Channel是对一路音频数据及其处理过程的抽象，是VoiceEngineImpl中最重要的底层实现类，其继承并实现RtpData、RtpFeedback、FileCallback、Transport、PacketizationCallback、ACMVADCallback、MixerParticipant等多个接口，分别负责音频数据编码后回掉、发送到网络、接收后存储到NetEq缓冲区、播放前混音等一些列重要操作。在类内部， Channel包含的重要成员对象包括RtpReceiver、RtpRtcpModule、AudioCodingModule、CodecManager、OutputMixer、TransmitMixer、ProcessThread、AudioDeviceModule、VoiceEngineObserver、Transport、AudioProcessing、PacketRouter等等。</p>
+<p>AudioDeviceModule模块负责音频数据的采集和播放，是音频数据的发源地和目的地。其内部主要包含三个对象：AudioDeviceModule、AudioDeviceGeneric和AudioDeviceBuffer。AudioDeviceModule是对外接口类，负责对AudioDevice和AudioDeviceBuffer进行管理、设置和对音频数据进行传递。AudioDevice是平台相关的音频设备，它管理音频采集设备和播放设备，包括初始化、设置音频采集设备和播放设备、开始/停止设备、控制设备音量、设置设备的音频数据缓冲区，等等。在初始化阶段，AudioDevice创建采集线程和播放线程，用来执行采集任务和播放任务。AudioDeviceBuffer是音频数据缓冲区，负责临时存储和传递音频数据。</p>
+<p>AudioCodingModule模块负责音频数据的编解码，它由音频引擎层的Channel持有并调用。在内部，AudioCodingModul包含如下重要对象：AcmReceiver、AudioEncoder、AudioDecoder和NetEq，其中AcmReceiver负责接收音频数据并存储到NetEq中，NetEq负责音频数据的抖动消除和错误隐藏，AudioEncoder负责音频数据编码，AudioDecoder负责音频数据解码。WebRTC支持一系列音频编解码器，包括CNG、G711、G722、ilbc、isac、opus等等。数据编码完成后通过AudioPacketizationCallback接口回调到Channel进行下一步发送工作，数据解码完成后由Channel拉取进行下一步播放工作。</p>
+<p>Audio Processing模块实现音频数据的预处理操作，包括声学回声消除AEC、自动增益控制AGC、噪声抑制NS、语音活动检测VAD，等等。AudioProcessing聚合一系列子模块实现各种音频处理算法，其重要的对外接口由两个：ProcessStream()和ProcessReverseStream()，前者负责采集后编码前的音频数据的前处理，后者播放前解码后的音频数据的后处理。</p>
+<p>TransmitMixer用于发送端混音。OutputMixer用于接收端混音。OutputMixer在内部使用AudioConferenceMixer负责解码后音频数据的混音操作。</p>
+<h4>3. WebRTC音频引擎数据流分析</h4>
+<p>本节在前两节分析的基础上，动态分析WebRTC音频引擎的数据流，包括音频数据的采集、前处理、编码、发送、接收、缓存、解码、混音、后处理、播放。如图2所示。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200402-205120-1.png" alt=""></p>
+<p>图2 WebRTC音频引擎数据流.png</p>
+<h6>3.1 音频引擎创建及初始化</h6>
+<p>音频引擎的创建及初始化流程如图3所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200402-205120-2.png" alt=""></p>
+<p>图3 WebRTC音频引擎创建及初始化.png</p>
+<p>WebRTC音频引擎的创建从PeerConnectionFactory对象的创建及初始化开始，这个过程由WebRTC的应用程序发起，并在signal线程在进行，最终调用CreateMediaEngine_w()转到worker线程。在worker线程中，先创建WebRtcMediaEngine2，进而WebRtcVoiceEngine，最终创建VoiceEngineImpl。而最重要的初始化操作则VoEBaseImpl的Init()函数中完成。</p>
+<h6>3.2 音频数据的采集和编码</h6>
+<p>音频数据的采集是平台相关的，在此以Windows平台为例，整个采集和编码过程如图4所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200402-205120-3.png" alt=""></p>
+<p>图4 音频数据的采集和编码.png</p>
+<p>在Windows 7平台上，WebRTC默认使用Windows Core接口采集和播放音频数据。采集线程叫做<code>webrtc_core_audio_capture_thread</code>，线程入口是AudioDeviceWindowCore的CaptureAudio函数。该函数从麦克风中采集到音频数据后，存储到AudioDeviceBuffer中，并调用DeliverRecordedData()把音频数据向上推送到VoEBaseImpl对象中。VoEBaseImpl对象调用ProcessRecordedDataWithAPM()函数进行处理，首先创建AudioFrame对象并进行前处理，然后进行解复合和混音，最后数据到达Channel进行编码和发送。</p>
+<p>在Channel对象中，编码任务委托给AudioCodingModule对象，首先从AudioFrame中获取10ms的音频数据，然后调用具体的编码器如Opus进行编码。编码后的数据通过AudioPacketizationCallback接口的SendData()回到Channel对象进行下一步的RTP打包和发送过程。</p>
+<h4>3.3 音频数据的发送</h4>
+<p>音频数据在AudioCodingModule编码完成后，通过回调接口回到Channel对象进行下一步的RTP打包和发送过程，如图5所示。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200402-205120-4.png" alt=""></p>
+<p>图5 音频数据的发送.png</p>
+<p>Channel调用把数据发送给RtpRtcp模块，后者经过一系列的调用进行RTP打包后到达RtpSender对象。如果没有配置平滑发送线程PacedSender，则RtpSender直接调用SendPacketToNetwork()把数据发送到network线程。否则数据会先存储到PacedSender线程中，再由后者进行平滑发送，最终数据发送到network线程。</p>
+<h4>3.4 音频数据的接收</h4>
+<p>network线程从网络接收到音频数据后，交给worker线程进行下一步接收。Worker线程的工作流程如图6所示。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200402-205120-5.png" alt=""></p>
+<p>图6 音频数据的接收.png</p>
+<p>worker线程在收到网络数据后，通过BaseChannel的OnPacketReceived()接口向下传递，到达MediaEngine层的WebRtcVoiceMediaChannel，然后继续向下经过Call和AudioReceiveStream到达Channel的ReceivedRTPPacket()接口。Channel把数据推送到RtpRtcp模块进行RTP解包操作，得到纯音频数据，然后再经过Channel的OnReceivedPaylaodData()接口把数据推送到AudioCodingModule模块，最终经过AcmReceiver把数据存储在NetEq中，进行抖动消除和错误隐藏等操作。</p>
+<h6>3.5 音频数据的解码和播放</h6>
+<p>worker线程把接收到的音频数据存储到NetEq后，为播放线程提供数据源。播放线程具体负责音频数据解码和播放操作。Windows Core接口的播放线程名称为<code>webrtc_core_audio_render_thread</code>，其工作流程如图7所示。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200402-205120-6.png" alt=""></p>
+<p>图7 音频数据的解码和播放.png</p>
+<p>AudioDeviceWindowsCore设备向AudioDeviceBuffer请求音频数据，后者进一步向VoeBaseImpl请求数据，接下来主要操作都在GetPlayoutData()中进行：</p>
+<p>1）在AudioConferenceMixer中对所有活动Channel中的音频数据进行混音，每个Channel都作为混音的参与者。这包括获取解码后的音频数据(从AudioCodingModule模块中解码音频数据并返回)、对音频数据进行混音、得到最终音频数据并返回给OutputMixer。
+2）OutputMixer对混音后的音频数据执行AudioProcessing后处理操作。
+3）对后处理操作后的音频数据进行再混合和再采样。最终OutputMixer拿到最终的音频数据，交给VoEBaseImpl，并进一步向下交给AudioDeviceBuffer。AudioDeviceBuffer则把数据交给AudioDeviceWindowsCore进行播放操作。</p>
+<p>至此，我们完整分析了音频数据从采集到播放的全部过程。</p>
+<h4>4. 总结</h4>
+<p>本文在深入分析WebRTC关于音频引擎实现代码的基础上，首先给出了WebRTC音频引擎的整体框架，然后静态分析了其实现上的若干重要对象，最后完整分析了音频数
+据从采集到播放的完整流动过程。通过本文，对WebRTC有了更深入的认识和体会，为未来进一步学习打下坚实基础。</p>
+<hr>
+
+
+
+
+<h4><p>原文出处：<a href='https://www.jianshu.com/p/3254fbbc381c' target='blank'>WebRTC音频采集至发送流程（iOS版）</a></p></h4>
+<div class="highlight"><pre><code><span></span><span class="n">src</span><span class="o">/</span><span class="n">audio</span><span class="o">/</span><span class="n">audio_state</span><span class="p">.</span><span class="n">cc</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="n">AudioState</span><span class="o">::</span><span class="n">AddSendingStream</span><span class="p">(</span><span class="n">webrtc</span><span class="o">::</span><span class="n">AudioSendStream</span><span class="o">*</span><span class="w"> </span><span class="n">stream</span><span class="p">,</span>
+<span class="w">                                  </span><span class="kt">int</span><span class="w"> </span><span class="n">sample_rate_hz</span><span class="p">,</span>
+<span class="w">                                  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">num_channels</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">thread_checker_</span><span class="p">.</span><span class="n">CalledOnValidThread</span><span class="p">());</span>
+<span class="w">  </span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">properties</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sending_streams_</span><span class="p">[</span><span class="n">stream</span><span class="p">];</span>
+<span class="w">  </span><span class="n">properties</span><span class="p">.</span><span class="n">sample_rate_hz</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sample_rate_hz</span><span class="p">;</span>
+<span class="w">  </span><span class="n">properties</span><span class="p">.</span><span class="n">num_channels</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">num_channels</span><span class="p">;</span>
+<span class="w">  </span><span class="n">UpdateAudioTransportWithSendingStreams</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// Make sure recording is initialized; start recording if enabled.</span>
+<span class="w">  </span><span class="k">auto</span><span class="o">*</span><span class="w"> </span><span class="n">adm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">config_</span><span class="p">.</span><span class="n">audio_device_module</span><span class="p">.</span><span class="n">get</span><span class="p">();</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">adm</span><span class="o">-&gt;</span><span class="n">Recording</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">adm</span><span class="o">-&gt;</span><span class="n">InitRecording</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">recording_enabled_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">adm</span><span class="o">-&gt;</span><span class="n">StartRecording</span><span class="p">();</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">RTC_DLOG_F</span><span class="p">(</span><span class="n">LS_ERROR</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Failed to initialize recording.&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+
+
+<span class="n">src</span><span class="o">/</span><span class="n">media</span><span class="o">/</span><span class="n">engine</span><span class="o">/</span><span class="n">webrtcvoiceengine</span><span class="p">.</span><span class="n">cc</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="n">WebRtcVoiceEngine</span><span class="o">::</span><span class="n">Init</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="p">...</span>
+<span class="cp">#if defined(WEBRTC_INCLUDE_INTERNAL_AUDIO_DEVICE)</span>
+<span class="w">  </span><span class="c1">// No ADM supplied? Create a default one.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">adm_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">adm_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">AudioDeviceModule</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span>
+<span class="w">        </span><span class="n">webrtc</span><span class="o">::</span><span class="n">AudioDeviceModule</span><span class="o">::</span><span class="n">kPlatformDefaultAudio</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="cp">#endif  </span><span class="c1">// WEBRTC_INCLUDE_INTERNAL_AUDIO_DEVICE</span>
+<span class="w">  </span><span class="n">RTC_CHECK</span><span class="p">(</span><span class="n">adm</span><span class="p">());</span>
+<span class="w">  </span><span class="n">webrtc</span><span class="o">::</span><span class="n">adm_helpers</span><span class="o">::</span><span class="n">Init</span><span class="p">(</span><span class="n">adm</span><span class="p">());</span>
+<span class="w">  </span><span class="n">webrtc</span><span class="o">::</span><span class="n">apm_helpers</span><span class="o">::</span><span class="n">Init</span><span class="p">(</span><span class="n">apm</span><span class="p">());</span>
+
+<span class="w">  </span><span class="c1">// Set up AudioState.</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">webrtc</span><span class="o">::</span><span class="n">AudioState</span><span class="o">::</span><span class="n">Config</span><span class="w"> </span><span class="n">config</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">audio_mixer_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">config</span><span class="p">.</span><span class="n">audio_mixer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">audio_mixer_</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">config</span><span class="p">.</span><span class="n">audio_mixer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">AudioMixerImpl</span><span class="o">::</span><span class="n">Create</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">config</span><span class="p">.</span><span class="n">audio_processing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">apm_</span><span class="p">;</span>
+<span class="w">    </span><span class="n">config</span><span class="p">.</span><span class="n">audio_device_module</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">adm_</span><span class="p">;</span>
+<span class="w">    </span><span class="n">audio_state_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">AudioState</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span><span class="n">config</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Connect the ADM to our audio path.</span>
+<span class="w">  </span><span class="n">adm</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">RegisterAudioCallback</span><span class="p">(</span><span class="n">audio_state</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">audio_transport</span><span class="p">());</span>
+
+<span class="w">  </span><span class="c1">// Save the default AGC configuration settings. This must happen before</span>
+<span class="w">  </span><span class="c1">// calling ApplyOptions or the default will be overwritten.</span>
+<span class="w">  </span><span class="n">default_agc_config_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">apm_helpers</span><span class="o">::</span><span class="n">GetAgcConfig</span><span class="p">(</span><span class="n">apm</span><span class="p">());</span>
+
+<span class="w">  </span><span class="c1">// Set default engine options.</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">AudioOptions</span><span class="w"> </span><span class="n">options</span><span class="p">;</span>
+<span class="w">    </span><span class="n">options</span><span class="p">.</span><span class="n">echo_cancellation</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">    </span><span class="n">options</span><span class="p">.</span><span class="n">auto_gain_control</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">    </span><span class="n">options</span><span class="p">.</span><span class="n">noise_suppression</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">    </span><span class="n">options</span><span class="p">.</span><span class="n">highpass_filter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">    </span><span class="n">options</span><span class="p">.</span><span class="n">stereo_swapping</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="n">options</span><span class="p">.</span><span class="n">audio_jitter_buffer_max_packets</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">50</span><span class="p">;</span>
+<span class="w">    </span><span class="n">options</span><span class="p">.</span><span class="n">audio_jitter_buffer_fast_accelerate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="n">options</span><span class="p">.</span><span class="n">audio_jitter_buffer_min_delay_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="n">options</span><span class="p">.</span><span class="n">typing_detection</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">    </span><span class="n">options</span><span class="p">.</span><span class="n">experimental_agc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="n">options</span><span class="p">.</span><span class="n">extended_filter_aec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="n">options</span><span class="p">.</span><span class="n">delay_agnostic_aec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="n">options</span><span class="p">.</span><span class="n">experimental_ns</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="n">options</span><span class="p">.</span><span class="n">residual_echo_detector</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">error</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ApplyOptions</span><span class="p">(</span><span class="n">options</span><span class="p">);</span>
+<span class="w">    </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">error</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">initialized_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>WebRtcVoiceEngine</code>类必须定义了<code>HAVE_WEBRTC_VOICE</code>宏才会被用到。<br>
+<code>adm_</code>可以在<code>WebRtcVoiceEngine</code>的构造函数中由外部创建传进来，当<code>adm_</code>为空时且定义了<code>WEBRTC_INCLUDE_INTERNAL_AUDIO_DEVICE</code>宏时才使用内置的方法创建<code>adm_</code>。</p>
+<p><code>AudioLayer</code>的类型：</p>
+<div class="highlight"><pre><code><span></span><span class="k">enum</span><span class="w"> </span><span class="n">AudioLayer</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">kPlatformDefaultAudio</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kWindowsCoreAudio</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kWindowsCoreAudio2</span><span class="p">,</span><span class="w">  </span><span class="c1">// experimental</span>
+<span class="w">    </span><span class="n">kLinuxAlsaAudio</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kLinuxPulseAudio</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kAndroidJavaAudio</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kAndroidOpenSLESAudio</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kAndroidJavaInputAndOpenSLESOutputAudio</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kAndroidAAudioAudio</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kAndroidJavaInputAndAAudioOutputAudio</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kDummyAudio</span><span class="p">,</span>
+<span class="w">  </span><span class="p">};</span>
+</code></pre></div>
+<p><code>AudioDeviceModule::Create</code>创建<code>AudioDeviceModuleImpl</code>：</p>
+<div class="highlight"><pre><code><span></span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">AudioDeviceModule</span><span class="o">&gt;</span><span class="w"> </span><span class="n">AudioDeviceModule</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">AudioLayer</span><span class="w"> </span><span class="n">audio_layer</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">__FUNCTION__</span><span class="p">;</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">AudioDeviceModule</span><span class="o">::</span><span class="n">CreateForTest</span><span class="p">(</span><span class="n">audio_layer</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">AudioDeviceModuleForTest</span><span class="o">&gt;</span><span class="w"> </span><span class="n">AudioDeviceModule</span><span class="o">::</span><span class="n">CreateForTest</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">AudioLayer</span><span class="w"> </span><span class="n">audio_layer</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">__FUNCTION__</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// The &quot;AudioDeviceModule::kWindowsCoreAudio2&quot; audio layer has its own</span>
+<span class="w">  </span><span class="c1">// dedicated factory method which should be used instead.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">audio_layer</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">AudioDeviceModule</span><span class="o">::</span><span class="n">kWindowsCoreAudio2</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_ERROR</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Use the CreateWindowsCoreAudioAudioDeviceModule() &quot;</span>
+<span class="w">                        </span><span class="s">&quot;factory method instead for this option.&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Create the generic reference counted (platform independent) implementation.</span>
+<span class="w">  </span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">AudioDeviceModuleImpl</span><span class="o">&gt;</span><span class="w"> </span><span class="n">audioDevice</span><span class="p">(</span>
+<span class="w">      </span><span class="n">new</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">RefCountedObject</span><span class="o">&lt;</span><span class="n">AudioDeviceModuleImpl</span><span class="o">&gt;</span><span class="p">(</span><span class="n">audio_layer</span><span class="p">));</span>
+
+<span class="w">  </span><span class="c1">// Ensure that the current platform is supported.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">audioDevice</span><span class="o">-&gt;</span><span class="n">CheckPlatform</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Create the platform-dependent implementation.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">audioDevice</span><span class="o">-&gt;</span><span class="n">CreatePlatformSpecificObjects</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Ensure that the generic audio buffer can communicate with the platform</span>
+<span class="w">  </span><span class="c1">// specific parts.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">audioDevice</span><span class="o">-&gt;</span><span class="n">AttachAudioBuffer</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">audioDevice</span><span class="p">;</span>
+<span class="p">}</span>
+
+
+
+<span class="n">src</span><span class="o">/</span><span class="n">modules</span><span class="o">/</span><span class="n">audio_device</span><span class="o">/</span><span class="n">audio_device_impl</span><span class="p">.</span><span class="n">cc</span>
+<span class="kt">int32_t</span><span class="w"> </span><span class="n">AudioDeviceModuleImpl</span><span class="o">::</span><span class="n">StartRecording</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">__FUNCTION__</span><span class="p">;</span>
+<span class="w">  </span><span class="n">CHECKinitialized_</span><span class="p">();</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">Recording</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">audio_device_buffer_</span><span class="p">.</span><span class="n">StartRecording</span><span class="p">();</span>
+<span class="w">  </span><span class="kt">int32_t</span><span class="w"> </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">audio_device_</span><span class="o">-&gt;</span><span class="n">StartRecording</span><span class="p">();</span>
+<span class="w">  </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;output: &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">result</span><span class="p">;</span>
+<span class="w">  </span><span class="n">RTC_HISTOGRAM_BOOLEAN</span><span class="p">(</span><span class="s">&quot;WebRTC.Audio.StartRecordingSuccess&quot;</span><span class="p">,</span>
+<span class="w">                        </span><span class="n">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">result</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">));</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">result</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>audio_device_</code>在各个平台创建不同的实现类，iOS平台是<code>AudioDeviceIOS</code>，但实际在iOS上的AudioDevice并不是这样创建出来的，下面会解析。</p>
+<h4>WebRtcVoiceEngine的创建</h4>
+<p>回过头来看看<code>WebRtcVoiceEngine</code>是怎么创建的。</p>
+<div class="highlight"><pre><code><span></span><span class="n">src</span><span class="o">/</span><span class="n">sdk</span><span class="o">/</span><span class="n">objc</span><span class="o">/</span><span class="n">api</span><span class="o">/</span><span class="n">peerconnection</span><span class="o">/</span><span class="n">RTCPeerConnectionFactory</span><span class="p">.</span><span class="n">mm</span>
+
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="n">instancetype</span><span class="p">)</span>
+<span class="w">    </span><span class="nl">initWithNativeAudioEncoderFactory</span><span class="p">:...</span><span class="w"> </span><span class="p">{</span>
+<span class="p">...</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">cricket</span><span class="o">::</span><span class="n">MediaEngineInterface</span><span class="o">&gt;</span><span class="w"> </span><span class="n">media_engine</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">cricket</span><span class="o">::</span><span class="n">WebRtcMediaEngineFactory</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span><span class="n">audioDeviceModule</span><span class="p">,</span>
+<span class="w">                                                  </span><span class="n">audioEncoderFactory</span><span class="p">,</span>
+<span class="w">                                                  </span><span class="n">audioDecoderFactory</span><span class="p">,</span>
+<span class="w">                                                  </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">videoEncoderFactory</span><span class="p">),</span>
+<span class="w">                                                  </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">videoDecoderFactory</span><span class="p">),</span>
+<span class="w">                                                  </span><span class="n">nullptr</span><span class="p">,</span><span class="w">  </span><span class="c1">// audio mixer</span>
+<span class="w">                                                  </span><span class="n">audioProcessingModule</span><span class="p">);</span>
+<span class="p">...</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">self</span><span class="p">;</span>
+<span class="cp">#endif</span>
+<span class="p">}</span>
+
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">webrtc</span><span class="o">::</span><span class="n">AudioDeviceModule</span><span class="o">&gt;</span><span class="p">)</span><span class="n">audioDeviceModule</span><span class="w"> </span><span class="p">{</span>
+<span class="cp">#if defined(WEBRTC_IOS)</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">CreateAudioDeviceModule</span><span class="p">();</span>
+<span class="cp">#else</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">nullptr</span><span class="p">;</span>
+<span class="cp">#endif</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>RTCPeerConnectionFactory</code>在<code>initWithNativeAudioEncoderFactory</code>时调用了<code>WebRtcMediaEngineFactory::Create</code>。<br>
+这里的<code>audioDeviceModule</code>在iOS平台由<code>webrtc::CreateAudioDeviceModule();</code>创建，mac平台为<code>nullptr</code>由内部创建。</p>
+<div class="highlight"><pre><code><span></span><span class="n">src</span><span class="o">/</span><span class="n">sdk</span><span class="o">/</span><span class="n">objc</span><span class="o">/</span><span class="n">native</span><span class="o">/</span><span class="n">api</span><span class="o">/</span><span class="n">audio_device_module</span><span class="p">.</span><span class="n">mm</span>
+<span class="n">namespace</span><span class="w"> </span><span class="n">webrtc</span><span class="w"> </span><span class="p">{</span>
+<span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">AudioDeviceModule</span><span class="o">&gt;</span><span class="w"> </span><span class="n">CreateAudioDeviceModule</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">__FUNCTION__</span><span class="p">;</span>
+<span class="cp">#if defined(WEBRTC_IOS)</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">new</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">RefCountedObject</span><span class="o">&lt;</span><span class="n">ios_adm</span><span class="o">::</span><span class="n">AudioDeviceModuleIOS</span><span class="o">&gt;</span><span class="p">();</span>
+<span class="cp">#else</span>
+<span class="w">  </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LERROR</span><span class="p">)</span>
+<span class="w">      </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;current platform is not supported =&gt; this module will self destruct!&quot;</span><span class="p">;</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">nullptr</span><span class="p">;</span>
+<span class="cp">#endif</span>
+<span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>可以看出iOS版创建<code>AudioDeviceModuleIOS</code>，在其<code>Init</code>方法中创建<code>AudioDeviceIOS</code>。</p>
+<div class="highlight"><pre><code><span></span><span class="n">src</span><span class="o">/</span><span class="n">sdk</span><span class="o">/</span><span class="n">objc</span><span class="o">/</span><span class="n">native</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">audio</span><span class="o">/</span><span class="n">audio_device_module_ios</span><span class="p">.</span><span class="n">mm</span>
+<span class="w">  </span><span class="kt">int32_t</span><span class="w"> </span><span class="n">AudioDeviceModuleIOS</span><span class="o">::</span><span class="n">Init</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">__FUNCTION__</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">initialized_</span><span class="p">)</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+
+<span class="w">    </span><span class="n">audio_device_buffer_</span><span class="p">.</span><span class="n">reset</span><span class="p">(</span><span class="n">new</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">AudioDeviceBuffer</span><span class="p">());</span>
+<span class="w">    </span><span class="n">audio_device_</span><span class="p">.</span><span class="n">reset</span><span class="p">(</span><span class="n">new</span><span class="w"> </span><span class="n">ios_adm</span><span class="o">::</span><span class="n">AudioDeviceIOS</span><span class="p">());</span>
+<span class="w">    </span><span class="n">RTC_CHECK</span><span class="p">(</span><span class="n">audio_device_</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">this</span><span class="o">-&gt;</span><span class="n">AttachAudioBuffer</span><span class="p">();</span>
+
+<span class="w">    </span><span class="n">AudioDeviceGeneric</span><span class="o">::</span><span class="n">InitStatus</span><span class="w"> </span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">audio_device_</span><span class="o">-&gt;</span><span class="n">Init</span><span class="p">();</span>
+<span class="w">    </span><span class="n">RTC_HISTOGRAM_ENUMERATION</span><span class="p">(</span>
+<span class="w">        </span><span class="s">&quot;WebRTC.Audio.InitializationResult&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">status</span><span class="p">),</span>
+<span class="w">        </span><span class="n">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">AudioDeviceGeneric</span><span class="o">::</span><span class="n">InitStatus</span><span class="o">::</span><span class="n">NUM_STATUSES</span><span class="p">));</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">status</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">AudioDeviceGeneric</span><span class="o">::</span><span class="n">InitStatus</span><span class="o">::</span><span class="n">OK</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_ERROR</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Audio device initialization failed.&quot;</span><span class="p">;</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="mi">-1</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">initialized_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+</code></pre></div>
+<p>同时将<code>AudioDeviceIOS</code>跟<code>AudioDeviceBuffer</code>关联，录制的音频数据写入<code>AudioDeviceBuffer</code>。<br>
+不过并不是直接将录制的音频直接写入<code>AudioDeviceBuffer</code>，中间经过<code>FineAudioBuffer</code>转了一手。<br>
+<code>FineAudioBuffer</code>将采集到的音频转换并且按10ms的帧率传递给<code>AudioDeviceBuffer</code>。<br>
+<code>FineAudioBuffer</code>不仅用于采集音频时也可用于播放音频。</p>
+<div class="highlight"><pre><code><span></span><span class="n">src</span><span class="o">/</span><span class="n">sdk</span><span class="o">/</span><span class="n">objc</span><span class="o">/</span><span class="n">native</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">audio</span><span class="o">/</span><span class="n">audio_device_ios</span><span class="p">.</span><span class="n">mm</span>
+<span class="w">  </span><span class="n">fine_audio_buffer_</span><span class="p">.</span><span class="n">reset</span><span class="p">(</span><span class="n">new</span><span class="w"> </span><span class="n">FineAudioBuffer</span><span class="p">(</span><span class="n">audio_device_buffer_</span><span class="p">));</span>
+</code></pre></div>
+<h4>系统音频录制与回调</h4>
+<p>iOS音频录制采集使用<strong>AudioUnit</strong>，实现类<code>VoiceProcessingAudioUnit</code>，代码位于<code>src/sdk/objc/native/src/audio/voice_processing_audio_unit.mm</code>。<br>
+系统采集到的音频数据回调到<code>AudioDeviceIOS::OnDeliverRecordedData</code>：</p>
+<div class="highlight"><pre><code><span></span><span class="n">src</span><span class="o">/</span><span class="n">sdk</span><span class="o">/</span><span class="n">objc</span><span class="o">/</span><span class="n">native</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">audio</span><span class="o">/</span><span class="n">audio_device_ios</span><span class="p">.</span><span class="n">mm</span>
+
+<span class="n">OSStatus</span><span class="w"> </span><span class="n">AudioDeviceIOS</span><span class="o">::</span><span class="n">OnDeliverRecordedData</span><span class="p">(</span><span class="n">AudioUnitRenderActionFlags</span><span class="o">*</span><span class="w"> </span><span class="n">flags</span><span class="p">,</span>
+<span class="w">                                              </span><span class="k">const</span><span class="w"> </span><span class="n">AudioTimeStamp</span><span class="o">*</span><span class="w"> </span><span class="n">time_stamp</span><span class="p">,</span>
+<span class="w">                                              </span><span class="n">UInt32</span><span class="w"> </span><span class="n">bus_number</span><span class="p">,</span>
+<span class="w">                                              </span><span class="n">UInt32</span><span class="w"> </span><span class="n">num_frames</span><span class="p">,</span>
+<span class="w">                                              </span><span class="n">AudioBufferList</span><span class="o">*</span><span class="w"> </span><span class="cm">/* io_data */</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK_RUN_ON</span><span class="p">(</span><span class="o">&amp;</span><span class="n">io_thread_checker_</span><span class="p">);</span>
+<span class="w">  </span><span class="n">OSStatus</span><span class="w"> </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">noErr</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// Simply return if recording is not enabled.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">rtc</span><span class="o">::</span><span class="n">AtomicOps</span><span class="o">::</span><span class="n">AcquireLoad</span><span class="p">(</span><span class="o">&amp;</span><span class="n">recording_</span><span class="p">))</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">result</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Set the size of our own audio buffer and clear it first to avoid copying</span>
+<span class="w">  </span><span class="c1">// in combination with potential reallocations.</span>
+<span class="w">  </span><span class="c1">// On real iOS devices, the size will only be set once (at first callback).</span>
+<span class="w">  </span><span class="n">record_audio_buffer_</span><span class="p">.</span><span class="n">Clear</span><span class="p">();</span>
+<span class="w">  </span><span class="n">record_audio_buffer_</span><span class="p">.</span><span class="n">SetSize</span><span class="p">(</span><span class="n">num_frames</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Allocate AudioBuffers to be used as storage for the received audio.</span>
+<span class="w">  </span><span class="c1">// The AudioBufferList structure works as a placeholder for the</span>
+<span class="w">  </span><span class="c1">// AudioBuffer structure, which holds a pointer to the actual data buffer</span>
+<span class="w">  </span><span class="c1">// in |record_audio_buffer_|. Recorded audio will be rendered into this memory</span>
+<span class="w">  </span><span class="c1">// at each input callback when calling AudioUnitRender().</span>
+<span class="w">  </span><span class="n">AudioBufferList</span><span class="w"> </span><span class="n">audio_buffer_list</span><span class="p">;</span>
+<span class="w">  </span><span class="n">audio_buffer_list</span><span class="p">.</span><span class="n">mNumberBuffers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">  </span><span class="n">AudioBuffer</span><span class="o">*</span><span class="w"> </span><span class="n">audio_buffer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">audio_buffer_list</span><span class="p">.</span><span class="n">mBuffers</span><span class="p">[</span><span class="mi">0</span><span class="p">];</span>
+<span class="w">  </span><span class="n">audio_buffer</span><span class="o">-&gt;</span><span class="n">mNumberChannels</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">record_parameters_</span><span class="p">.</span><span class="n">channels</span><span class="p">();</span>
+<span class="w">  </span><span class="n">audio_buffer</span><span class="o">-&gt;</span><span class="n">mDataByteSize</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">record_audio_buffer_</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">VoiceProcessingAudioUnit</span><span class="o">::</span><span class="n">kBytesPerSample</span><span class="p">;</span>
+<span class="w">  </span><span class="n">audio_buffer</span><span class="o">-&gt;</span><span class="n">mData</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">reinterpret_cast</span><span class="o">&lt;</span><span class="kt">int8_t</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">record_audio_buffer_</span><span class="p">.</span><span class="n">data</span><span class="p">());</span>
+
+<span class="w">  </span><span class="c1">// Obtain the recorded audio samples by initiating a rendering cycle.</span>
+<span class="w">  </span><span class="c1">// Since it happens on the input bus, the |io_data| parameter is a reference</span>
+<span class="w">  </span><span class="c1">// to the preallocated audio buffer list that the audio unit renders into.</span>
+<span class="w">  </span><span class="c1">// We can make the audio unit provide a buffer instead in io_data, but we</span>
+<span class="w">  </span><span class="c1">// currently just use our own.</span>
+<span class="w">  </span><span class="c1">// TODO(henrika): should error handling be improved?</span>
+<span class="w">  </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">audio_unit_</span><span class="o">-&gt;</span><span class="n">Render</span><span class="p">(</span><span class="n">flags</span><span class="p">,</span><span class="w"> </span><span class="n">time_stamp</span><span class="p">,</span><span class="w"> </span><span class="n">bus_number</span><span class="p">,</span><span class="w"> </span><span class="n">num_frames</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">audio_buffer_list</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">result</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">noErr</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTCLogError</span><span class="p">(</span><span class="err">@</span><span class="s">&quot;Failed to render audio.&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">result</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Get a pointer to the recorded audio and send it to the WebRTC ADB.</span>
+<span class="w">  </span><span class="c1">// Use the FineAudioBuffer instance to convert between native buffer size</span>
+<span class="w">  </span><span class="c1">// and the 10ms buffer size used by WebRTC.</span>
+<span class="w">  </span><span class="n">fine_audio_buffer_</span><span class="o">-&gt;</span><span class="n">DeliverRecordedData</span><span class="p">(</span><span class="n">record_audio_buffer_</span><span class="p">,</span><span class="w"> </span><span class="n">kFixedRecordDelayEstimate</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">noErr</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>从上面代码可以看到，使用了自己的缓冲区<code>AudioBufferList</code>，真正的缓冲指针是<code>record_audio_buffer_</code>，然后调用<code>audio
+_unit_-&gt;Render</code>，使用<code>AudioUnitRender</code>将数据写入到WebRTC提供的数据缓冲区中：</p>
+<div class="highlight"><pre><code><span></span><span class="n">src</span><span class="o">/</span><span class="n">sdk</span><span class="o">/</span><span class="n">objc</span><span class="o">/</span><span class="n">native</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">audio</span><span class="o">/</span><span class="n">voice_processing_audio_unit</span><span class="p">.</span><span class="n">mm</span>
+<span class="n">OSStatus</span><span class="w"> </span><span class="n">VoiceProcessingAudioUnit</span><span class="o">::</span><span class="n">Render</span><span class="p">(</span><span class="n">AudioUnitRenderActionFlags</span><span class="o">*</span><span class="w"> </span><span class="n">flags</span><span class="p">,</span>
+<span class="w">                                          </span><span class="k">const</span><span class="w"> </span><span class="n">AudioTimeStamp</span><span class="o">*</span><span class="w"> </span><span class="n">time_stamp</span><span class="p">,</span>
+<span class="w">                                          </span><span class="n">UInt32</span><span class="w"> </span><span class="n">output_bus_number</span><span class="p">,</span>
+<span class="w">                                          </span><span class="n">UInt32</span><span class="w"> </span><span class="n">num_frames</span><span class="p">,</span>
+<span class="w">                                          </span><span class="n">AudioBufferList</span><span class="o">*</span><span class="w"> </span><span class="n">io_data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">vpio_unit_</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Init() not called.&quot;</span><span class="p">;</span>
+
+<span class="w">  </span><span class="n">OSStatus</span><span class="w"> </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">AudioUnitRender</span><span class="p">(</span><span class="n">vpio_unit_</span><span class="p">,</span><span class="w"> </span><span class="n">flags</span><span class="p">,</span><span class="w"> </span><span class="n">time_stamp</span><span class="p">,</span>
+<span class="w">                                    </span><span class="n">output_bus_number</span><span class="p">,</span><span class="w"> </span><span class="n">num_frames</span><span class="p">,</span><span class="w"> </span><span class="n">io_data</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">result</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">noErr</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTCLogError</span><span class="p">(</span><span class="err">@</span><span class="s">&quot;Failed to render audio unit. Error=%ld&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">long</span><span class="p">)</span><span class="n">result</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">result</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>之后将<code>record_audio_buffer_</code>传递给<code>FineAudioBuffer</code>进行处理。</p>
+<h4>FineAudioBuffer</h4>
+<div class="highlight"><pre><code><span></span><span class="n">src</span><span class="o">/</span><span class="n">modules</span><span class="o">/</span><span class="n">audio_device</span><span class="o">/</span><span class="n">fine_audio_buffer</span><span class="p">.</span><span class="n">cc</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="n">FineAudioBuffer</span><span class="o">::</span><span class="n">DeliverRecordedData</span><span class="p">(</span>
+<span class="w">    </span><span class="n">rtc</span><span class="o">::</span><span class="n">ArrayView</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="kt">int16_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">audio_buffer</span><span class="p">,</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">record_delay_ms</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">IsReadyForRecord</span><span class="p">());</span>
+<span class="w">  </span><span class="c1">// Always append new data and grow the buffer when needed.</span>
+<span class="w">  </span><span class="n">record_buffer_</span><span class="p">.</span><span class="n">AppendData</span><span class="p">(</span><span class="n">audio_buffer</span><span class="p">.</span><span class="n">data</span><span class="p">(),</span><span class="w"> </span><span class="n">audio_buffer</span><span class="p">.</span><span class="n">size</span><span class="p">());</span>
+<span class="w">  </span><span class="c1">// Consume samples from buffer in chunks of 10ms until there is not</span>
+<span class="w">  </span><span class="c1">// enough data left. The number of remaining samples in the cache is given by</span>
+<span class="w">  </span><span class="c1">// the new size of the internal |record_buffer_|.</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">num_elements_10ms</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">record_channels_</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">record_samples_per_channel_10ms_</span><span class="p">;</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">record_buffer_</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">num_elements_10ms</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">audio_device_buffer_</span><span class="o">-&gt;</span><span class="n">SetRecordedBuffer</span><span class="p">(</span><span class="n">record_buffer_</span><span class="p">.</span><span class="n">data</span><span class="p">(),</span>
+<span class="w">                                            </span><span class="n">record_samples_per_channel_10ms_</span><span class="p">);</span>
+<span class="w">    </span><span class="n">audio_device_buffer_</span><span class="o">-&gt;</span><span class="n">SetVQEData</span><span class="p">(</span><span class="n">playout_delay_ms_</span><span class="p">,</span><span class="w"> </span><span class="n">record_delay_ms</span><span class="p">);</span>
+<span class="w">    </span><span class="n">audio_device_buffer_</span><span class="o">-&gt;</span><span class="n">DeliverRecordedData</span><span class="p">();</span>
+<span class="w">    </span><span class="n">memmove</span><span class="p">(</span><span class="n">record_buffer_</span><span class="p">.</span><span class="n">data</span><span class="p">(),</span><span class="w"> </span><span class="n">record_buffer_</span><span class="p">.</span><span class="n">data</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">num_elements_10ms</span><span class="p">,</span>
+<span class="w">            </span><span class="p">(</span><span class="n">record_buffer_</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">num_elements_10ms</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="kt">int16_t</span><span class="p">));</span>
+<span class="w">    </span><span class="n">record_buffer_</span><span class="p">.</span><span class="n">SetSize</span><span class="p">(</span><span class="n">record_buffer_</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">num_elements_10ms</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>FineAudioBuffer</code>收到系统音频数据时追加到自己的record_buffer_缓冲区中，同时将缓冲区中所有10ms数据传递给<code>AudioDeviceBuffer</code>。</p>
+<div class="highlight"><pre><code><span></span><span class="n">src</span><span class="o">/</span><span class="n">modules</span><span class="o">/</span><span class="n">audio_device</span><span class="o">/</span><span class="n">audio_device_buffer</span><span class="p">.</span><span class="n">cc</span>
+
+<span class="kt">int32_t</span><span class="w"> </span><span class="n">AudioDeviceBuffer</span><span class="o">::</span><span class="n">DeliverRecordedData</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">audio_transport_cb_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_WARNING</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Invalid audio transport&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">frames</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rec_buffer_</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">rec_channels_</span><span class="p">;</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">bytes_per_frame</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rec_channels_</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="kt">int16_t</span><span class="p">);</span>
+<span class="w">  </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">new_mic_level_dummy</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">total_delay_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">play_delay_ms_</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">rec_delay_ms_</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">int32_t</span><span class="w"> </span><span class="n">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">audio_transport_cb_</span><span class="o">-&gt;</span><span class="n">RecordedDataIsAvailable</span><span class="p">(</span>
+<span class="w">      </span><span class="n">rec_buffer_</span><span class="p">.</span><span class="n">data</span><span class="p">(),</span><span class="w"> </span><span class="n">frames</span><span class="p">,</span><span class="w"> </span><span class="n">bytes_per_frame</span><span class="p">,</span><span class="w"> </span><span class="n">rec_channels_</span><span class="p">,</span>
+<span class="w">      </span><span class="n">rec_sample_rate_</span><span class="p">,</span><span class="w"> </span><span class="n">total_delay_ms</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">typing_status_</span><span class="p">,</span>
+<span class="w">      </span><span class="n">new_mic_level_dummy</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">res</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_ERROR</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;RecordedDataIsAvailable() failed&quot;</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>AudioDeviceBuffer</code>收到数据后回调给<code>AudioTransport::RecordedDataIsAvailable</code>。<br>
+<code>AudioTransport</code>由<code>AudioDeviceBuffer::RegisterAudioCallback</code>注册：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">WebRtcVoiceEngine::Init</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="p">...</span>
+<span class="n">src</span><span class="o">/</span><span class="n">media</span><span class="o">/</span><span class="n">engine</span><span class="o">/</span><span class="n">webrtcvoiceengine</span><span class="p">.</span><span class="n">cc</span>
+<span class="kt">void</span><span class="w"> </span><span class="n">WebRtcVoiceEngine</span><span class="o">::</span><span class="n">Init</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="p">...</span>
+<span class="w">  </span><span class="c1">// Connect the ADM to our audio path.</span>
+<span class="w">  </span><span class="n">adm</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">RegisterAudioCallback</span><span class="p">(</span><span class="n">audio_state</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">audio_transport</span><span class="p">());</span>
+<span class="p">...</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>audio_state_</code>的创建：<br>
+<code>audio_state_ = webrtc::AudioState::Create(config);</code></p>
+<div class="highlight"><pre><code><span></span><span class="n">src</span><span class="o">/</span><span class="n">audio</span><span class="o">/</span><span class="n">audio_state</span><span class="p">.</span><span class="n">cc</span>
+<span class="n">AudioState</span><span class="o">::</span><span class="n">AudioState</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">AudioState</span><span class="o">::</span><span class="n">Config</span><span class="o">&amp;</span><span class="w"> </span><span class="n">config</span><span class="p">)</span>
+<span class="w">    </span><span class="o">:</span><span class="w"> </span><span class="n">config_</span><span class="p">(</span><span class="n">config</span><span class="p">),</span>
+<span class="w">      </span><span class="n">audio_transport_</span><span class="p">(</span><span class="n">config_</span><span class="p">.</span><span class="n">audio_mixer</span><span class="p">,</span><span class="w"> </span><span class="n">config_</span><span class="p">.</span><span class="n">audio_processing</span><span class="p">.</span><span class="n">get</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">process_thread_checker_</span><span class="p">.</span><span class="n">DetachFromThread</span><span class="p">();</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">config_</span><span class="p">.</span><span class="n">audio_mixer</span><span class="p">);</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">config_</span><span class="p">.</span><span class="n">audio_device_module</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>audio_transport_</code>是<code>AudioTransportImpl</code>实例。</p>
+<h4>AudioTransportImpl</h4>
+<p><code>AudioTransportImpl</code>收到采集的音频数据后做了很多事情：</p>
+<div class="highlight"><pre><code><span></span><span class="n">src</span><span class="o">/</span><span class="n">audio</span><span class="o">/</span><span class="n">audio_transport_impl</span><span class="p">.</span><span class="n">cc</span>
+
+<span class="c1">// Not used in Chromium. Process captured audio and distribute to all sending</span>
+<span class="c1">// streams, and try to do this at the lowest possible sample rate.</span>
+<span class="kt">int32_t</span><span class="w"> </span><span class="n">AudioTransportImpl</span><span class="o">::</span><span class="n">RecordedDataIsAvailable</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">audio_data</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">number_of_frames</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">bytes_per_sample</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">number_of_channels</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">sample_rate</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">audio_delay_milliseconds</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">int32_t</span><span class="w"> </span><span class="cm">/*clock_drift*/</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">uint32_t</span><span class="w"> </span><span class="cm">/*volume*/</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">key_pressed</span><span class="p">,</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="o">&amp;</span><span class="w"> </span><span class="cm">/*new_mic_volume*/</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span><span class="c1">// NOLINT: to avoid changing APIs</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">audio_data</span><span class="p">);</span>
+<span class="w">  </span><span class="n">RTC_DCHECK_GE</span><span class="p">(</span><span class="n">number_of_channels</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span>
+<span class="w">  </span><span class="n">RTC_DCHECK_LE</span><span class="p">(</span><span class="n">number_of_channels</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">);</span>
+<span class="w">  </span><span class="n">RTC_DCHECK_EQ</span><span class="p">(</span><span class="mi">2</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">number_of_channels</span><span class="p">,</span><span class="w"> </span><span class="n">bytes_per_sample</span><span class="p">);</span>
+<span class="w">  </span><span class="n">RTC_DCHECK_GE</span><span class="p">(</span><span class="n">sample_rate</span><span class="p">,</span><span class="w"> </span><span class="n">AudioProcessing</span><span class="o">::</span><span class="n">NativeRate</span><span class="o">::</span><span class="n">kSampleRate8kHz</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 100 = 1 second / data duration (10 ms).</span>
+<span class="w">  </span><span class="n">RTC_DCHECK_EQ</span><span class="p">(</span><span class="n">number_of_frames</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">100</span><span class="p">,</span><span class="w"> </span><span class="n">sample_rate</span><span class="p">);</span>
+<span class="w">  </span><span class="n">RTC_DCHECK_LE</span><span class="p">(</span><span class="n">bytes_per_sample</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">number_of_frames</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">number_of_channels</span><span class="p">,</span>
+<span class="w">                </span><span class="n">AudioFrame</span><span class="o">::</span><span class="n">kMaxDataSizeBytes</span><span class="p">);</span>
+
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">send_sample_rate_hz</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">send_num_channels</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">swap_stereo_channels</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">rtc</span><span class="o">::</span><span class="n">CritScope</span><span class="w"> </span><span class="nf">lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">capture_lock_</span><span class="p">);</span>
+<span class="w">    </span><span class="n">send_sample_rate_hz</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">send_sample_rate_hz_</span><span class="p">;</span>
+<span class="w">    </span><span class="n">send_num_channels</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">send_num_channels_</span><span class="p">;</span>
+<span class="w">    </span><span class="n">swap_stereo_channels</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">swap_stereo_channels_</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">AudioFrame</span><span class="o">&gt;</span><span class="w"> </span><span class="n">audio_frame</span><span class="p">(</span><span class="n">new</span><span class="w"> </span><span class="n">AudioFrame</span><span class="p">());</span>
+<span class="w">  </span><span class="n">InitializeCaptureFrame</span><span class="p">(</span><span class="n">sample_rate</span><span class="p">,</span><span class="w"> </span><span class="n">send_sample_rate_hz</span><span class="p">,</span><span class="w"> </span><span class="n">number_of_channels</span><span class="p">,</span>
+<span class="w">                        </span><span class="n">send_num_channels</span><span class="p">,</span><span class="w"> </span><span class="n">audio_frame</span><span class="p">.</span><span class="n">get</span><span class="p">());</span>
+<span class="w">  </span><span class="n">voe</span><span class="o">::</span><span class="n">RemixAndResample</span><span class="p">(</span><span class="n">static_cast</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="kt">int16_t</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">audio_data</span><span class="p">),</span>
+<span class="w">                        </span><span class="n">number_of_frames</span><span class="p">,</span><span class="w"> </span><span class="n">number_of_channels</span><span class="p">,</span><span class="w"> </span><span class="n">sample_rate</span><span class="p">,</span>
+<span class="w">                        </span><span class="o">&amp;</span><span class="n">capture_resampler_</span><span class="p">,</span><span class="w"> </span><span class="n">audio_frame</span><span class="p">.</span><span class="n">get</span><span class="p">());</span>
+<span class="w">  </span><span class="n">ProcessCaptureFrame</span><span class="p">(</span><span class="n">audio_delay_milliseconds</span><span class="p">,</span><span class="w"> </span><span class="n">key_pressed</span><span class="p">,</span>
+<span class="w">                      </span><span class="n">swap_stereo_channels</span><span class="p">,</span><span class="w"> </span><span class="n">audio_processing_</span><span class="p">,</span>
+<span class="w">                      </span><span class="n">audio_frame</span><span class="p">.</span><span class="n">get</span><span class="p">());</span>
+
+<span class="w">  </span><span class="c1">// Typing detection (utilizes the APM/VAD decision). We let the VAD determine</span>
+<span class="w">  </span><span class="c1">// if we&#39;re using this feature or not.</span>
+<span class="w">  </span><span class="c1">// TODO(solenberg): is_enabled() takes a lock. Work around that.</span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">typing_detected</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">audio_processing_</span><span class="o">-&gt;</span><span class="n">voice_detection</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">is_enabled</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">audio_frame</span><span class="o">-&gt;</span><span class="n">vad_activity_</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">AudioFrame</span><span class="o">::</span><span class="n">kVadUnknown</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kt">bool</span><span class="w"> </span><span class="n">vad_active</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">audio_frame</span><span class="o">-&gt;</span><span class="n">vad_activity_</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">AudioFrame</span><span class="o">::</span><span class="n">kVadActive</span><span class="p">;</span>
+<span class="w">      </span><span class="n">typing_detected</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">typing_detection_</span><span class="p">.</span><span class="n">Process</span><span class="p">(</span><span class="n">key_pressed</span><span class="p">,</span><span class="w"> </span><span class="n">vad_active</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Measure audio level of speech after all processing.</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="n">sample_duration</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">static_cast</span><span class="o">&lt;</span><span class="kt">double</span><span class="o">&gt;</span><span class="p">(</span><span class="n">number_of_frames</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">sample_rate</span><span class="p">;</span>
+<span class="w">  </span><span class="n">audio_level_</span><span class="p">.</span><span class="n">ComputeLevel</span><span class="p">(</span><span class="o">*</span><span class="n">audio_frame</span><span class="p">.</span><span class="n">get</span><span class="p">(),</span><span class="w"> </span><span class="n">sample_duration</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Copy frame and push to each sending stream. The copy is required since an</span>
+<span class="w">  </span><span class="c1">// encoding task will be posted internally to each stream.</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">rtc</span><span class="o">::</span><span class="n">CritScope</span><span class="w"> </span><span class="nf">lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">capture_lock_</span><span class="p">);</span>
+<span class="w">    </span><span class="n">typing_noise_detected_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">typing_detected</span><span class="p">;</span>
+
+<span class="w">    </span><span class="n">RTC_DCHECK_GT</span><span class="p">(</span><span class="n">audio_frame</span><span class="o">-&gt;</span><span class="n">samples_per_channel_</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">sending_streams_</span><span class="p">.</span><span class="n">empty</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">auto</span><span class="w"> </span><span class="n">it</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sending_streams_</span><span class="p">.</span><span class="n">begin</span><span class="p">();</span>
+<span class="w">      </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="o">++</span><span class="n">it</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">sending_streams_</span><span class="p">.</span><span class="n">end</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">AudioFrame</span><span class="o">&gt;</span><span class="w"> </span><span class="n">audio_frame_copy</span><span class="p">(</span><span class="n">new</span><span class="w"> </span><span class="n">AudioFrame</span><span class="p">());</span>
+<span class="w">        </span><span class="n">audio_frame_copy</span><span class="o">-&gt;</span><span class="n">CopyFrom</span><span class="p">(</span><span class="o">*</span><span class="n">audio_frame</span><span class="p">.</span><span class="n">get</span><span class="p">());</span>
+<span class="w">        </span><span class="p">(</span><span class="o">*</span><span class="n">it</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">SendAudioData</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">audio_frame_copy</span><span class="p">));</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="c1">// Send the original frame to the first stream w/o copying.</span>
+<span class="w">      </span><span class="p">(</span><span class="o">*</span><span class="n">sending_streams_</span><span class="p">.</span><span class="n">begin</span><span class="p">())</span><span class="o">-&gt;</span><span class="n">SendAudioData</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">audio_frame</span><span class="p">));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>voe::RemixAndResample</code>先判断源声道数是否大于目标声道数，然后大于则降低到目标声道数，然后重采样转换到目标采样率。<br>
+最后源声道如果为单声道且目标声道为双声道则将音频数据转换到双声道。</p>
+<p>经过重采样和声道转换后进行一下步更多的音频处理：</p>
+<div class="highlight"><pre><code><span></span><span class="n">ProcessCaptureFrame</span><span class="p">(</span><span class="n">audio_delay_milliseconds</span><span class="p">,</span><span class="w"> </span><span class="n">key_pressed</span><span class="p">,</span>
+<span class="w">                    </span><span class="n">swap_stereo_channels</span><span class="p">,</span><span class="w"> </span><span class="n">audio_processing_</span><span class="p">,</span>
+<span class="w">                    </span><span class="n">audio_frame</span><span class="p">.</span><span class="n">get</span><span class="p">());</span>
+</code></pre></div>
+<p><code>audio_processing_</code>为<code>config_.audio_processing</code>，也是<code>WebRtcVoiceEngine</code>的<code>rtc::scoped_refptr&lt;webrtc::AudioProcessing&gt; apm_</code>。<br>
+<code>RTCPeerConnectionFactory</code>中创建了<code>(rtc::scoped_refptr&lt;webrtc::AudioProcessing&gt;)audioProcessingModule</code></p>
+<div class="highlight"><pre><code><span></span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">audioProcessingModule</span><span class="p">)</span><span class="w"> </span><span class="n">audioProcessingModule</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">AudioProcessingBuilder</span><span class="p">().</span><span class="n">Create</span><span class="p">();</span>
+</code></pre></div>
+<p>所以<code>audio_processing_</code>由<code>webrtc::AudioProcessingBuilder().Create();</code>创建。</p>
+<div class="highlight"><pre><code><span></span><span class="n">src</span><span class="o">/</span><span class="n">modules</span><span class="o">/</span><span class="n">audio_processing</span><span class="o">/</span><span class="n">audio_processing_impl</span><span class="p">.</span><span class="n">cc</span>
+
+<span class="n">AudioProcessing</span><span class="o">*</span><span class="w"> </span><span class="n">AudioProcessingBuilder</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">Config</span><span class="o">&amp;</span><span class="w"> </span><span class="n">config</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">AudioProcessingImpl</span><span class="o">*</span><span class="w"> </span><span class="n">apm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">new</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">RefCountedObject</span><span class="o">&lt;</span><span class="n">AudioProcessingImpl</span><span class="o">&gt;</span><span class="p">(</span>
+<span class="w">      </span><span class="n">config</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">capture_post_processing_</span><span class="p">),</span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">render_pre_processing_</span><span class="p">),</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">echo_control_factory_</span><span class="p">),</span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">echo_detector_</span><span class="p">),</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">capture_analyzer_</span><span class="p">));</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">apm</span><span class="o">-&gt;</span><span class="n">Initialize</span><span class="p">()</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">AudioProcessing</span><span class="o">::</span><span class="n">kNoError</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">delete</span><span class="w"> </span><span class="n">apm</span><span class="p">;</span>
+<span class="w">    </span><span class="n">apm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">apm</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>AudioProcessingImpl</code>集合了众多音频处理模块。</p>
+<p><code>ProcessCaptureFrame</code>调用了<code>AudioProcessingImpl::ProcessStream(AudioFrame*frame)</code></p>
+<div class="highlight"><pre><code><span></span><span class="n">src</span><span class="o">/</span><span class="n">modules</span><span class="o">/</span><span class="n">audio_processing</span><span class="o">/</span><span class="n">audio_processing_impl</span><span class="p">.</span><span class="n">cc</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="n">AudioProcessingImpl</span><span class="o">::</span><span class="n">ProcessStream</span><span class="p">(</span><span class="n">AudioFrame</span><span class="o">*</span><span class="w"> </span><span class="n">frame</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="p">...</span>
+<span class="w">  </span><span class="n">capture_</span><span class="p">.</span><span class="n">capture_audio</span><span class="o">-&gt;</span><span class="n">DeinterleaveFrom</span><span class="p">(</span><span class="n">frame</span><span class="p">);</span>
+<span class="w">  </span><span class="n">RETURN_ON_ERR</span><span class="p">(</span><span class="n">ProcessCaptureStreamLocked</span><span class="p">());</span>
+<span class="w">  </span><span class="n">capture_</span><span class="p">.</span><span class="n">capture_audio</span><span class="o">-&gt;</span><span class="n">InterleaveTo</span><span class="p">(</span>
+<span class="w">      </span><span class="n">frame</span><span class="p">,</span><span class="w"> </span><span class="n">submodule_states_</span><span class="p">.</span><span class="n">CaptureMultiBandProcessingActive</span><span class="p">()</span><span class="w"> </span><span class="o">||</span>
+<span class="w">                 </span><span class="n">submodule_states_</span><span class="p">.</span><span class="n">CaptureFullBandProcessingActive</span><span class="p">());</span>
+</code></pre></div>
+<p><code>DeinterleaveFrom</code>将音频按声道逐行扫描分离到<code>capture_.capture_audio</code>中。<br>
+<code>ProcessCaptureStreamLocked()</code>进行真正的音频处理，详细的过程参考另一篇文章<a href="https://www.jianshu.com/writer#/notebooks/30599998/notes/52169776/preview">WebRTC采集音频后的音频处理算法</a>。<br>
+最后使用<code>InterleaveTo</code>将分离的音频再合并回来。</p>
+<p><code>typing_detection_.Process</code>检测处理键盘打字声音。</p>
+<p><code>audio_level_.ComputeLevel</code>计算音量。</p>
+<p>最后<code>SendAudioData</code>阶段，先遍历<code>sending_streams_</code>除了第一个<code>AudioSendStream</code>，新建<code>AudioFrame</code>拷贝<code>audio_frame</code>数据，这里必须要拷贝，因为每个<code>AudioSendStream</code>都独立编码处理音频帧，而第一个<code>AudioSendStream</code>不需要拷贝数据直接将<code>audio_frame</code>提交给其处理。</p>
+<h4>ProcessCaptureStreamLocked音频处理</h4>
+<p>单独写了一篇文章：<a href="https://www.jianshu.com/writer#/notebooks/30599998/notes/52169776/preview">WebRTC采集音频后的音频处理算法</a></p>
+<h4>AudioSendStream</h4>
+<p><code>sending_streams_</code>中存储的是<code>AudioSendStream</code>对象，<code>AudioSendStream</code>由<code>WebRtcVoiceMediaChannel::WebRtcAudioSendStream</code>创建并持有：</p>
+<div class="highlight"><pre><code><span></span><span class="n">src</span><span class="o">/</span><span class="n">media</span><span class="o">/</span><span class="n">engine</span><span class="o">/</span><span class="n">webrtcvoiceengine</span><span class="p">.</span><span class="n">cc</span>
+<span class="n">WebRtcAudioSendStream</span><span class="p">(...){</span>
+<span class="p">...</span>
+<span class="w">    </span><span class="n">stream_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">call_</span><span class="o">-&gt;</span><span class="n">CreateAudioSendStream</span><span class="p">(</span><span class="n">config_</span><span class="p">);</span>
+<span class="p">...</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>WebRtcAudioSendStream</code>在<code>WebRtcVoiceMediaChannel::AddSendStream</code>中创建。<br>
+<code>AddSendStream</code>被调用的流程如下：</p>
+<blockquote><p>iOS：<code>RTCPeerConnection::setLocalDescription</code>-&gt;<br>
+c++:<br>
+<code>PeerConnection::SetLocalDescription</code>-&gt;<br>
+<code>PeerConnection::ApplyLocalDescription</code>-&gt;<br>
+<code>PeerConnection::UpdateSessionState</code>-&gt;<br>
+<code>PeerConnection::PushdownMediaDescription</code>-&gt;<br>
+<code>BaseChannel::SetLocalContent</code>-&gt;<br>
+<code>VoiceChannel::SetLocalContent_w</code>-&gt;<br>
+<code>BaseChannel::UpdateLocalStreams_w</code>-&gt;<br>
+<code>WebRtcVoiceMediaChannel::AddSendStream</code></p>
+</blockquote>
+<p><code>AudioSendStream::SendAudioData</code>真正发送是由<code>voe::CreateChannelSend</code>创建的<code>ChannelSend</code>调用<code>ProcessAndEncodeAudio</code>.</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">ChannelSend::ProcessAndEncodeAudio</span><span class="p">(</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">AudioFrame</span><span class="o">&gt;</span><span class="w"> </span><span class="n">audio_frame</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK_RUNS_SERIALIZED</span><span class="p">(</span><span class="o">&amp;</span><span class="n">audio_thread_race_checker_</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// Avoid posting any new tasks if sending was already stopped in StopSend().</span>
+<span class="w">  </span><span class="n">rtc</span><span class="o">::</span><span class="n">CritScope</span><span class="w"> </span><span class="n">cs</span><span class="p">(</span><span class="o">&amp;</span><span class="n">encoder_queue_lock_</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">encoder_queue_is_active_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// Profile time between when the audio frame is added to the task queue and</span>
+<span class="w">  </span><span class="c1">// when the task is actually executed.</span>
+<span class="w">  </span><span class="n">audio_frame</span><span class="o">-&gt;</span><span class="n">UpdateProfileTimeStamp</span><span class="p">();</span>
+<span class="w">  </span><span class="n">encoder_queue_</span><span class="o">-&gt;</span><span class="n">PostTask</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">rtc</span><span class="o">::</span><span class="n">QueuedTask</span><span class="o">&gt;</span><span class="p">(</span>
+<span class="w">      </span><span class="n">new</span><span class="w"> </span><span class="n">ProcessAndEncodeAudioTask</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">audio_frame</span><span class="p">),</span><span class="w"> </span><span class="n">this</span><span class="p">)));</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这儿先说一个比较主要的对象：<code>Call</code>。上面的<code>encoder_queue_</code>由其成员<code>RtpTransportControllerSendInterface</code>创建:<code>transport_send_ptr_-&gt;GetWorkerQueue()</code>。<code>Call</code>最初由<code>PeerConnectionFactory</code>创建：</p>
+<div class="highlight"><pre><code><span></span><span class="n">src</span><span class="o">/</span><span class="n">pc</span><span class="o">/</span><span class="n">peerconnectionfactory</span><span class="p">.</span><span class="n">cc</span>
+
+<span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">PeerConnectionInterface</span><span class="o">&gt;</span>
+<span class="n">PeerConnectionFactory</span><span class="o">::</span><span class="n">CreatePeerConnection</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">PeerConnectionInterface</span><span class="o">::</span><span class="n">RTCConfiguration</span><span class="o">&amp;</span><span class="w"> </span><span class="n">configuration</span><span class="p">,</span>
+<span class="w">    </span><span class="n">PeerConnectionDependencies</span><span class="w"> </span><span class="n">dependencies</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">signaling_thread_</span><span class="o">-&gt;</span><span class="n">IsCurrent</span><span class="p">());</span>
+
+<span class="w">  </span><span class="c1">// Set internal defaults if optional dependencies are not set.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">dependencies</span><span class="p">.</span><span class="n">cert_generator</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">dependencies</span><span class="p">.</span><span class="n">cert_generator</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">absl</span><span class="o">::</span><span class="n">make_unique</span><span class="o">&lt;</span><span class="n">rtc</span><span class="o">::</span><span class="n">RTCCertificateGenerator</span><span class="o">&gt;</span><span class="p">(</span><span class="n">signaling_thread_</span><span class="p">,</span>
+<span class="w">                                                        </span><span class="n">network_thread_</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">dependencies</span><span class="p">.</span><span class="n">allocator</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">network_thread_</span><span class="o">-&gt;</span><span class="n">Invoke</span><span class="o">&lt;</span><span class="kt">void</span><span class="o">&gt;</span><span class="p">(</span><span class="n">RTC_FROM_HERE</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">this</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">configuration</span><span class="p">,</span>
+<span class="w">                                                  </span><span class="o">&amp;</span><span class="n">dependencies</span><span class="p">]()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">dependencies</span><span class="p">.</span><span class="n">allocator</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">absl</span><span class="o">::</span><span class="n">make_unique</span><span class="o">&lt;</span><span class="n">cricket</span><span class="o">::</span><span class="n">BasicPortAllocator</span><span class="o">&gt;</span><span class="p">(</span>
+<span class="w">          </span><span class="n">default_network_manager_</span><span class="p">.</span><span class="n">get</span><span class="p">(),</span><span class="w"> </span><span class="n">default_socket_factory_</span><span class="p">.</span><span class="n">get</span><span class="p">(),</span>
+<span class="w">          </span><span class="n">configuration</span><span class="p">.</span><span class="n">turn_customizer</span><span class="p">);</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// TODO(zstein): Once chromium injects its own AsyncResolverFactory, set</span>
+<span class="w">  </span><span class="c1">// |dependencies.async_resolver_factory| to a new</span>
+<span class="w">  </span><span class="c1">// |rtc::BasicAsyncResolverFactory| if no factory is provided.</span>
+
+<span class="w">  </span><span class="n">network_thread_</span><span class="o">-&gt;</span><span class="n">Invoke</span><span class="o">&lt;</span><span class="kt">void</span><span class="o">&gt;</span><span class="p">(</span>
+<span class="w">      </span><span class="n">RTC_FROM_HERE</span><span class="p">,</span>
+<span class="w">      </span><span class="n">rtc</span><span class="o">::</span><span class="n">Bind</span><span class="p">(</span><span class="o">&amp;</span><span class="n">cricket</span><span class="o">::</span><span class="n">PortAllocator</span><span class="o">::</span><span class="n">SetNetworkIgnoreMask</span><span class="p">,</span>
+<span class="w">                </span><span class="n">dependencies</span><span class="p">.</span><span class="n">allocator</span><span class="p">.</span><span class="n">get</span><span class="p">(),</span><span class="w"> </span><span class="n">options_</span><span class="p">.</span><span class="n">network_ignore_mask</span><span class="p">));</span>
+
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">RtcEventLog</span><span class="o">&gt;</span><span class="w"> </span><span class="n">event_log</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">worker_thread_</span><span class="o">-&gt;</span><span class="n">Invoke</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">RtcEventLog</span><span class="o">&gt;&gt;</span><span class="p">(</span>
+<span class="w">          </span><span class="n">RTC_FROM_HERE</span><span class="p">,</span>
+<span class="w">          </span><span class="n">rtc</span><span class="o">::</span><span class="n">Bind</span><span class="p">(</span><span class="o">&amp;</span><span class="n">PeerConnectionFactory</span><span class="o">::</span><span class="n">CreateRtcEventLog_w</span><span class="p">,</span><span class="w"> </span><span class="n">this</span><span class="p">));</span>
+
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">Call</span><span class="o">&gt;</span><span class="w"> </span><span class="n">call</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">worker_thread_</span><span class="o">-&gt;</span><span class="n">Invoke</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">Call</span><span class="o">&gt;&gt;</span><span class="p">(</span>
+<span class="w">      </span><span class="n">RTC_FROM_HERE</span><span class="p">,</span>
+<span class="w">      </span><span class="n">rtc</span><span class="o">::</span><span class="n">Bind</span><span class="p">(</span><span class="o">&amp;</span><span class="n">PeerConnectionFactory</span><span class="o">::</span><span class="n">CreateCall_w</span><span class="p">,</span><span class="w"> </span><span class="n">this</span><span class="p">,</span><span class="w"> </span><span class="n">event_log</span><span class="p">.</span><span class="n">get</span><span class="p">()));</span>
+
+<span class="w">  </span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">PeerConnection</span><span class="o">&gt;</span><span class="w"> </span><span class="n">pc</span><span class="p">(</span>
+<span class="w">      </span><span class="n">new</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">RefCountedObject</span><span class="o">&lt;</span><span class="n">PeerConnection</span><span class="o">&gt;</span><span class="p">(</span><span class="n">this</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">event_log</span><span class="p">),</span>
+<span class="w">                                                </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">call</span><span class="p">)));</span>
+<span class="w">  </span><span class="n">ActionsBeforeInitializeForTesting</span><span class="p">(</span><span class="n">pc</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">pc</span><span class="o">-&gt;</span><span class="n">Initialize</span><span class="p">(</span><span class="n">configuration</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">dependencies</span><span class="p">)))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">PeerConnectionProxy</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span><span class="n">signaling_thread</span><span class="p">(),</span><span class="w"> </span><span class="n">pc</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>成员 <code>RtpTransportControllerSendInterface *transport_send_ptr_</code>的创建：</p>
+<div class="highlight"><pre><code><span></span><span class="n">Call</span><span class="o">*</span><span class="w"> </span><span class="nf">Call::Create</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">Call</span><span class="o">::</span><span class="n">Config</span><span class="o">&amp;</span><span class="w"> </span><span class="n">config</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">new</span><span class="w"> </span><span class="n">internal</span><span class="o">::</span><span class="n">Call</span><span class="p">(</span>
+<span class="w">      </span><span class="n">config</span><span class="p">,</span><span class="w"> </span><span class="n">absl</span><span class="o">::</span><span class="n">make_unique</span><span class="o">&lt;</span><span class="n">RtpTransportControllerSend</span><span class="o">&gt;</span><span class="p">(</span>
+<span class="w">                  </span><span class="n">Clock</span><span class="o">::</span><span class="n">GetRealTimeClock</span><span class="p">(),</span><span class="w"> </span><span class="n">config</span><span class="p">.</span><span class="n">event_log</span><span class="p">,</span>
+<span class="w">                  </span><span class="n">config</span><span class="p">.</span><span class="n">network_controller_factory</span><span class="p">,</span><span class="w"> </span><span class="n">config</span><span class="p">.</span><span class="n">bitrate_config</span><span class="p">));</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>src/call/rtp_transport_controller_send.cc</code>:<br>
+<code>RtpTransportControllerSend</code>的构造函数中创建了线程：<code>process_thread_(ProcessThread::Create("SendControllerThread"))</code>。<br>
+并且在<code>process_thread_</code>中注册了两个Module:</p>
+<div class="highlight"><pre><code><span></span><span class="n">process_thread_</span><span class="o">-&gt;</span><span class="n">RegisterModule</span><span class="p">(</span><span class="o">&amp;</span><span class="n">pacer_</span><span class="p">,</span><span class="w"> </span><span class="n">RTC_FROM_HERE</span><span class="p">);</span>
+<span class="w">  </span><span class="n">process_thread_</span><span class="o">-&gt;</span><span class="n">RegisterModule</span><span class="p">(</span><span class="n">send_side_cc_</span><span class="p">.</span><span class="n">get</span><span class="p">(),</span><span class="w"> </span><span class="n">RTC_FROM_HERE</span><span class="p">);</span>
+</code></pre></div>
+<p><strong>process<em>thread</em></strong>：<br>
+<code>process_thread_</code>的实现类是<code>ProcessThreadImpl</code>，线程由平台线程类<code>rtc::PlatformThread</code>创建。<br>
+线程执行时循环回调：<code>ProcessThreadImpl::Process()</code>。<br>
+<code>ProcessThreadImpl::Process()</code>遍历所有注册的module，每个moudule检测自己的定时器，当时间到达时执行module的<code>Process</code>方法。<br>
+同时<code>ProcessThreadImpl::Process()</code>还取出自己<code>queue_</code>中的所有task逐个执行<code>task-&gt;Run()</code>，执行完成后删除task。<br>
+然后根据modules的需等待的最小时间使用<code>wake_up_.Wait</code>挂起线程，等待超时或者<code>WakeUp</code>，<code>PostTask</code>，<code>RegisterModule</code>，<code>Stop</code>方法唤醒。</p>
+<p><strong>TaskQueue：</strong><br>
+<code>RtpTransportControllerSend</code>的成员：<code>rtc::TaskQueue task_queue_</code>在每个平台都有不同的实现:<br>
+iOS平台由<code>src/rtc_base/task_queue_gcd.cc</code>实现，根据平台不同还有几个版本：<br>
+<code>src/rtc_base/task_queue_win.cc</code><br>
+<code>src/rtc_base/task_queue_libevent.cc</code><br>
+<code>src/rtc_base/task_queue_stdlib.cc</code><br>
+总的来说，<code>TaskQueue</code>自己维护一个线程来处理自己队列中的任务。<br>
+iOS中直接使用gcd实现，内部的<code>queue_</code>是串行队列: <code>queue_(dispatch_queue_create(queue_name, DISPATCH_QUEUE_SERIAL))</code>，<code>PostTask</code>时调用<code>dispatch_async_f</code>进行异步排队处理。</p>
+<div class="highlight"><pre><code><span></span><span class="n">encoder_queue_</span><span class="o">-&gt;</span><span class="n">PostTask</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">rtc</span><span class="o">::</span><span class="n">QueuedTask</span><span class="o">&gt;</span><span class="p">(</span>
+<span class="w">      </span><span class="n">new</span><span class="w"> </span><span class="n">ProcessAndEncodeAudioTask</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">audio_frame</span><span class="p">),</span><span class="w"> </span><span class="n">this</span><span class="p">)));</span>
+</code></pre></div>
+<p>当音频数据采集且处理过后，将<code>AudioFrame</code>扔到一个<code>TaskQueue</code>中逐个进行处理，处理方法为<code>ProcessAndEncodeAudioOn
+TaskQueue</code>：</p>
+<div class="highlight"><pre><code><span></span><span class="n">src</span><span class="o">/</span><span class="n">audio</span><span class="o">/</span><span class="n">channel_send</span><span class="p">.</span><span class="n">cc</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="n">ChannelSend</span><span class="o">::</span><span class="n">ProcessAndEncodeAudioOnTaskQueue</span><span class="p">(</span><span class="n">AudioFrame</span><span class="o">*</span><span class="w"> </span><span class="n">audio_input</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK_RUN_ON</span><span class="p">(</span><span class="n">encoder_queue_</span><span class="p">);</span>
+<span class="w">  </span><span class="n">RTC_DCHECK_GT</span><span class="p">(</span><span class="n">audio_input</span><span class="o">-&gt;</span><span class="n">samples_per_channel_</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="w">  </span><span class="n">RTC_DCHECK_LE</span><span class="p">(</span><span class="n">audio_input</span><span class="o">-&gt;</span><span class="n">num_channels_</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Measure time between when the audio frame is added to the task queue and</span>
+<span class="w">  </span><span class="c1">// when the task is actually executed. Goal is to keep track of unwanted</span>
+<span class="w">  </span><span class="c1">// extra latency added by the task queue.</span>
+<span class="w">  </span><span class="n">RTC_HISTOGRAM_COUNTS_10000</span><span class="p">(</span><span class="s">&quot;WebRTC.Audio.EncodingTaskQueueLatencyMs&quot;</span><span class="p">,</span>
+<span class="w">                            </span><span class="n">audio_input</span><span class="o">-&gt;</span><span class="n">ElapsedProfileTimeMs</span><span class="p">());</span>
+
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">is_muted</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">InputMute</span><span class="p">();</span>
+<span class="w">  </span><span class="n">AudioFrameOperations</span><span class="o">::</span><span class="n">Mute</span><span class="p">(</span><span class="n">audio_input</span><span class="p">,</span><span class="w"> </span><span class="n">previous_frame_muted_</span><span class="p">,</span><span class="w"> </span><span class="n">is_muted</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">_includeAudioLevelIndication</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">size_t</span><span class="w"> </span><span class="n">length</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">audio_input</span><span class="o">-&gt;</span><span class="n">samples_per_channel_</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">audio_input</span><span class="o">-&gt;</span><span class="n">num_channels_</span><span class="p">;</span>
+<span class="w">    </span><span class="n">RTC_CHECK_LE</span><span class="p">(</span><span class="n">length</span><span class="p">,</span><span class="w"> </span><span class="n">AudioFrame</span><span class="o">::</span><span class="n">kMaxDataSizeBytes</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_muted</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">previous_frame_muted_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">rms_level_</span><span class="p">.</span><span class="n">AnalyzeMuted</span><span class="p">(</span><span class="n">length</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">rms_level_</span><span class="p">.</span><span class="n">Analyze</span><span class="p">(</span>
+<span class="w">          </span><span class="n">rtc</span><span class="o">::</span><span class="n">ArrayView</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="kt">int16_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">audio_input</span><span class="o">-&gt;</span><span class="n">data</span><span class="p">(),</span><span class="w"> </span><span class="n">length</span><span class="p">));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">previous_frame_muted_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">is_muted</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Add 10ms of raw (PCM) audio data to the encoder @ 32kHz.</span>
+
+<span class="w">  </span><span class="c1">// The ACM resamples internally.</span>
+<span class="w">  </span><span class="n">audio_input</span><span class="o">-&gt;</span><span class="n">timestamp_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_timeStamp</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// This call will trigger AudioPacketizationCallback::SendData if encoding</span>
+<span class="w">  </span><span class="c1">// is done and payload is ready for packetization and transmission.</span>
+<span class="w">  </span><span class="c1">// Otherwise, it will return without invoking the callback.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">audio_coding_</span><span class="o">-&gt;</span><span class="n">Add10MsData</span><span class="p">(</span><span class="o">*</span><span class="n">audio_input</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_DLOG</span><span class="p">(</span><span class="n">LS_ERROR</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;ACM::Add10MsData() failed.&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">_timeStamp</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">static_cast</span><span class="o">&lt;</span><span class="kt">uint32_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">audio_input</span><span class="o">-&gt;</span><span class="n">samples_per_channel_</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>audio_coding_</code>是音频编码器，当编码完成后回调<code>ChannelSend::SendData</code>：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">int32_t</span><span class="w"> </span><span class="nf">ChannelSend::SendData</span><span class="p">(</span><span class="n">FrameType</span><span class="w"> </span><span class="n">frameType</span><span class="p">,</span>
+<span class="w">                              </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">payloadType</span><span class="p">,</span>
+<span class="w">                              </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">timeStamp</span><span class="p">,</span>
+<span class="w">                              </span><span class="k">const</span><span class="w"> </span><span class="kt">uint8_t</span><span class="o">*</span><span class="w"> </span><span class="n">payloadData</span><span class="p">,</span>
+<span class="w">                              </span><span class="kt">size_t</span><span class="w"> </span><span class="n">payloadSize</span><span class="p">,</span>
+<span class="w">                              </span><span class="k">const</span><span class="w"> </span><span class="n">RTPFragmentationHeader</span><span class="o">*</span><span class="w"> </span><span class="n">fragmentation</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK_RUN_ON</span><span class="p">(</span><span class="n">encoder_queue_</span><span class="p">);</span>
+<span class="w">  </span><span class="n">rtc</span><span class="o">::</span><span class="n">ArrayView</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="kt">uint8_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">payload</span><span class="p">(</span><span class="n">payloadData</span><span class="p">,</span><span class="w"> </span><span class="n">payloadSize</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">media_transport</span><span class="p">()</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">nullptr</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">SendMediaTransportAudio</span><span class="p">(</span><span class="n">frameType</span><span class="p">,</span><span class="w"> </span><span class="n">payloadType</span><span class="p">,</span><span class="w"> </span><span class="n">timeStamp</span><span class="p">,</span><span class="w"> </span><span class="n">payload</span><span class="p">,</span>
+<span class="w">                                   </span><span class="n">fragmentation</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">SendRtpAudio</span><span class="p">(</span><span class="n">frameType</span><span class="p">,</span><span class="w"> </span><span class="n">payloadType</span><span class="p">,</span><span class="w"> </span><span class="n">timeStamp</span><span class="p">,</span><span class="w"> </span><span class="n">payload</span><span class="p">,</span>
+<span class="w">                        </span><span class="n">fragmentation</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>追寻<code>media_transport()</code>的创建至最初，发现是由<code>PeerConnectionInterface::use_media_transport</code>决定：</p>
+<div class="highlight"><pre><code><span></span><span class="n">src</span><span class="o">/</span><span class="n">api</span><span class="o">/</span><span class="n">peerconnectioninterface</span><span class="p">.</span><span class="n">h</span>
+<span class="n">PeerConnectionInterface</span><span class="o">::</span>
+<span class="c1">// If MediaTransportFactory is provided in PeerConnectionFactory, this flag</span>
+<span class="w">    </span><span class="c1">// informs PeerConnection that it should use the MediaTransportInterface.</span>
+<span class="w">    </span><span class="c1">// It&#39;s invalid to set it to |true| if the MediaTransportFactory wasn&#39;t</span>
+<span class="w">    </span><span class="c1">// provided.</span>
+<span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">use_media_transport</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+</code></pre></div>
+<p>WebRTC默认使用<code>use_media_transport = false</code>创建<code>PeerConnection</code>，所以在默认设置下<code>media_transport()</code>为null，因此<code>ChannelSend::SendData</code>执行<code>SendRtpAudio</code>。<br>
+<code>SendRtpAudio</code>将编码后的数据进行RTP打包，经SRTP加密后发送。<br>
+<code>_rtpRtcpModule</code>的实现类：<br>
+<code>src/modules/rtp_rtcp/source/rtp_rtcp_impl.cc</code>: <code>ModuleRtpRtcpImpl</code>。</p>
+<hr>
+
+
+
+
+<h4><p>原文出处：<a href='https://www.jianshu.com/p/7db5c4dfc3ad' target='blank'>WebRTC 音频AGC/AEC/NS各平台设置源码分析</a></p></h4>
+<p>直接贴代码，说明都写在注释中了。
+从下面代码中可以看出iOS平台的VPIO自己本身已经支持AEC、AGC和NS所以不使用WebRTC的软件算法。
+在iOS平台可以通过<code>ios_force_software_aec_HACK</code>强制开启软件回声消除:<code>echo_cancellation/extended_filter_aec</code>，
+但是AGC和NS目前没有选项可以设置。</p>
+<p>如果安卓平台内置了AEC、AGC和NS也是不使用WebRTC软件算法而使用平台内置算法。</p>
+<div class="highlight"><pre><code><span></span><span class="n">src</span><span class="o">/</span><span class="n">media</span><span class="o">/</span><span class="n">engine</span><span class="o">/</span><span class="n">webrtcvoiceengine</span><span class="p">.</span><span class="n">cc</span>
+
+<span class="kt">bool</span><span class="w"> </span><span class="n">WebRtcVoiceEngine</span><span class="o">::</span><span class="n">ApplyOptions</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">AudioOptions</span><span class="o">&amp;</span><span class="w"> </span><span class="n">options_in</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">worker_thread_checker_</span><span class="p">.</span><span class="n">CalledOnValidThread</span><span class="p">());</span>
+<span class="w">  </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;WebRtcVoiceEngine::ApplyOptions: &quot;</span>
+<span class="w">                   </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">options_in</span><span class="p">.</span><span class="n">ToString</span><span class="p">();</span>
+<span class="w">  </span><span class="n">AudioOptions</span><span class="w"> </span><span class="n">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">options_in</span><span class="p">;</span><span class="w">  </span><span class="c1">// The options are modified below.</span>
+
+<span class="w">  </span><span class="c1">// Set and adjust echo canceller options.</span>
+<span class="w">  </span><span class="c1">// kEcConference is AEC with high suppression.</span>
+<span class="w">  </span><span class="n">webrtc</span><span class="o">::</span><span class="n">EcModes</span><span class="w"> </span><span class="n">ec_mode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">kEcConference</span><span class="p">;</span>
+
+<span class="cp">#if defined(WEBRTC_IOS)</span>
+<span class="w">  </span><span class="c1">// wbt: 在ios上强制软件回声消除</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">options</span><span class="p">.</span><span class="n">ios_force_software_aec_HACK</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">      </span><span class="o">*</span><span class="n">options</span><span class="p">.</span><span class="n">ios_force_software_aec_HACK</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// EC may be forced on for a device known to have non-functioning platform</span>
+<span class="w">    </span><span class="c1">// AEC.</span>
+<span class="w">    </span><span class="n">options</span><span class="p">.</span><span class="n">echo_cancellation</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">    </span><span class="n">options</span><span class="p">.</span><span class="n">extended_filter_aec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_WARNING</span><span class="p">)</span>
+<span class="w">        </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Force software AEC on iOS. May conflict with platform AEC.&quot;</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="c1">// wbt: 默认使用VPIO内置的回声消除</span>
+<span class="w">    </span><span class="c1">// On iOS, VPIO provides built-in EC.</span>
+<span class="w">    </span><span class="n">options</span><span class="p">.</span><span class="n">echo_cancellation</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="n">options</span><span class="p">.</span><span class="n">extended_filter_aec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Always disable AEC on iOS. Use built-in instead.&quot;</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="cp">#elif defined(WEBRTC_ANDROID)</span>
+<span class="w">  </span><span class="n">ec_mode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">kEcAecm</span><span class="p">;</span>
+<span class="w">  </span><span class="n">options</span><span class="p">.</span><span class="n">extended_filter_aec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="cp">#endif</span>
+
+<span class="w">  </span><span class="c1">// wbt :除iOS平台外：如果启用了估计延时不确定性Delay Agnostic设置则自动开启aec</span>
+<span class="w">  </span><span class="c1">// Delay Agnostic AEC automatically turns on EC if not set except on iOS</span>
+<span class="w">  </span><span class="c1">// where the feature is not supported.</span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">use_delay_agnostic_aec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="cp">#if !defined(WEBRTC_IOS)</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">options</span><span class="p">.</span><span class="n">delay_agnostic_aec</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">use_delay_agnostic_aec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">options</span><span class="p">.</span><span class="n">delay_agnostic_aec</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">use_delay_agnostic_aec</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">options</span><span class="p">.</span><span class="n">echo_cancellation</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">      </span><span class="n">options</span><span class="p">.</span><span class="n">extended_filter_aec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">      </span><span class="n">ec_mode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">kEcConference</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="cp">#endif</span>
+
+<span class="c1">// Set and adjust noise suppressor options.</span>
+<span class="cp">#if defined(WEBRTC_IOS)</span>
+<span class="w">  </span><span class="c1">// On iOS, VPIO provides built-in NS.</span>
+<span class="w">  </span><span class="c1">// wbt: iOS平台使用VIPIO内置的降噪。</span>
+<span class="w">  </span><span class="c1">// 关闭键盘声音检测（因为触摸设备没有键盘)，并且关闭实验性降噪。</span>
+<span class="w">  </span><span class="n">options</span><span class="p">.</span><span class="n">noise_suppression</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="n">options</span><span class="p">.</span><span class="n">typing_detection</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="n">options</span><span class="p">.</span><span class="n">experimental_ns</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Always disable NS on iOS. Use built-in instead.&quot;</span><span class="p">;</span>
+<span class="cp">#elif defined(WEBRTC_ANDROID)</span>
+<span class="w">  </span><span class="c1">// wbt: Android平台</span>
+<span class="w">  </span><span class="c1">// 关闭键盘声音检测（因为触摸设备没有键盘)，并且关闭实验性降噪。</span>
+<span class="w">  </span><span class="n">options</span><span class="p">.</span><span class="n">typing_detection</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="n">options</span><span class="p">.</span><span class="n">experimental_ns</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="cp">#endif</span>
+
+<span class="c1">// Set and adjust gain control options.</span>
+<span class="cp">#if defined(WEBRTC_IOS)</span>
+<span class="w">  </span><span class="c1">// On iOS, VPIO provides built-in AGC.</span>
+<span class="w">  </span><span class="c1">// wbt: iOS平台使用VIPIO内置的AGC增益。并且关闭试验性AGC.</span>
+<span class="w">  </span><span class="n">options</span><span class="p">.</span><span class="n">auto_gain_control</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="n">options</span><span class="p">.</span><span class="n">experimental_agc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Always disable AGC on iOS. Use built-in instead.&quot;</span><span class="p">;</span>
+<span class="cp">#elif defined(WEBRTC_ANDROID)</span>
+<span class="w">  </span><span class="c1">// wbt: Android平台关闭试验性AGC.</span>
+<span class="w">  </span><span class="n">options</span><span class="p">.</span><span class="n">experimental_agc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="cp">#endif</span>
+
+<span class="cp">#if defined(WEBRTC_IOS) || defined(WEBRTC_ANDROID)</span>
+<span class="w">  </span><span class="c1">// wbt: 手机平台</span>
+<span class="w">  </span><span class="c1">// 如果设置了&quot;WebRTC-Audio-MinimizeResamplingOnMobile&quot;则关闭AGC。</span>
+<span class="w">  </span><span class="c1">// 然后如果开启降噪且未开启回声消除则关闭高通滤波器。</span>
+
+<span class="w">  </span><span class="c1">// Turn off the gain control if specified by the field trial.</span>
+<span class="w">  </span><span class="c1">// The purpose of the field trial is to reduce the amount of resampling</span>
+<span class="w">  </span><span class="c1">// performed inside the audio processing module on mobile platforms by</span>
+<span class="w">  </span><span class="c1">// whenever possible turning off the fixed AGC mode and the high-pass filter.</span>
+<span class="w">  </span><span class="c1">// (https://bugs.chromium.org/p/webrtc/issues/detail?id=6181).</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">webrtc</span><span class="o">::</span><span class="n">field_trial</span><span class="o">::</span><span class="n">IsEnabled</span><span class="p">(</span>
+<span class="w">          </span><span class="s">&quot;WebRTC-Audio-MinimizeResamplingOnMobile&quot;</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">options</span><span class="p">.</span><span class="n">auto_gain_control</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Disable AGC according to field trial.&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="p">(</span><span class="n">options</span><span class="p">.</span><span class="n">noise_suppression</span><span class="p">.</span><span class="n">value_or</span><span class="p">(</span><span class="nb">false</span><span class="p">)</span><span class="w"> </span><span class="o">||</span>
+<span class="w">          </span><span class="n">options</span><span class="p">.</span><span class="n">echo_cancellation</span><span class="p">.</span><span class="n">value_or</span><span class="p">(</span><span class="nb">false</span><span class="p">)))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// If possible, turn off the high-pass filter.</span>
+<span class="w">      </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span>
+<span class="w">          </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Disable high-pass filter in response to field trial.&quot;</span><span class="p">;</span>
+<span class="w">      </span><span class="n">options</span><span class="p">.</span><span class="n">highpass_filter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="cp">#endif</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">options</span><span class="p">.</span><span class="n">echo_cancellation</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Check if platform supports built-in EC. Currently only supported on</span>
+<span class="w">    </span><span class="c1">// Android and in combination with Java based audio layer.</span>
+<span class="w">    </span><span class="c1">// TODO(henrika): investigate possibility to support built-in EC also</span>
+<span class="w">    </span><span class="c1">// in combination with Open SL ES audio.</span>
+<span class="w">    </span><span class="c1">// wbt: 目前只有android支持内置aec</span>
+<span class="w">    </span><span class="c1">// 如果支持内置aec而且开启回声消除echo_cancellation和未开启use_delay_agnostic_aec</span>
+<span class="w">    </span><span class="c1">// 且内置EnableBuiltInAEC时关闭软件回声消除从而使用平台内置回声消除。</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">built_in_aec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">adm</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">BuiltInAECIsAvailable</span><span class="p">();</span><span class="c1">//除了Android平台为true，其他平台默认为false</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">built_in_aec</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Built-in EC exists on this device and use_delay_agnostic_aec is not</span>
+<span class="w">      </span><span class="c1">// overriding it. Enable/Disable it according to the echo_cancellation</span>
+<span class="w">      </span><span class="c1">// audio option.</span>
+<span class="w">      </span><span class="k">const</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">enable_built_in_aec</span><span class="w"> </span><span class="o">=</span>
+<span class="w">          </span><span class="o">*</span><span class="n">options</span><span class="p">.</span><span class="n">echo_cancellation</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="n">use_delay_agnostic_aec</span><span class="p">;</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">adm</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">EnableBuiltInAEC</span><span class="p">(</span><span class="n">enable_built_in_aec</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">          </span><span class="n">enable_built_in_aec</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Disable internal software EC if built-in EC is enabled,</span>
+<span class="w">        </span><span class="c1">// i.e., replace the software EC with the built-in EC.</span>
+<span class="w">        </span><span class="n">options</span><span class="p">.</span><span class="n">echo_cancellation</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">        </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span>
+<span class="w">            </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Disabling EC since built-in EC will be used instead&quot;</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// 这里的ec_mode在上面会根据情况设置为默认会议积极的aec还是手机型aec。</span>
+<span class="w">    </span><span class="n">webrtc</span><span class="o">::</span><span class="n">apm_helpers</span><span class="o">::</span><span class="n">SetEcStatus</span><span class="p">(</span><span class="n">apm</span><span class="p">(),</span><span class="w"> </span><span class="o">*</span><span class="n">options</span><span class="p">.</span><span class="n">echo_cancellation</span><span class="p">,</span>
+<span class="w">                                     </span><span class="n">ec_mode</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// 判断是否支持平台内置agc,如果支持则关闭软件agc</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">options</span><span class="p">.</span><span class="n">auto_gain_control</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">built_in_agc_avaliable</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">adm</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">BuiltInAGCIsAvailable</span><span class="p">();</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">built_in_agc_avaliable</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">adm</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">EnableBuiltInAGC</span><span class="p">(</span><span class="o">*</span><span class="n">options</span><span class="p">.</span><span class="n">auto_gain_control</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">          </span><span class="o">*</span><span class="n">options</span><span class="p">.</span><span class="n">auto_gain_control</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Disable internal software AGC if built-in AGC is enabled,</span>
+<span class="w">        </span><span class="c1">// i.e., replace the software AGC with the built-in AGC.</span>
+<span class="w">        </span><span class="n">options</span><span class="p">.</span><span class="n">auto_gain_control</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">        </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span>
+<span class="w">            </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Disabling AGC since built-in AGC will be used instead&quot;</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">webrtc</span><span class="o">::</span><span class="n">apm_helpers</span><span class="o">::</span><span class="n">SetAgcStatus</span><span class="p">(</span><span class="n">apm</span><span class="p">(),</span><span class="w"> </span><span class="o">*</span><span class="n">options</span><span class="p">.</span><span class="n">auto_gain_control</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">//agc参数设置</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">options</span><span class="p">.</span><span class="n">tx_agc_target_dbov</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">options</span><span class="p">.</span><span class="n">tx_agc_digital_compression_gain</span><span class="w"> </span><span class="o">||</span>
+<span class="w">      </span><span class="n">options</span><span class="p">.</span><span class="n">tx_agc_limiter</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Override default_agc_config_. Generally, an unset option means &quot;leave</span>
+<span class="w">    </span><span class="c1">// the VoE bits alone&quot; in this function, so we want whatever is set to be</span>
+<span class="w">    </span><span class="c1">// stored as the new &quot;default&quot;. If we didn&#39;t, then setting e.g.</span>
+<span class="w">    </span><span class="c1">// tx_agc_target_dbov would reset digital compression gain and limiter</span>
+<span class="w">    </span><span class="c1">// settings.</span>
+<span class="w">    </span><span class="n">default_agc_config_</span><span class="p">.</span><span class="n">targetLeveldBOv</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">options</span><span class="p">.</span><span class="n">tx_agc_target_dbov</span><span class="p">.</span><span class="n">value_or</span><span class="p">(</span>
+<span class="w">        </span><span class="n">default_agc_config_</span><span class="p">.</span><span class="n">targetLeveldBOv</span><span class="p">);</span>
+<span class="w">    </span><span class="n">default_agc_config_</span><span class="p">.</span><span class="n">digitalCompressionGaindB</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">options</span><span class="p">.</span><span class="n">tx_agc_digital_compression_gain</span><span class="p">.</span><span class="n">value_or</span><span class="p">(</span>
+<span class="w">            </span><span class="n">default_agc_config_</span><span class="p">.</span><span class="n">digitalCompressionGaindB</span><span class="p">);</span>
+<span class="w">    </span><span class="n">default_agc_config_</span><span class="p">.</span><span class="n">limiterEnable</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">options</span><span class="p">.</span><span class="n">tx_agc_limiter</span><span class="p">.</span><span class="n">value_or</span><span class="p">(</span><span class="n">default_agc_config_</span><span class="p">.</span><span class="n">limiterEnable</span><span class="p">);</span>
+<span class="w">    </span><span class="n">webrtc</span><span class="o">::</span><span class="n">apm_helpers</span><span class="o">::</span><span class="n">SetAgcConfig</span><span class="p">(</span><span class="n">apm</span><span class="p">(),</span><span class="w"> </span><span class="n">default_agc_config_</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 如果支持平台内置降噪则关闭软件降噪</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">options</span><span class="p">.</span><span class="n">noise_suppression</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">adm</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">BuiltInNSIsAvailable</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kt">bool</span><span class="w"> </span><span class="n">builtin_ns</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">options</span><span class="p">.</span><span class="n">noise_suppression</span><span class="p">;</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">adm</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">EnableBuiltInNS</span><span class="p">(</span><span class="n">builtin_ns</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">builtin_ns</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Disable internal software NS if built-in NS is enabled,</span>
+<span class="w">        </span><span class="c1">// i.e., replace the software NS with the built-in NS.</span>
+<span class="w">        </span><span class="n">options</span><span class="p">.</span><span class="n">noise_suppression</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">        </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span>
+<span class="w">            </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Disabling NS since built-in NS will be used instead&quot;</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">webrtc</span><span class="o">::</span><span class="n">apm_helpers</span><span class="o">::</span><span class="n">SetNsStatus</span><span class="p">(</span><span class="n">apm</span><span class="p">(),</span><span class="w"> </span><span class="o">*</span><span class="n">options</span><span class="p">.</span><span class="n">noise_suppression</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 立体声通道交换</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">options</span><span class="p">.</span><span class="n">stereo_swapping</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Stereo swapping enabled? &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="o">*</span><span class="n">options</span><span class="p">.</span><span class="n">stereo_swapping</span><span class="p">;</span>
+<span class="w">    </span><span class="n">audio_state</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">SetStereoChannelSwapping</span><span class="p">(</span><span class="o">*</span><span class="n">options</span><span class="p">.</span><span class="n">stereo_swapping</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// jitter buffer最大包数设置</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">options</span><span class="p">.</span><span class="n">audio_jitter_buffer_max_packets</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;NetEq capacity is &quot;</span>
+<span class="w">                     </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="o">*</span><span class="n">options</span><span class="p">.</span><span class="n">audio_jitter_buffer_max_packets</span><span class="p">;</span>
+<span class="w">    </span><span class="n">audio_jitter_buffer_max_packets_</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">(</span><span class="mi">20</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">options</span><span class="p">.</span><span class="n">audio_jitter_buffer_max_packets</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// jitter buffer加速设置</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">options</span><span class="p">.</span><span class="n">audio_jitter_buffer_fast_accelerate</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;NetEq fast mode? &quot;</span>
+<span class="w">                     </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="o">*</span><span class="n">options</span><span class="p">.</span><span class="n">audio_jitter_buffer_fast_accelerate</span><span class="p">;</span>
+<span class="w">    </span><span class="n">audio_jitter_buffer_fast_accelerate_</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="o">*</span><span class="n">options</span><span class="p">.</span><span class="n">audio_jitter_buffer_fast_accelerate</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// jitter buffer最小延迟（毫秒）</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">options</span><span class="p">.</span><span class="n">audio_jitter_buffer_min_delay_ms</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;NetEq minimum delay is &quot;</span>
+<span class="w">                     </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="o">*</span><span class="n">options</span><span class="p">.</span><span class="n">audio_jitter_buffer_min_delay_ms</span><span class="p">;</span>
+<span class="w">    </span><span class="n">audio_jitter_buffer_min_delay_ms_</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="o">*</span><span class="n">options</span><span class="p">.</span><span class="n">audio_jitter_buffer_min_delay_ms</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 键盘声音检测</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">options</span><span class="p">.</span><span class="n">typing_detection</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Typing detection is enabled? &quot;</span>
+<span class="w">                     </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="o">*</span><span class="n">options</span><span class="p">.</span><span class="n">typing_detection</span><span class="p">;</span>
+<span class="w">    </span><span class="n">webrtc</span><span class="o">::</span><span class="n">apm_helpers</span><span class="o">::</span><span class="n">SetTypingDetectionStatus</span><span class="p">(</span><span class="n">apm</span><span class="p">(),</span>
+<span class="w">                                                  </span><span class="o">*</span><span class="n">options</span><span class="p">.</span><span class="n">typing_detection</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">webrtc</span><span class="o">::</span><span class="n">Config</span><span class="w"> </span><span class="n">config</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">options</span><span class="p">.</span><span class="n">delay_agnostic_aec</span><span class="p">)</span>
+<span class="w">    </span><span class="n">delay_agnostic_aec_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">options</span><span class="p">.</span><span class="n">delay_agnostic_aec</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">delay_agnostic_aec_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Delay agnostic aec is enabled? &quot;</span>
+<span class="w">                     </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="o">*</span><span class="n">delay_agnostic_aec_</span><span class="p">;</span>
+<span class="w">    </span><span class="n">config</span><span class="p">.</span><span class="n">Set</span><span class="o">&lt;</span><span class="n">webrtc</span><span class="o">::</span><span class="n">DelayAgnostic</span><span class="o">&gt;</span><span class="p">(</span>
+<span class="w">        </span><span class="n">new</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">DelayAgnostic</span><span class="p">(</span><span class="o">*</span><span class="n">delay_agnostic_aec_</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">options</span><span class="p">.</span><span class="n">extended_filter_aec</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">extended_filter_aec_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">options</span><span class="p">.</span><span class="n">extended_filter_aec</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">extended_filter_aec_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Extended filter aec is enabled? &quot;</span>
+<span class="w">                     </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="o">*</span><span class="n">extended_filter_aec_</span><span class="p">;</span>
+<span class="w">    </span><span class="n">config</span><span class="p">.</span><span class="n">Set</span><span class="o">&lt;</span><span class="n">webrtc</span><span class="o">::</span><span class="n">ExtendedFilter</span><span class="o">&gt;</span><span class="p">(</span>
+<span class="w">        </span><span class="n">new</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">ExtendedFilter</span><span class="p">(</span><span class="o">*</span><span class="n">extended_filter_aec_</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">options</span><span class="p">.</span><span class="n">experimental_ns</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">experimental_ns_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">options</span><span class="p">.</span><span class="n">experimental_ns</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">experimental_ns_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Experimental ns is enabled? &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="o">*</span><span class="n">experimental_ns_</span><span class="p">;</span>
+<span class="w">    </span><span class="n">config</span><span class="p">.</span><span class="n">Set</span><span class="o">&lt;</span><span class="n">webrtc</span><span class="o">::</span><span class="n">ExperimentalNs</span><span class="o">&gt;</span><span class="p">(</span>
+<span class="w">        </span><span class="n">new</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">ExperimentalNs</span><span class="p">(</span><span class="o">*</span><span class="n">experimental_ns_</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">webrtc</span><span class="o">::</span><span class="n">AudioProcessing</span><span class="o">::</span><span class="n">Config</span><span class="w"> </span><span class="n">apm_config</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">apm</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">GetConfig</span><span class="p">();</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">options</span><span class="p">.</span><span class="n">highpass_filter</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">apm_config</span><span class="p">.</span><span class="n">high_pass_filter</span><span class="p">.</span><span class="n">enabled</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">options</span><span class="p">.</span><span class="n">highpass_filter</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 残留回声检测</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">options</span><span class="p">.</span><span class="n">residual_echo_detector</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">apm_config</span><span class="p">.</span><span class="n">residual_echo_detector</span><span class="p">.</span><span class="n">enabled</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">options</span><span class="p">.</span><span class="n">residual_echo_detector</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">apm</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">SetExtraOptions</span><span class="p">(</span><span class="n">config</span><span class="p">);</span>
+<span class="w">  </span><span class="n">apm</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">ApplyConfig</span><span class="p">(</span><span class="n">apm_config</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>虽然没做android，但是顺便看了一下android上使用平台内置硬件AEC，NS的代码，代码在：<br>
+<code>src/sdk/android/src/java/org/webrtc/audio/WebRtcAudioEffects.java</code><br>
+在java中使用<code>AudioEffect</code>检测是否支持硬件AEC和NS，使用<code>AcousticEchoCanceler</code>和<code>NoiseSuppressor</code>处理AEC和NS。<br>
+而AGC没有平台硬件支持，直接使用WebRTC中的算法。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "WebRTC音频引擎实现分析与采集流程.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

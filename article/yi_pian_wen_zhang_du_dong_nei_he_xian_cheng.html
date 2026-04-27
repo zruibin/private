@@ -1,0 +1,700 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>一篇文章读懂内核线程 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="一篇文章读懂内核线程,Linux,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="一篇文章读懂内核线程" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>一篇文章读懂内核线程</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2021-02-08 11:20
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_linux.html' class='article_tag'>Linux</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://mp.weixin.qq.com/s/oPjucriYamznm63joOqDnQ' target='blank'>一篇文章读懂内核线程</a></p></h4>
+<h4>目录：</h4>
+<div class="highlight"><pre><code><span></span><span class="mf">1.</span><span class="w"> </span><span class="n">开场白</span><span class="w">  </span>
+<span class="mf">2.</span><span class="w"> </span><span class="n">kthreadd</span><span class="w"> </span><span class="n">的诞生</span><span class="w">  </span>
+<span class="mf">3.</span><span class="w"> </span><span class="n">kthreadd</span><span class="w"> </span><span class="n">内核线程处理流程</span><span class="w">  </span>
+<span class="mf">4.</span><span class="w"> </span><span class="n">kthread</span><span class="w"> </span><span class="n">处理流程</span><span class="w">  </span>
+<span class="mf">5.</span><span class="w"> </span><span class="n">kthread_run</span><span class="p">()</span><span class="w"> </span><span class="n">函数</span><span class="w">  </span>
+<span class="mf">6.</span><span class="w"> </span><span class="n">kthread_stop</span><span class="p">()</span><span class="w"> </span><span class="n">函数</span><span class="w">  </span>
+<span class="mf">7.</span><span class="w"> </span><span class="n">内核线程执行处理函数细节</span><span class="w">  </span>
+<span class="mf">8.</span><span class="w"> </span><span class="n">内核线程上下文切换细节</span><span class="w">  </span>
+<span class="mf">9.</span><span class="w"> </span><span class="n">创建内核线程用例</span><span class="w">  </span>
+<span class="mf">10.</span><span class="n">实践环节</span>
+</code></pre></div>
+<h2>1.开场白</h2>
+<ul>
+<li>环境：</li>
+<li>处理器架构：arm64</li>
+<li>内核源码：linux-5.11</li>
+<li>ubuntu版本：20.04.1</li>
+<li>代码阅读工具：vim+ctags+cscope</li>
+</ul>
+<p>在linux系统中， 我们接触最多的莫过于用户空间的任务，像用户线程或用户进程，因为他们太活跃了，也太耀眼了以至于我们感受不到内核线程的存在，但是内核线程却
+在背后默默地付出着，如内存回收，脏页回写，处理大量的软中断等，如果没有内核线程那么linux世界是那么的可怕！<strong>本文力求与完整介绍完内核线程的整个生命周期</strong>，如内核线程的创建、调度等等，当然本文还是主要从内存管理和进程调度两个维度来解析，且不会涉及到具体的内核线程如kswapd的实现，最后我们会以一个简单的
+内核模块来说明如何在驱动代码中来创建使用内核线程。</p>
+<p>在进入我们真正的主题之前，我们需要知道一下事实：</p>
+<ol>
+<li>内核线程永远运行于内核态绝不会跑到用户态去执行。</li>
+<li>由于内核线程运行于内核态，所有它的权限很高，请注意这里说的是权限很高并不意味着它的优先级高，所有他可以直接做到操作页表，维护cache, 读写系统寄存器等操作。</li>
+<li>内核线性是没有地址空间的概念，准确的来说是没有用户地址空间的概念，使用的是所有进程共享的内核地址空间，但是调度的时候会借用前一个进程的地址空间。</li>
+<li>内核线程并没有什么特别神秘的地方，他和普通的用户任务一样参与系统调度，也可以被迁移到任何cpu上运行。</li>
+<li>每个cpu都有自己的idle进程，实质上也是内核线程，但是他们比较特殊，一来是被静态创建，二来他们的优先级最低，cpu上没有其他进程运行的时候idle进程才运行。</li>
+<li>除了初始化阶段0号内核线程和kthreadd本身，其他所有的内核线程都是被kthreadd内核线程来间接创建。</li>
+</ol>
+<h2>2.kthreadd的诞生</h2>
+<p>盘古开天辟地，我们知道linux所有任务的祖先是0号进程，然后0号进程创建了天字第一号的1号init进程，init进程是所有用户任务的祖先，而<strong>内核线程同样也有自己的祖先那就是kthreadd内核线程他的pid是2</strong>，我们通过top命令可以观察到：红色方框都是父进程为2号进程的内核线程，绿色方框为kthreadd，他的父进程为0号进程。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210208-112000-1.png" alt=""></p>
+<p>下面我们来看内核线程的祖先线程kthreadd如何创建的：</p>
+<div class="highlight"><pre><code><span></span><span class="n">start_kernel</span><span class="w">   </span><span class="c1">//init/main.c  </span>
+<span class="o">-&gt;</span><span class="n">arch_call_rest_init</span><span class="w">  </span>
+<span class="w">    </span><span class="o">-&gt;</span><span class="n">rest_init</span><span class="w">  </span>
+<span class="w">        </span><span class="o">-&gt;</span><span class="n">pid</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kernel_thread</span><span class="p">(</span><span class="n">kthreadd</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="n">CLONE_FS</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">CLONE_FILES</span><span class="p">)</span>
+</code></pre></div>
+<p>可以看的在<code>rest_init</code>中调用<code>kernel_thread</code>来创建kthreadd内核线程，实际上初始化阶段有两个内核线程比较特殊一个是0号的idle（唯一一个没有通过fork创建的任务），一个是被idle创建的kthreadd内核线程（内核初始化阶段可以看成idle进程在做初始化）。</p>
+<p>我们再来看看<code>kernel_thread</code>是如何实现的：</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/*        </span>
+<span class="cm">* Create a kernel thread.  </span>
+<span class="cm">*/</span><span class="w">  </span>
+<span class="kt">pid_t</span><span class="w"> </span><span class="nf">kernel_thread</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">fn</span><span class="p">)(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="p">),</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">arg</span><span class="p">,</span><span class="w"> </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">flags</span><span class="p">)</span><span class="w">         </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">kernel_clone_args</span><span class="w"> </span><span class="n">args</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">            </span><span class="p">.</span><span class="n">flags</span><span class="w">          </span><span class="o">=</span><span class="w"> </span><span class="p">((</span><span class="n">lower_32_bits</span><span class="p">(</span><span class="n">flags</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">CLONE_VM</span><span class="w"> </span><span class="o">|</span><span class="w">          </span>
+<span class="w">                            </span><span class="err">¦</span><span class="w">   </span><span class="n">CLONE_UNTRACED</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="o">~</span><span class="n">CSIGNAL</span><span class="p">),</span><span class="w">  </span>
+<span class="w">            </span><span class="p">.</span><span class="n">exit_signal</span><span class="w">    </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">lower_32_bits</span><span class="p">(</span><span class="n">flags</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">CSIGNAL</span><span class="p">),</span><span class="w">  </span>
+<span class="w">            </span><span class="p">.</span><span class="n">stack</span><span class="w">          </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="p">)</span><span class="n">fn</span><span class="p">,</span><span class="w">                           </span>
+<span class="w">            </span><span class="p">.</span><span class="n">stack_size</span><span class="w">     </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="p">)</span><span class="n">arg</span><span class="p">,</span><span class="w">                          </span>
+<span class="w">    </span><span class="p">};</span><span class="w">  </span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">kernel_clone</span><span class="p">(</span><span class="o">&amp;</span><span class="n">args</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这里需要注意两点：<strong>1.fork时传递了CLONE_VM标志  2.如何标识要创建出来的是内核线程不是普通的用户任务</strong></p>
+<p>我们先来看看CLONE_VM标志对fork的影响：</p>
+<div class="highlight"><pre><code><span></span><span class="n">kernel_clone</span><span class="w">  </span>
+<span class="o">-&gt;</span><span class="n">copy_process</span><span class="w">    </span>
+<span class="w">    </span><span class="o">-&gt;</span><span class="n">copy_mm</span><span class="w">  </span>
+<span class="w">        </span><span class="o">-&gt;</span><span class="n">dup_mm</span><span class="w">  </span>
+<span class="w">            </span><span class="o">-&gt;</span><span class="p">....</span><span class="w">  </span>
+<span class="w">                </span><span class="mi">1394</span><span class="w">         </span><span class="n">tsk</span><span class="o">-&gt;</span><span class="n">mm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span><span class="w">                                     </span>
+<span class="w">                </span><span class="mi">1395</span><span class="w">         </span><span class="n">tsk</span><span class="o">-&gt;</span><span class="n">active_mm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span><span class="w">                              </span>
+<span class="w">                </span><span class="mi">1396</span><span class="w">                                                             </span>
+<span class="w">                </span><span class="mi">1397</span><span class="w">         </span><span class="cm">/*                                                  </span>
+<span class="cm">                1398         ¦* Are we cloning a kernel thread?                  </span>
+<span class="cm">                1399         ¦*                                                  </span>
+<span class="cm">                1400         ¦* We need to steal a active VM for that..          </span>
+<span class="cm">                1401         ¦*/</span><span class="w">                                                 </span>
+<span class="w">                </span><span class="mi">1402</span><span class="w">         </span><span class="n">oldmm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">current</span><span class="o">-&gt;</span><span class="n">mm</span><span class="p">;</span><span class="w">                                </span>
+<span class="w">                </span><span class="mi">1403</span><span class="w">         </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">oldmm</span><span class="p">)</span><span class="w">                                         </span>
+<span class="w">                </span><span class="mi">1404</span><span class="w">                 </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w">                                   </span>
+<span class="w">                </span><span class="mi">1405</span><span class="w">                                                             </span>
+<span class="w">                </span><span class="mi">1406</span><span class="w">         </span><span class="cm">/* initialize the new vmacache entries */</span><span class="w">           </span>
+<span class="w">                </span><span class="mi">1407</span><span class="w">         </span><span class="n">vmacache_flush</span><span class="p">(</span><span class="n">tsk</span><span class="p">);</span><span class="w">                                </span>
+<span class="w">                </span><span class="mi">1408</span><span class="w">                                                             </span>
+<span class="w">                </span><span class="mi">1409</span><span class="w">         </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">clone_flags</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">CLONE_VM</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">                       </span>
+<span class="w">                </span><span class="mi">1410</span><span class="w">                 </span><span class="n">mmget</span><span class="p">(</span><span class="n">oldmm</span><span class="p">);</span><span class="w">                               </span>
+<span class="w">                </span><span class="mi">1411</span><span class="w">                 </span><span class="n">mm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">oldmm</span><span class="p">;</span><span class="w">                                 </span>
+<span class="w">                </span><span class="mi">1412</span><span class="w">                 </span><span class="k">goto</span><span class="w"> </span><span class="n">good_mm</span><span class="p">;</span><span class="w">                               </span>
+<span class="w">                </span><span class="mi">1413</span><span class="w">         </span><span class="p">}</span><span class="w">                                                   </span>
+<span class="w">                </span><span class="mi">1414</span><span class="w">                                                             </span>
+<span class="w">                </span><span class="mi">1415</span><span class="w">         </span><span class="n">retval</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">-</span><span class="n">ENOMEM</span><span class="p">;</span><span class="w">                                   </span>
+<span class="w">                </span><span class="mi">1416</span><span class="w">         </span><span class="n">mm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">dup_mm</span><span class="p">(</span><span class="n">tsk</span><span class="p">,</span><span class="w"> </span><span class="n">current</span><span class="o">-&gt;</span><span class="n">mm</span><span class="p">);</span><span class="w">                      </span>
+<span class="w">                </span><span class="mi">1417</span><span class="w">         </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">mm</span><span class="p">)</span><span class="w">                                            </span>
+<span class="w">                </span><span class="mi">1418</span><span class="w">                 </span><span class="k">goto</span><span class="w"> </span><span class="n">fail_nomem</span><span class="p">;</span><span class="w">                            </span>
+<span class="w">                </span><span class="mi">1419</span><span class="w">                                                             </span>
+<span class="w">                </span><span class="mi">1420</span><span class="w"> </span><span class="n">good_mm</span><span class="o">:</span><span class="w">                                                    </span>
+<span class="w">                </span><span class="mi">1421</span><span class="w">         </span><span class="n">tsk</span><span class="o">-&gt;</span><span class="n">mm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">mm</span><span class="p">;</span><span class="w">                                       </span>
+<span class="w">                </span><span class="mi">1422</span><span class="w">         </span><span class="n">tsk</span><span class="o">-&gt;</span><span class="n">active_mm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">mm</span><span class="p">;</span><span class="w">                                </span>
+<span class="w">                </span><span class="mi">1423</span><span class="w">         </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+</code></pre></div>
+<p>可以看的当我们传递了CLONE_VM标志之后，本来应该走到1409 行进程处理的，但是我们需要知道的是1403行可能判断为空，因为这里父进程为idle为内核线程，凭直觉我们知道代码应该从 1404返回了，但是不能光凭直觉要拿出证据，那就需要看看idle进程长啥样了：</p>
+<div class="highlight"><pre><code><span></span><span class="mi">64</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">task_struct</span><span class="w"> </span><span class="n">init_task</span><span class="w">                  </span><span class="c1">//init/init_task.c                       </span>
+<span class="mi">69</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w">                                                         </span>
+<span class="w">            </span><span class="p">...</span><span class="w">  </span>
+<span class="mi">85</span><span class="w">         </span><span class="p">.</span><span class="n">mm</span><span class="w">             </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w">                             </span>
+<span class="mi">86</span><span class="w">         </span><span class="p">.</span><span class="n">active_mm</span><span class="w">      </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">init_mm</span><span class="p">,</span>
+</code></pre></div>
+<p>上面是静态创建的idle进程，可以看的他的进程控制块的 .mm 为空， <code>.active_mm</code>为<code>&amp;init_mm,</code>所有啊，<strong>我们的kthreadd内核线程的<code>tsk-&gt;mm = tsk-&gt;active_mm =NULL</code>;</strong>所以我们上面的<strong>猜想是对的代码直接从 1404 返回了</strong>，这里也是他应该拥有的属性，因为我们知道内核线程没有用户地址空间（使用tsk-&gt;mm来描述），所以所有的内核线程的tsk-&gt;mm都为空，这也是判断任务是否为内核线程的一个条件，但是<code>tsk-&gt;active_mm</code>就不一定了，内核线程在每次进程切换的时候都会借用前一个进程的<code>tsk-&gt;active_mm</code>赋值到自己<code>tsk-&gt;active_mm</code>上，后面会讲到。这里需要注意的是，有一个内核线程很特殊，特殊到他的<code>tsk-&gt;active_mm</code>不是在进程切换的时候被赋值而是静态初始化号，他就是上面的idle线程<code>.active_mm = &amp;init_mm</code>。</p>
+<p>我们来看下init_mm是什么内容，有什么猫腻：</p>
+<div class="highlight"><pre><code><span></span><span class="n">mm</span><span class="o">/</span><span class="n">init</span><span class="o">-</span><span class="n">mm</span><span class="p">.</span><span class="n">c</span><span class="w">  </span>
+
+<span class="k">struct</span><span class="w"> </span><span class="nc">mm_struct</span><span class="w"> </span><span class="n">init_mm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="p">.</span><span class="n">mm_rb</span><span class="w">          </span><span class="o">=</span><span class="w"> </span><span class="n">RB_ROOT</span><span class="p">,</span><span class="w">  </span>
+<span class="w">        </span><span class="p">.</span><span class="n">pgd</span><span class="w">            </span><span class="o">=</span><span class="w"> </span><span class="n">swapper_pg_dir</span><span class="p">,</span><span class="w">       </span>
+<span class="w">        </span><span class="p">...</span>
+</code></pre></div>
+<p>可以看到他的特殊之处在于它的<code>tsk-&gt;active_mm-&gt;pgd</code>为<code>swapper_pg_dir</code>，我们知道这是主内核页表，我们知道系统初始化的时候，会出现3个特殊的任务0，1，2号，这几个任务刚开始都是内核线程，他们之间进行切换的时候使用的都是<code>swapper_pg_dir</code>这个页表，也很合理，因为都访问内核空间，一旦有用户进程介入参与调度了就不一样了，就可以借用用户的<code>tsk-&gt;active_mm-&gt;pgd</code>（这个时候不再是<code>swapper_pg_dir</code>，但是没有关系，通过<code>ttbr1_el1</code>同样可以访问到<code>swapper_pg_dir</code>页表来访问内核空间）。</p>
+<p><strong>再来看看如何标识要创建的是内核线程的？</strong></p>
+<div class="highlight"><pre><code><span></span><span class="n">kernel_clone</span><span class="w">  </span>
+<span class="o">-&gt;</span><span class="n">copy_process</span><span class="w">  </span>
+<span class="w">    </span><span class="o">-&gt;</span><span class="n">copy_thread</span><span class="w">   </span><span class="c1">//arch/arm64/kernel/process.c  </span>
+<span class="w">        </span><span class="o">-&gt;</span><span class="w">  </span><span class="p">...</span><span class="w">  </span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">likely</span><span class="p">(</span><span class="o">!</span><span class="p">(</span><span class="n">p</span><span class="o">-&gt;</span><span class="n">flags</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">PF_KTHREAD</span><span class="p">)))</span><span class="w"> </span><span class="p">{</span><span class="w">   </span><span class="c1">//创建用户任务的情况  </span>
+<span class="w">                </span><span class="p">...</span><span class="w">  </span>
+<span class="w">            </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w">   </span><span class="c1">//创建内核线程的情况  </span>
+<span class="w">                        </span><span class="n">memset</span><span class="p">(</span><span class="n">childregs</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">pt_regs</span><span class="p">));</span><span class="w">          </span>
+<span class="w">                </span><span class="n">childregs</span><span class="o">-&gt;</span><span class="n">pstate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">PSR_MODE_EL1h</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">PSR_IL_BIT</span><span class="p">;</span><span class="w">        </span>
+
+<span class="w">                </span><span class="n">p</span><span class="o">-&gt;</span><span class="kr">thread</span><span class="p">.</span><span class="n">cpu_context</span><span class="p">.</span><span class="n">x19</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">stack_start</span><span class="p">;</span><span class="w">               </span>
+<span class="w">                </span><span class="n">p</span><span class="o">-&gt;</span><span class="kr">thread</span><span class="p">.</span><span class="n">cpu_context</span><span class="p">.</span><span class="n">x20</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">stk_sz</span><span class="p">;</span><span class="w">                    </span>
+<span class="w">    </span><span class="p">}</span>
+</code></pre></div>
+<p>以上路径是为创建任务准备调度上下文和异常返回现场，调度上下文由<code>p-&gt;thread.cpu_context</code>来描述，异常返回现场由保存在内核栈的<code>structpt_regs</code>来描述，在这里判断<code>p-&gt;flags &amp; PF_KTHREAD))</code>是否成立，也就是如果p-&gt;flags设置了<code>PF_KTHREAD</code>标志则是创建内核线程，但是我们找了一圈貌似没有找到在哪个位置设置这个标志的，那究竟在哪设置的呢？我们还是首先回到它的父进程也就是idle进程：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">task_struct</span><span class="w"> </span><span class="n">init_task</span><span class="w">  </span>
+<span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w">     </span>
+<span class="w">    </span><span class="p">...</span><span class="w">  </span>
+<span class="w">    </span><span class="p">.</span><span class="n">flags</span><span class="w">          </span><span class="o">=</span><span class="w"> </span><span class="n">PF_KTHREAD</span><span class="p">,</span><span class="w">   </span>
+<span class="w">    </span><span class="p">...</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>凭直觉，应该是父进程设置了然后赋值给了子进程，那我们就要看看合适赋值的：</p>
+<div class="highlight"><pre><code><span></span><span class="n">copy_process</span><span class="w">  </span>
+<span class="o">-&gt;</span><span class="n">dup_task_struct</span><span class="w">  </span>
+<span class="w">    </span><span class="o">-&gt;</span><span class="n">arch_dup_task_struct</span><span class="w">  </span>
+<span class="w">        </span><span class="o">-&gt;*</span><span class="n">dst</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">src</span><span class="p">;</span>
+</code></pre></div>
+<p><strong>我们看的会把父进程的的task的内容赋值给子进程，然后后面在进程一些个性化设置，.flags = PF_KTHREAD也被设置给了子进程。</strong></p>
+<p>ok, 分析到这里idle就创建好了kthreadd内核线程，通过<code>wake_up_new_task</code>唤醒kthreadd运行：当它唤醒被调度后，就会恢复调度上下文，就是上面说的<code>p-&gt;thread.cpu_context</code>，具体如何执行到内核线程指定的执行函数后面我们会讲解！</p>
+<p>但是我们需要知道的是，<strong>kthreadd被调度执行后执行kthreadd这个函数</strong>！！！这个函数实现在：<strong>kernel/kthread.c</strong>中。</p>
+<h2>3. kthreadd内核线程处理流程</h2>
+<p>上面我们介绍了kthreadd内核线程的创建过程，接下来看一下kthreadd做了哪些事情：</p>
+<p>代码路径为：kernel/kthread.c</p>
+<p>kthreadd函数中设置了线程名字和亲和性属性之后 进入下面给出的循环处理流程：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210208-112000-2.png" alt=""></p>
+<p>它首先将自己的状态设置为<code>TASK_INTERRUPTIBLE</code>，然后判断<code>kthread_create_list</code>链表是否为空，这个链表存放其他内核路径的创建内核线程的请求结构<code>struct kthread_create_info</code>：</p>
+<div class="highlight"><pre><code><span></span><span class="n">kernel</span><span class="o">/</span><span class="n">kthread</span><span class="p">.</span><span class="n">c</span><span class="w">  </span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">kthread_create_info</span><span class="w">                                              </span>
+<span class="p">{</span><span class="w">                 </span>
+<span class="w">        </span><span class="cm">/* Information passed to kthread() from kthreadd. */</span><span class="w">            </span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">threadfn</span><span class="p">)(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">data</span><span class="p">);</span><span class="w">          </span><span class="c1">//请求创建的内核线程处理函数                        </span>
+<span class="w">        </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">data</span><span class="p">;</span><span class="w">    </span><span class="c1">//传递给请求创建的内核线程的参数  </span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">node</span><span class="p">;</span><span class="w">                                                       </span>
+
+<span class="w">        </span><span class="cm">/* Result passed back to kthread_create() from kthreadd. */</span><span class="w">     </span>
+<span class="w">        </span><span class="k">struct</span><span class="w"> </span><span class="nc">task_struct</span><span class="w"> </span><span class="o">*</span><span class="n">result</span><span class="p">;</span><span class="w">  </span><span class="c1">//请求创建的内核线程的tsk结构  </span>
+<span class="w">        </span><span class="k">struct</span><span class="w"> </span><span class="nc">completion</span><span class="w"> </span><span class="o">*</span><span class="n">done</span><span class="p">;</span><span class="w">                                        </span>
+
+<span class="w">        </span><span class="k">struct</span><span class="w"> </span><span class="nc">list_head</span><span class="w"> </span><span class="n">list</span><span class="p">;</span><span class="w">   </span><span class="c1">//用于加 入kthread_create_list链表  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>有创建内核线程时，会封装<code>kthread_create_info</code>结构然后加入到<code>kthread_create_list</code>链表中。</p>
+<p>如果<code>kthread_create_list</code>链表为空，说明没有创建内核线程的请求，则直接调用schedule进行睡眠。当某个内核路径有<code>kthread_create_info</code>结构加入到<code>kthread_create_list</code>链表中并唤醒kthreadd后，<code>kthreadd从__set_current_state(TASK_RUNNING)</code>开始执行，设置状态为运行状态，然后进入一个循环，不断的从<code>kthread_create_list.next</code>取出<code>kthread_create_info</code>结构，并从链表中删除，调用<code>create_kthread</code>创建一个内核线程来执行剩余的工作。</p>
+<p><code>create_kthread</code>很简单，就是创建内核线程，然后执行<strong>kthread函数</strong>，将取到的<code>kthread_create_info</code>结构传递给这个函数：</p>
+<div class="highlight"><pre><code><span></span><span class="n">kernel</span><span class="o">/</span><span class="n">kthread</span><span class="p">.</span><span class="n">c</span><span class="w">  </span>
+<span class="n">create_kthread</span><span class="w">  </span>
+<span class="o">-&gt;</span><span class="w"> </span><span class="n">pid</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kernel_thread</span><span class="p">(</span><span class="n">kthread</span><span class="p">,</span><span class="w"> </span><span class="n">create</span><span class="p">,</span><span class="w"> </span><span class="n">CLONE_FS</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">CLONE_FILES</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">SIGCHLD</span><span class="p">)</span>
+</code></pre></div>
+<h2>4.kthread处理流程</h2>
+<p><strong>当kthreadd内核线程创建内核线程之后就完成了它的使命，开始处理<code>kthread_create_list</code>链表上的下一个内核线程创建请求，主要工作交给了kthread函数来处理。实际上，kthreadd创建的内核线程就是请求创建的内核线程的外壳，只不过创建完成之后并没有马上执行线程的执行函数，这和用户空间执行程序很相似：一般在shell中执行程序，首先shell进程通过fork创建一个子进程，然后子进程中调用exec来加载新的程序。而创建内核线程也必须首先要创建一个子进程，这是kthreadd通过<code>kernel_thread</code>来完成的，然后在kthread执行函数中在合适的时机来执行所请求的内核线程执行函数。这说起来有点绕，因为这里涉及到了三个任务：kthreadd内核线程，kthreadd内核线程通过kernel_thread创建的内核线程，往<code>kthread_create_list</code>链表加入创建请求的那个任务</strong></p>
+<p><strong>注：执行kthread函数处于新创建的内核线程上下文！</strong></p>
+<p>下面我们来看下kthreadd内核线程创建的内核线程的执行函数kthread：这里传递给kthread的参数就是从<code>kthread_create_list</code>链表摘取的创建结构<code>kthread_create_info</code>，函数中又出现了一个新的结构struct kthread：</p>
+<div class="highlight"><pre><code><span></span><span class="n">kernel</span><span class="o">/</span><span class="n">kthread</span><span class="p">.</span><span class="n">c</span><span class="w">  </span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">kthread</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">flags</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">cpu</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">threadfn</span><span class="p">)(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="p">);</span><span class="w">     </span><span class="c1">//线程执行函数  </span>
+<span class="w">        </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">data</span><span class="p">;</span><span class="w">    </span><span class="c1">//线程执行函数传递的参数  </span>
+<span class="w">        </span><span class="n">mm_segment_t</span><span class="w"> </span><span class="n">oldfs</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="k">struct</span><span class="w"> </span><span class="nc">completion</span><span class="w"> </span><span class="n">parked</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="k">struct</span><span class="w"> </span><span class="nc">completion</span><span class="w"> </span><span class="n">exited</span><span class="p">;</span><span class="w">  </span>
+<span class="cp">#ifdef CONFIG_BLK_CGROUP  </span>
+<span class="w">        </span><span class="k">struct</span><span class="w"> </span><span class="nc">cgroup_subsys_state</span><span class="w"> </span><span class="o">*</span><span class="n">blkcg_css</span><span class="p">;</span><span class="w">  </span>
+<span class="cp">#endif  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>其中比较重要的是threadfn和data。kthread函数并不长，我们把代码都罗列如下：</p>
+<div class="highlight"><pre><code><span></span><span class="mi">244</span><span class="w"> </span><span class="k">static</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">kthread</span><span class="p">(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">_create</span><span class="p">)</span><span class="w">                                     </span>
+<span class="mi">245</span><span class="w"> </span><span class="p">{</span><span class="w">                                                                     </span>
+<span class="mi">246</span><span class="w">         </span><span class="cm">/* Copy data: it&#39;s on kthread&#39;s stack */</span><span class="w">                      </span>
+<span class="mi">247</span><span class="w">         </span><span class="k">struct</span><span class="w"> </span><span class="nc">kthread_create_info</span><span class="w"> </span><span class="o">*</span><span class="n">create</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_create</span><span class="p">;</span><span class="w">      </span><span class="c1">//获取传递过来的线程创建信息             </span>
+<span class="mi">248</span><span class="w">         </span><span class="kt">int</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">threadfn</span><span class="p">)(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">data</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">create</span><span class="o">-&gt;</span><span class="n">threadfn</span><span class="p">;</span><span class="w">     </span><span class="c1">//取出 线程执行函数         </span>
+<span class="mi">249</span><span class="w">         </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">create</span><span class="o">-&gt;</span><span class="n">data</span><span class="p">;</span><span class="w">   </span><span class="c1">//取出 传递给 线程执行函数的参数                                 </span>
+<span class="mi">250</span><span class="w">         </span><span class="k">struct</span><span class="w"> </span><span class="nc">completion</span><span class="w"> </span><span class="o">*</span><span class="n">done</span><span class="p">;</span><span class="w">                                      </span>
+<span class="mi">251</span><span class="w">         </span><span class="k">struct</span><span class="w"> </span><span class="nc">kthread</span><span class="w"> </span><span class="o">*</span><span class="n">self</span><span class="p">;</span><span class="w">                                         </span>
+<span class="mi">252</span><span class="w">         </span><span class="kt">int</span><span class="w"> </span><span class="n">ret</span><span class="p">;</span><span class="w">                                                      </span>
+<span class="mi">253</span><span class="w">                                                                       </span>
+<span class="mi">254</span><span class="w">         </span><span class="n">self</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kzalloc</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">self</span><span class="p">),</span><span class="w"> </span><span class="n">GFP_KERNEL</span><span class="p">);</span><span class="w">    </span><span class="c1">//分配  kthread   结构   </span>
+<span class="mi">255</span><span class="w">         </span><span class="n">set_kthread_struct</span><span class="p">(</span><span class="n">self</span><span class="p">);</span><span class="w">       </span><span class="c1">//current-&gt;set_child_tid = (__force void __user *)kthread                              </span>
+<span class="mi">256</span><span class="w">                                                                       </span>
+<span class="mi">257</span><span class="w">         </span><span class="cm">/* If user was SIGKILLed, I release the structure. */</span><span class="w">         </span>
+<span class="mi">258</span><span class="w">         </span><span class="n">done</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">xchg</span><span class="p">(</span><span class="o">&amp;</span><span class="n">create</span><span class="o">-&gt;</span><span class="n">done</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">);</span><span class="w">  </span><span class="c1">//获得 done完成量                          </span>
+<span class="mi">259</span><span class="w">         </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">done</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">                                                  </span>
+<span class="mi">260</span><span class="w">                 </span><span class="n">kfree</span><span class="p">(</span><span class="n">create</span><span class="p">);</span><span class="w">                                        </span>
+<span class="mi">261</span><span class="w">                 </span><span class="n">do_exit</span><span class="p">(</span><span class="o">-</span><span class="n">EINTR</span><span class="p">);</span><span class="w">                                      </span>
+<span class="mi">262</span><span class="w">         </span><span class="p">}</span><span class="w">                                                             </span>
+<span class="mi">263</span><span class="w">                                                                       </span>
+<span class="mi">264</span><span class="w">         </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">self</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">                                                  </span>
+<span class="mi">265</span><span class="w">                 </span><span class="n">create</span><span class="o">-&gt;</span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ERR_PTR</span><span class="p">(</span><span class="o">-</span><span class="n">ENOMEM</span><span class="p">);</span><span class="w">                    </span>
+<span class="mi">266</span><span class="w">                 </span><span class="n">complete</span><span class="p">(</span><span class="n">done</span><span class="p">);</span><span class="w">                                       </span>
+<span class="mi">267</span><span class="w">                 </span><span class="n">do_exit</span><span class="p">(</span><span class="o">-</span><span class="n">ENOMEM</span><span class="p">);</span><span class="w">                                     </span>
+<span class="mi">268</span><span class="w">         </span><span class="p">}</span><span class="w">                                                             </span>
+<span class="mi">269</span><span class="w">                                                                       </span>
+<span class="mi">270</span><span class="w">         </span><span class="n">self</span><span class="o">-&gt;</span><span class="n">threadfn</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">threadfn</span><span class="p">;</span><span class="w">   </span><span class="c1">//  赋值   self-&gt;threadfn 为  线程执行函数                           </span>
+<span class="mi">271</span><span class="w">         </span><span class="n">self</span><span class="o">-&gt;</span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">data</span><span class="p">;</span><span class="w">             </span><span class="c1">//  赋值          self-&gt;data    线程执行函数的参数                      </span>
+<span class="mi">272</span><span class="w">         </span><span class="n">init_completion</span><span class="p">(</span><span class="o">&amp;</span><span class="n">self</span><span class="o">-&gt;</span><span class="n">exited</span><span class="p">);</span><span class="w">                               </span>
+<span class="mi">273</span><span class="w">         </span><span class="n">init_completion</span><span class="p">(</span><span class="o">&amp;</span><span class="n">self</span><span class="o">-&gt;</span><span class="n">parked</span><span class="p">);</span><span class="w">                               </span>
+<span class="mi">274</span><span class="w">         </span><span class="n">current</span><span class="o">-&gt;</span><span class="n">vfork_done</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">self</span><span class="o">-&gt;</span><span class="n">exited</span><span class="p">;</span><span class="w">                          </span>
+<span class="mi">276</span><span class="w">         </span><span class="cm">/* OK, tell user we&#39;re spawned, wait for stop or wakeup */</span><span class="w">         </span>
+<span class="mi">277</span><span class="w">         </span><span class="n">__set_current_state</span><span class="p">(</span><span class="n">TASK_UNINTERRUPTIBLE</span><span class="p">);</span><span class="w">  </span><span class="c1">//设置内核线程状态为 TASK_UNINTERRUPTIBLE   但是此时还没又睡眠                      </span>
+<span class="mi">278</span><span class="w">         </span><span class="n">create</span><span class="o">-&gt;</span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">current</span><span class="p">;</span><span class="w">      </span><span class="c1">//用于返回 当前任务的tsk                                     </span>
+<span class="mi">279</span><span class="w">         </span><span class="cm">/*                                                                 </span>
+<span class="cm">280         ¦* Thread is going to call schedule(), do not preempt it,          </span>
+<span class="cm">281         ¦* or the creator may spend more time in wait_task_inactive().     </span>
+<span class="cm">282         ¦*/</span><span class="w">                                                                </span>
+<span class="mi">283</span><span class="w">         </span><span class="n">preempt_disable</span><span class="p">();</span><span class="w">                                                 </span>
+<span class="mi">284</span><span class="w">         </span><span class="n">complete</span><span class="p">(</span><span class="n">done</span><span class="p">);</span><span class="w">     </span><span class="c1">//唤醒等待done完成量的任务                                               </span>
+<span class="mi">285</span><span class="w">         </span><span class="n">schedule_preempt_disabled</span><span class="p">();</span><span class="w">  </span><span class="c1">//睡眠                                      </span>
+<span class="mi">286</span><span class="w">         </span><span class="n">preempt_enable</span><span class="p">();</span><span class="w">           </span><span class="c1">//唤醒的时候从此开始执行                                       </span>
+<span class="mi">287</span><span class="w">                                                                            </span>
+<span class="mi">288</span><span class="w">         </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">-</span><span class="n">EINTR</span><span class="p">;</span><span class="w">                                                      </span>
+<span class="mi">289</span><span class="w">         </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">test_bit</span><span class="p">(</span><span class="n">KTHREAD_SHOULD_STOP</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">self</span><span class="o">-&gt;</span><span class="n">flags</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w">     </span><span class="c1">//判断    self-&gt;flags是否为   KTHREAD_SHOULD_STOP（kthread_stop会设置）    </span>
+<span class="mi">290</span><span class="w">                 </span><span class="n">cgroup_kthread_ready</span><span class="p">();</span><span class="w">                                    </span>
+<span class="mi">291</span><span class="w">                 </span><span class="n">__kthread_parkme</span><span class="p">(</span><span class="n">self</span><span class="p">);</span><span class="w">                                    </span>
+<span class="mi">292</span><span class="w">                 </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">threadfn</span><span class="p">(</span><span class="n">data</span><span class="p">);</span><span class="w">        </span><span class="c1">//执行  真正的线程执行函数                               </span>
+<span class="mi">293</span><span class="w">         </span><span class="p">}</span><span class="w">                                                                  </span>
+<span class="mi">294</span><span class="w">         </span><span class="n">do_exit</span><span class="p">(</span><span class="n">ret</span><span class="p">);</span><span class="w">     </span><span class="c1">//当前任务退出                                                 </span>
+<span class="mi">295</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p>可以看到，kthread函数用到了一些完成量和睡眠函数，如果单独看这个函数肯定会一头雾水，要理解这个函数需要回答一下几个问题：</p>
+<p>1.284行的complete(done) 是唤醒哪个任务的？</p>
+<p>2.当前内核线程在285 行睡眠后 谁来唤醒我？</p>
+<h2>5.kthread_run函数</h2>
+<p>这里我们以kthread_run为例来解答这两个问题：</p>
+<p><strong>kthread_run这个内核api用来创建内核线程并唤醒执行传递的执行函数。</strong>调用路径如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">include</span><span class="o">/</span><span class="n">linux</span><span class="o">/</span><span class="n">kthread</span><span class="p">.</span><span class="n">h</span><span class="w">  </span>
+<span class="cp">#define kthread_run(threadfn, data, namefmt, ...)                          \      </span>
+<span class="p">({</span><span class="w">                                                                         </span><span class="err">\</span><span class="w">      </span>
+<span class="w">        </span><span class="k">struct</span><span class="w"> </span><span class="nc">task_struct</span><span class="w"> </span><span class="o">*</span><span class="n">__k</span><span class="w">                                            </span><span class="err">\</span><span class="w">      </span>
+<span class="w">                </span><span class="o">=</span><span class="w"> </span><span class="n">kthread_create</span><span class="p">(</span><span class="n">threadfn</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="n">namefmt</span><span class="p">,</span><span class="w"> </span><span class="err">###</span><span class="w"> </span><span class="n">__VA_ARGS__</span><span class="p">);</span><span class="w"> </span><span class="err">\</span><span class="w">    </span><span class="c1">//创建内核线程   </span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">IS_ERR</span><span class="p">(</span><span class="n">__k</span><span class="p">))</span><span class="w">                                                  </span><span class="err">\</span><span class="w">      </span>
+<span class="w">                </span><span class="n">wake_up_process</span><span class="p">(</span><span class="n">__k</span><span class="p">);</span><span class="w">                                      </span><span class="err">\</span><span class="w">     </span><span class="c1">//唤醒创建的内核线程  </span>
+<span class="w">        </span><span class="n">__k</span><span class="p">;</span><span class="w">                                                               </span><span class="err">\</span><span class="w">      </span>
+<span class="p">})</span>
+</code></pre></div>
+<p><code>kthread_run</code>这个宏传递三个参数：执行函数，执行函数传递的参数，格式化线程名字</p>
+<p>我们先来看下<code>kthread_create</code>函数：</p>
+<h3>5.1 kthread_create函数</h3>
+<div class="highlight"><pre><code><span></span><span class="n">kthread_create</span><span class="w">  </span>
+<span class="o">-&gt;</span><span class="n">kthread_create_on_node</span><span class="w">  </span>
+<span class="w">    </span><span class="o">-&gt;</span><span class="n">__kthread_create_on_node</span>
+</code></pre></div>
+<p><code>__kthread_create_on_node</code>函数并不长我们全部罗列：</p>
+<div class="highlight"><pre><code><span></span><span class="mi">330</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">task_struct</span><span class="w"> </span><span class="o">*</span><span class="n">__kthread_create_on_node</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">threadfn</span><span class="p">)(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">data</span><span class="p">),</span><span class="w">           </span>
+<span class="mi">331</span><span class="w">                                                 </span><span class="err">¦</span><span class="w">   </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">node</span><span class="p">,</span><span class="w">           </span>
+<span class="mi">332</span><span class="w">                                                 </span><span class="err">¦</span><span class="w">   </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="n">namefmt</span><span class="p">[],</span><span class="w">           </span>
+<span class="mi">333</span><span class="w">                                                 </span><span class="err">¦</span><span class="w">   </span><span class="kt">va_list</span><span class="w"> </span><span class="n">args</span><span class="p">)</span><span class="w">                   </span>
+<span class="mi">334</span><span class="w"> </span><span class="p">{</span><span class="w">                                                                                   </span>
+<span class="mi">335</span><span class="w">         </span><span class="n">DECLARE_COMPLETION_ONSTACK</span><span class="p">(</span><span class="n">done</span><span class="p">);</span><span class="w">                                           </span>
+<span class="mi">336</span><span class="w">         </span><span class="k">struct</span><span class="w"> </span><span class="nc">task_struct</span><span class="w"> </span><span class="o">*</span><span class="n">task</span><span class="p">;</span><span class="w">                                                   </span>
+<span class="mi">337</span><span class="w">         </span><span class="k">struct</span><span class="w"> </span><span class="nc">kthread_create_info</span><span class="w"> </span><span class="o">*</span><span class="n">create</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kmalloc</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">create</span><span class="p">),</span><span class="w">               </span>
+<span class="mi">338</span><span class="w">                                                 </span><span class="err">¦</span><span class="w">    </span><span class="n">GFP_KERNEL</span><span class="p">);</span><span class="w">   </span><span class="c1">//分配    kthread_create_info结构             </span>
+<span class="mi">339</span><span class="w">                                                                                     </span>
+<span class="mi">340</span><span class="w">         </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">create</span><span class="p">)</span><span class="w">                                                                </span>
+<span class="mi">341</span><span class="w">                 </span><span class="k">return</span><span class="w"> </span><span class="n">ERR_PTR</span><span class="p">(</span><span class="o">-</span><span class="n">ENOMEM</span><span class="p">);</span><span class="w">                                            </span>
+<span class="mi">342</span><span class="w">         </span><span class="n">create</span><span class="o">-&gt;</span><span class="n">threadfn</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">threadfn</span><span class="p">;</span><span class="w">      </span><span class="c1">//填充kthread_create_info结构  如执行函数等                                           </span>
+<span class="mi">343</span><span class="w">         </span><span class="n">create</span><span class="o">-&gt;</span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">data</span><span class="p">;</span><span class="w">                                                        </span>
+<span class="mi">344</span><span class="w">         </span><span class="n">create</span><span class="o">-&gt;</span><span class="n">node</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">node</span><span class="p">;</span><span class="w">                                                        </span>
+<span class="mi">345</span><span class="w">         </span><span class="n">create</span><span class="o">-&gt;</span><span class="n">done</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">done</span><span class="p">;</span><span class="w">                                                       </span>
+<span class="mi">346</span><span class="w">                                                                                     </span>
+<span class="mi">347</span><span class="w">         </span><span class="n">spin_lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">kthread_create_lock</span><span class="p">);</span><span class="w">                                            </span>
+<span class="mi">348</span><span class="w">         </span><span class="n">list_add_tail</span><span class="p">(</span><span class="o">&amp;</span><span class="n">create</span><span class="o">-&gt;</span><span class="n">list</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">kthread_create_list</span><span class="p">);</span><span class="w">    </span><span class="c1">//kthread_create_info结构添加到  kthread_create_list 链表               </span>
+<span class="mi">349</span><span class="w">         </span><span class="n">spin_unlock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">kthread_create_lock</span><span class="p">);</span><span class="w">                                          </span>
+<span class="mi">350</span><span class="w">                                                                                     </span>
+<span class="mi">351</span><span class="w">         </span><span class="n">wake_up_process</span><span class="p">(</span><span class="n">kthreadd_task</span><span class="p">);</span><span class="w">     </span><span class="c1">//唤醒 kthreadd来处理创建内核线程请求                                       </span>
+<span class="mi">352</span><span class="w">         </span><span class="cm">/*                                                                          </span>
+<span class="cm">353         ¦* Wait for completion in killable state, for I might be chosen by          </span>
+<span class="cm">354         ¦* the OOM killer while kthreadd is trying to allocate memory for           </span>
+<span class="cm">355         ¦* new kernel thread.                                                       </span>
+<span class="cm">356         ¦*/</span><span class="w">                                                                         </span>
+<span class="mi">357</span><span class="w">         </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">unlikely</span><span class="p">(</span><span class="n">wait_for_completion_killable</span><span class="p">(</span><span class="o">&amp;</span><span class="n">done</span><span class="p">)))</span><span class="w"> </span><span class="p">{</span><span class="w">   </span><span class="c1">//等待请求的内核线程创建完成                      </span>
+<span class="mi">358</span><span class="w">                 </span><span class="cm">/*                                                                  </span>
+<span class="cm">359                 ¦* If I was SIGKILLed before kthreadd (or new kernel thread)        </span>
+<span class="cm">360                 ¦* calls complete(), leave the cleanup of this structure to         </span>
+<span class="cm">361                 ¦* that thread.                                                     </span>
+<span class="cm">362                 ¦*/</span><span class="w">                                                                 </span>
+<span class="mi">363</span><span class="w">                 </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">xchg</span><span class="p">(</span><span class="o">&amp;</span><span class="n">create</span><span class="o">-&gt;</span><span class="n">done</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">))</span><span class="w">                                      </span>
+<span class="mi">364</span><span class="w">                         </span><span class="k">return</span><span class="w"> </span><span class="n">ERR_PTR</span><span class="p">(</span><span class="o">-</span><span class="n">EINTR</span><span class="p">);</span><span class="w">                                     </span>
+<span class="mi">365</span><span class="w">                 </span><span class="cm">/*                                                                  </span>
+<span class="cm">366                 ¦* kthreadd (or new kernel thread) will call complete()            </span>
+<span class="cm">367                 ¦* shortly.                                                        </span>
+<span class="cm">368                 ¦*/</span><span class="w">                                                                </span>
+<span class="mi">369</span><span class="w">                 </span><span class="n">wait_for_completion</span><span class="p">(</span><span class="o">&amp;</span><span class="n">done</span><span class="p">);</span><span class="w">                                        </span>
+<span class="mi">370</span><span class="w">         </span><span class="p">}</span><span class="w">                                                                          </span>
+<span class="mi">371</span><span class="w">         </span><span class="n">task</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">create</span><span class="o">-&gt;</span><span class="n">result</span><span class="p">;</span><span class="w">    </span><span class="c1">//获得 创建完成的   内核线程的tsk                                              </span>
+<span class="mi">372</span><span class="w">         </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">IS_ERR</span><span class="p">(</span><span class="n">task</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w">  </span><span class="c1">//  内核线程创建成功后 进行后续的处理                                                    </span>
+<span class="mi">373</span><span class="w">                 </span><span class="k">static</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">sched_param</span><span class="w"> </span><span class="n">param</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">.</span><span class="n">sched_priority</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">};</span><span class="w">     </span>
+<span class="mi">374</span><span class="w">                 </span><span class="kt">char</span><span class="w"> </span><span class="n">name</span><span class="p">[</span><span class="n">TASK_COMM_LEN</span><span class="p">];</span><span class="w">                                          </span>
+<span class="mi">375</span><span class="w">                                                                                    </span>
+<span class="mi">376</span><span class="w">                 </span><span class="cm">/*                                                                 </span>
+<span class="cm">377                 ¦* task is already visible to other tasks, so updating             </span>
+<span class="cm">378                 ¦* COMM must be protected.                                         </span>
+<span class="cm">379                 ¦*/</span><span class="w">                                                                </span>
+<span class="mi">380</span><span class="w">                 </span><span class="n">vsnprintf</span><span class="p">(</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">name</span><span class="p">),</span><span class="w"> </span><span class="n">namefmt</span><span class="p">,</span><span class="w"> </span><span class="n">args</span><span class="p">);</span><span class="w">                      </span>
+<span class="mi">381</span><span class="w">                 </span><span class="n">set_task_comm</span><span class="p">(</span><span class="n">task</span><span class="p">,</span><span class="w"> </span><span class="n">name</span><span class="p">);</span><span class="w">  </span><span class="c1">//设置   内核线程的名字                                    </span>
+<span class="mi">382</span><span class="w">                 </span><span class="cm">/*                                                                 </span>
+<span class="cm">383                 ¦* root may have changed our (kthreadd&#39;s) priority or CPU mask.    </span>
+<span class="cm">384                 ¦* The kernel thread should not inherit these properties.          </span>
+<span class="cm">385                 ¦*/</span><span class="w">                                                                </span>
+<span class="mi">386</span><span class="w">                 </span><span class="n">sched_setscheduler_nocheck</span><span class="p">(</span><span class="n">task</span><span class="p">,</span><span class="w"> </span><span class="n">SCHED_NORMAL</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">param</span><span class="p">);</span><span class="w">    </span><span class="c1">//设置 调度策略和优先级       </span>
+<span class="mi">387</span><span class="w">                 </span><span class="n">set_cpus_allowed_ptr</span><span class="p">(</span><span class="n">task</span><span class="p">,</span><span class="w">                                         </span>
+<span class="mi">388</span><span class="w">                                 </span><span class="err">¦</span><span class="w">    </span><span class="n">housekeeping_cpumask</span><span class="p">(</span><span class="n">HK_FLAG_KTHREAD</span><span class="p">));</span><span class="w">     </span><span class="c1">//设置cpu亲和性  </span>
+<span class="mi">389</span><span class="w">         </span><span class="p">}</span><span class="w">                                                                          </span>
+<span class="mi">390</span><span class="w">         </span><span class="n">kfree</span><span class="p">(</span><span class="n">create</span><span class="p">);</span><span class="w">                                                             </span>
+<span class="mi">391</span><span class="w">         </span><span class="k">return</span><span class="w"> </span><span class="n">task</span><span class="p">;</span><span class="w">                                                               </span>
+<span class="mi">392</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p>关于<code>__kthread_create_on_node</code>函数需要明白以下几点：</p>
+<ol>
+<li><code>__kthread_create_on_node</code>函数处于一个进程上下文如insmod进程 </li>
+<li><code>__kthread_create_on_node</code>函数需要与两个任务交互，一个是kthreadd，一个是kthreadd的创建的内核线程（执行函数为kthread）</li>
+</ol>
+<p>函数中已经做了详细的注释，这里在说明一下：首先函数将需要在内核线程中执行的函数等信息封装在<code>kthread_create_info</code>结构中，然后加入到kthre add的<code>kthread_create_list</code>链表，接着去唤醒kthreadd去处理创建内核线程请求，上面kthreadd函数我们分析过kthreadd函数会创建一个内核线程来执行kthread函数，并将<code>kthread_create_info</code>结构传递过去，在kthread函数中会通过complete(done)来唤醒357的完成等待（这就回答了第一个问题），然后<code>__kthread_create_on_node</code>接着进行初始化，但是<strong>需要明白的是新创建的内核线程现在处于睡眠状态，等待被唤醒。</strong></p>
+<h3>5.2 wake_up_process唤醒</h3>
+<p>上面通过<code>kthread_create</code>创建完成内核线程之后，内核线程处于<code>TASK_UNINTERRUPTIBLE</code>状态，等待被唤醒，这个时候<code>kthread_run</code>调用<code>wake_up_process</code>唤醒新创建的内核线程，内核线程愉快的执行，走到了kthread函数的threadfn(data)处，执行真正的线程处理，至此，新创建的内核线程开始完成实质性的工作。</p>
+<h2>6. kthread_stop函数</h2>
+<p>一般通过<code>kthread_create</code>创建的内核线程可以通过<code>kthread_stop</code>来停止：</p>
+<div class="highlight"><pre><code><span></span><span class="mi">609</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">kthread_stop</span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">task_struct</span><span class="w"> </span><span class="o">*</span><span class="n">k</span><span class="p">)</span><span class="w">   </span>
+<span class="mi">610</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="mi">611</span><span class="w">         </span><span class="k">struct</span><span class="w"> </span><span class="nc">kthread</span><span class="w"> </span><span class="o">*</span><span class="n">kthread</span><span class="p">;</span><span class="w">  </span>
+<span class="mi">612</span><span class="w">         </span><span class="kt">int</span><span class="w"> </span><span class="n">ret</span><span class="p">;</span><span class="w">  </span>
+<span class="mi">613</span><span class="w">   </span>
+<span class="mi">614</span><span class="w">         </span><span class="n">trace_sched_kthread_stop</span><span class="p">(</span><span class="n">k</span><span class="p">);</span><span class="w">  </span>
+<span class="mi">615</span><span class="w">   </span>
+<span class="mi">616</span><span class="w">         </span><span class="n">get_task_struct</span><span class="p">(</span><span class="n">k</span><span class="p">);</span><span class="w">  </span>
+<span class="mi">617</span><span class="w">         </span><span class="n">kthread</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">to_kthread</span><span class="p">(</span><span class="n">k</span><span class="p">);</span><span class="w">    </span><span class="c1">//tsk中获得kthread 结构  </span>
+<span class="mi">618</span><span class="w">         </span><span class="n">set_bit</span><span class="p">(</span><span class="n">KTHREAD_SHOULD_STOP</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">kthread</span><span class="o">-&gt;</span><span class="n">flags</span><span class="p">);</span><span class="w"> </span><span class="c1">//设置KTHREAD_SHOULD_STOP标志  </span>
+<span class="mi">619</span><span class="w">         </span><span class="n">kthread_unpark</span><span class="p">(</span><span class="n">k</span><span class="p">);</span><span class="w">  </span>
+<span class="mi">620</span><span class="w">         </span><span class="n">wake_up_process</span><span class="p">(</span><span class="n">k</span><span class="p">);</span><span class="w">   </span><span class="c1">//唤醒  </span>
+<span class="mi">621</span><span class="w">         </span><span class="n">wait_for_completion</span><span class="p">(</span><span class="o">&amp;</span><span class="n">kthread</span><span class="o">-&gt;</span><span class="n">exited</span><span class="p">);</span><span class="w"> </span><span class="c1">//等待退出完成  </span>
+<span class="mi">622</span><span class="w">         </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">k</span><span class="o">-&gt;</span><span class="n">exit_code</span><span class="p">;</span><span class="w">   </span><span class="c1">//获得退出码  </span>
+<span class="mi">623</span><span class="w">         </span><span class="n">put_task_struct</span><span class="p">(</span><span class="n">k</span><span class="p">);</span><span class="w">  </span>
+<span class="mi">624</span><span class="w">   </span>
+<span class="mi">625</span><span class="w">         </span><span class="n">trace_sched_kthread_stop_ret</span><span class="p">(</span><span class="n">ret</span><span class="p">);</span><span class="w">  </span>
+<span class="mi">626</span><span class="w">         </span><span class="k">return</span><span class="w"> </span><span class="n">ret</span><span class="p">;</span><span class="w">  </span>
+<span class="mi">627</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p>一般内核线程会循环执行一些事务，每次循环开始会调用<code>kthread_should_stop</code>来判断线程是否应该停止：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">bool</span><span class="w"> </span><span class="nf">kthread_should_stop</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">test_bit</span><span class="p">(</span><span class="n">KTHREAD_SHOULD_STOP</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">to_kthread</span><span class="p">(</span><span class="n">current</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">flags</span><span class="p">);</span><span class="w">  </span><span class="c1">//判断KTHREAD_SHOULD_STOP标志是否置位  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在某个内核路径调用<code>kthread_stop</code>，内核线程每次循环开始的时候，如果检查到<code>KTHREAD_SHOULD_STOP</code>标志置位，就会退出，然后调用<code>do_exit</code>完成退出操作。</p>
+<p>上面讲解到很多函数也涉及到很多任务，下面总结一下：</p>
+<ol>
+<li>涉及到的函数有：kthreadd, kthread，<code>kthread_run</code>，<code>kthread_create</code>， <code>wake_up_process</code>， <code>kthread_stop</code>, <code>kthread_should_stop kthreadd</code>：为kthreadd内核线程执行函数，处理内核线程创建任务。kthread：每次kthreadd创建新的内核线程都会执行kthread，里面会涉及到睡眠和唤醒后执行线程执行函数操作。<code>kthread_run</code>：创建并唤醒一个内核线程<code>kthread_create</code>：创建一个内核线程，创建之后处于<code>TASK_UNINTERRUPTIBLE</code>状态<code>wake_up_process</code>：唤醒一个任务<code>kthread_stop</code>：停止一个内核线程 <code>kthread_should_stop</code>：判断一个内核线程是否应该停止</li>
+<li>涉及到的kthreadd内核线程，新创建的内核线程，发起创建内核线程请求的任务，他们直接通过完成量进行同步</li>
+<li>睡眠唤醒流程：先设置进程状态为<code>TASK_UNINTERRUPTIBLE</code>这样的状态，然后调度出去，唤醒的时候在调度回来</li>
+</ol>
+<p>好了，下面给出精心制作的调用图示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210208-112000-3.png" alt=""></p>
+<p>上面已经讲解完了，内核线程是如何被创建的，又是如何执行处理函数的，涉及到多个任务直接同步问题，看代码的时候需要多个窗口配合之看才行。</p>
+<h2>7.内核线程执行处理函数细节</h2>
+<p>内核线程执行到处理函数要从fork说起：</p>
+<h3>7.1 fork准备调度上下文</h3>
+<div class="highlight"><pre><code><span></span><span class="n">kernel_thread</span><span class="w">  </span><span class="c1">//kernel/fork.c  </span>
+<span class="o">-&gt;</span><span class="k">struct</span><span class="w"> </span><span class="nc">kernel_clone_args</span><span class="w"> </span><span class="n">args</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="p">.</span><span class="n">stack</span><span class="w">          </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="p">)</span><span class="n">fn</span><span class="p">,</span><span class="w">      </span><span class="c1">//借用线程栈指针 指向内核线程执行函数  </span>
+<span class="w">        </span><span class="p">.</span><span class="n">stack_size</span><span class="w">     </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="p">)</span><span class="n">arg</span><span class="w"> </span><span class="c1">//借用线程栈大小 指向内核线程执行函数传递的参数  </span>
+<span class="p">};</span><span class="w">  </span>
+<span class="o">-&gt;</span><span class="n">kernel_clone</span><span class="p">(</span><span class="o">&amp;</span><span class="n">args</span><span class="p">)</span><span class="w">  </span>
+<span class="w">    </span><span class="o">-&gt;</span><span class="n">copy_process</span><span class="w">  </span>
+<span class="w">        </span><span class="o">-&gt;</span><span class="n">copy_thread</span><span class="w"> </span><span class="p">(</span><span class="n">clone_flags</span><span class="p">,</span><span class="w"> </span><span class="n">args</span><span class="o">-&gt;</span><span class="n">stack</span><span class="p">,</span><span class="w"> </span><span class="n">args</span><span class="o">-&gt;</span><span class="n">stack_size</span><span class="p">,</span><span class="w"> </span><span class="n">p</span><span class="p">,</span><span class="w"> </span><span class="n">args</span><span class="o">-&gt;</span><span class="n">tls</span><span class="p">)</span><span class="w">  </span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">likely</span><span class="p">(</span><span class="o">!</span><span class="p">(</span><span class="n">p</span><span class="o">-&gt;</span><span class="n">flags</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">PF_KTHREAD</span><span class="p">)))</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">                </span><span class="p">...</span><span class="w">  </span>
+<span class="w">            </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w">  </span><span class="c1">//处理内核线程创建  </span>
+<span class="w">                        </span><span class="p">...</span><span class="w">                                                            </span>
+<span class="w">                </span><span class="n">p</span><span class="o">-&gt;</span><span class="kr">thread</span><span class="p">.</span><span class="n">cpu_context</span><span class="p">.</span><span class="n">x19</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">stack_start</span><span class="p">;</span><span class="w">     </span><span class="c1">//内核线程执行函数赋值给调度上下文的   x19         </span>
+<span class="w">                </span><span class="n">p</span><span class="o">-&gt;</span><span class="kr">thread</span><span class="p">.</span><span class="n">cpu_context</span><span class="p">.</span><span class="n">x20</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">stk_sz</span><span class="p">;</span><span class="w">          </span><span class="c1">//内核线程执行函数传递的参数赋值给调度上下文的   x20                </span>
+<span class="w">        </span><span class="p">}</span><span class="w">                                                                </span>
+<span class="w">        </span><span class="n">p</span><span class="o">-&gt;</span><span class="kr">thread</span><span class="p">.</span><span class="n">cpu_context</span><span class="p">.</span><span class="n">pc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="p">)</span><span class="n">ret_from_fork</span><span class="p">;</span><span class="w">  </span><span class="c1">//设置第一次被调度后执行的 函数       </span>
+<span class="w">        </span><span class="n">p</span><span class="o">-&gt;</span><span class="kr">thread</span><span class="p">.</span><span class="n">cpu_context</span><span class="p">.</span><span class="n">sp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="p">)</span><span class="n">childregs</span><span class="p">;</span><span class="w">      </span><span class="c1">// 设置第一次被调度后  内核栈</span>
+</code></pre></div>
+<p>上面fork 对于创建内核线程已经注释的很清楚，这是为内核线程第一次被调度执行做准备。</p>
+<h3>7.2 使用调度上下文</h3>
+<p>当内核线程被唤醒，在合适的时机被调度时，会执行如下内核路径：</p>
+<div class="highlight"><pre><code><span></span><span class="n">__schedule</span><span class="w">  </span><span class="c1">//kernel/sched/core.c  </span>
+<span class="o">-&gt;</span><span class="n">context_switch</span><span class="w">  </span>
+<span class="w">    </span><span class="o">-&gt;</span><span class="n">switch_to</span><span class="w">  </span>
+<span class="w">        </span><span class="o">-&gt;</span><span class="n">__switch_to</span><span class="w">  </span><span class="c1">//arch/arm64/kernel/process.c  </span>
+<span class="w">            </span><span class="o">-&gt;</span><span class="n">cpu_switch_to</span><span class="w">   </span>
+<span class="w">                </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">进行处理器上下文切换</span><span class="err">，</span><span class="n">即切换调度上下文</span><span class="w">  </span><span class="n">arch</span><span class="o">/</span><span class="n">arm64</span><span class="o">/</span><span class="n">kernel</span><span class="o">/</span><span class="n">entry</span><span class="p">.</span><span class="n">S</span>
+</code></pre></div>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210208-112000-4.png" alt=""></p>
+<p>会将内核线程的<code>p-&gt;thread.cpu_context.pc</code>恢复到pc，然后就执行了<code>ret_from_fork</code>：</p>
+<div class="highlight"><pre><code><span></span><span class="n">arch</span><span class="o">/</span><span class="n">arm64</span><span class="o">/</span><span class="n">kernel</span><span class="o">/</span><span class="n">entry</span><span class="p">.</span><span class="n">S</span><span class="w">  </span>
+<span class="mi">951</span><span class="w"> </span><span class="cm">/*  </span>
+<span class="cm">952  * This is how we return from a fork.  </span>
+<span class="cm">953  */</span><span class="w">  </span>
+<span class="mi">954</span><span class="w"> </span><span class="n">SYM_CODE_START</span><span class="p">(</span><span class="n">ret_from_fork</span><span class="p">)</span><span class="w">  </span>
+<span class="mi">955</span><span class="w">         </span><span class="n">bl</span><span class="w">      </span><span class="n">schedule_tail</span><span class="w">  </span>
+<span class="mi">956</span><span class="w">         </span><span class="n">cbz</span><span class="w">     </span><span class="n">x19</span><span class="p">,</span><span class="w"> </span><span class="mf">1f</span><span class="w">                         </span><span class="c1">// not a kernel thread  </span>
+<span class="mi">957</span><span class="w">         </span><span class="n">mov</span><span class="w">     </span><span class="n">x0</span><span class="p">,</span><span class="w"> </span><span class="n">x20</span><span class="w">  </span>
+<span class="mi">958</span><span class="w">         </span><span class="n">blr</span><span class="w">     </span><span class="n">x19</span><span class="w">  </span>
+<span class="mi">959</span><span class="w"> </span><span class="mi">1</span><span class="o">:</span><span class="w">      </span><span class="n">get_current_task</span><span class="w"> </span><span class="n">tsk</span><span class="w">  </span>
+<span class="mi">960</span><span class="w">         </span><span class="n">b</span><span class="w">       </span><span class="n">ret_to_user</span><span class="w">  </span>
+<span class="mi">961</span><span class="w"> </span><span class="n">SYM_CODE_END</span><span class="p">(</span><span class="n">ret_from_fork</span><span class="p">)</span>
+</code></pre></div>
+<p>首先调用<code>schedule_tail</code>对前一个进程进程收尾工作，然后就判断x19寄存器的值是否为0，其实有一个细节在<code>copy_thread</code>中首先就对<code>p-&gt;thread.cpu_context</code>做了清零操作</p>
+<div class="highlight"><pre><code><span></span><span class="n">copy_thread</span><span class="w">  </span>
+<span class="w">     </span><span class="n">memset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">p</span><span class="o">-&gt;</span><span class="kr">thread</span><span class="p">.</span><span class="n">cpu_context</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">cpu_context</span><span class="p">))</span>
+</code></pre></div>
+<p>上面<code>copy_thread</code>中我们已经看到对<code>p-&gt;thread.cpu_context.x19</code>设置为了线程执行函数，调度的时候，设置进了x19中，接着<code>ret_from_fork</code>将 x20赋值到x0,就做了内核线程参数的传递动作，接着就执行958行跳转到了线程执行函数中执行了，<strong>于是新创建的内核线程才开始真正的欢乐执行</strong>。</p>
+<h2>8.内核线程上下文切换细节</h2>
+<p>现在来说下内核线程进行上下文切换时的技术细节：</p>
+<h3>8.1 关于mm_struct的借用</h3>
+<p>我们知道内核线程比较特殊没有用户地址空间的概念，共享内核地址空间，而<code>mm_struct</code>结构专门用来描述用户地址空间的，我们知道对于arm64架构来说，有两个页表基址寄存器<code>ttbr0_el1</code>和<code>ttbr1_el1</code>, <code>ttbr0_el1</code>用来存放用户地址空间的页表基地址，在每次调度上下文切换的时候从tsk-&gt;mm-&gt;pgd加载，<code>ttbr1_el1</code>是内核地址空间的页表基地址，内核初始化完成之后存放<code>swapper_pg_dir</code>的地址。</p>
+<p>所以，当切换下一个任务为内核线程的时候不需要切换用户地址空间：</p>
+<div class="highlight"><pre><code><span></span><span class="n">__schedule</span><span class="w">  </span><span class="c1">//kernel/sched/core.c  </span>
+<span class="o">-&gt;</span><span class="n">context_switch</span><span class="w">  </span>
+<span class="w">    </span><span class="o">-&gt;</span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">next</span><span class="o">-&gt;</span><span class="n">mm</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">   </span><span class="c1">//是内核线程  </span>
+<span class="w">        </span><span class="n">next</span><span class="o">-&gt;</span><span class="n">active_mm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">prev</span><span class="o">-&gt;</span><span class="n">active_mm</span><span class="p">;</span><span class="w">    </span><span class="c1">//下一个内核线程的active_mm指向 prev-&gt;active_mm  </span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">prev</span><span class="o">-&gt;</span><span class="n">mm</span><span class="p">)</span><span class="w">                           </span><span class="c1">// from user    前一个任务是用户任务  </span>
+<span class="w">            </span><span class="n">mmgrab</span><span class="p">(</span><span class="n">prev</span><span class="o">-&gt;</span><span class="n">active_mm</span><span class="p">);</span><span class="w">        </span><span class="c1">//将前一个任务的    prev-&gt;active_mm引用计数加1 防止被释放             </span>
+<span class="w">        </span><span class="k">else</span><span class="w">                    </span><span class="c1">//前一个任务是内核线程                                </span>
+<span class="w">            </span><span class="n">prev</span><span class="o">-&gt;</span><span class="n">active_mm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span><span class="w">   </span><span class="c1">//将前一个内核线程的 active_mm  情况，下一次再次切换的时候会赋值   </span>
+
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w">   </span>
+
+<span class="w">            </span><span class="n">switch_mm_irqs_off</span><span class="p">(</span><span class="n">prev</span><span class="o">-&gt;</span><span class="n">active_mm</span><span class="p">,</span><span class="w"> </span><span class="n">next</span><span class="o">-&gt;</span><span class="n">mm</span><span class="p">,</span><span class="w"> </span><span class="n">next</span><span class="p">)</span><span class="w">   </span><span class="c1">//切换地址空间  </span>
+<span class="w">    </span><span class="p">}</span>
+</code></pre></div>
+<p>内核线程的tsk-&gt;mm永远为空，因为它没有用户地址空间的概念，但是他在调度的时候需要借用前一个用户任务的<code>active_mm</code>赋值到自己的<code>active_mm</code>，为什么要这样做呢？</p>
+<p>这个问题可能很多人都想搞明白，那就还从地址空间切换说起：我们知道对于用户任务来说（用户进程或者线程），他们的<code>tsk-&gt;mm = tsk-&gt;active_mm</code>，并且在fork的时候已经分配好<code>mm_struct</code>结构，而且申请好了私有的pgd页赋值到tsk-&gt;mm-&gt;pgd。如果是user1 -&gt; user2这样的切换，因为是两个不同的用户进程，所以必须切换地址空间，但是如果是user1 -&gt; kernel1 -&gt;user1这样的情况会是怎样？首先我们知道的是：user1 -&gt; kernel1的时候不需要切换地址空间，但是需要做<code>kernel1-&gt;active_mm = user1-&gt;active_mm</code>的处理，而当 kernel1 -&gt;user1切换时，情况就不一样了，这个时候next-&gt;mm！= NULL, 所有会走下面的逻辑<code>switch_mm_irqs_off(prev-&gt;active_mm, next-&gt;mm, next)</code>：</p>
+<div class="highlight"><pre><code><span></span><span class="n">switch_mm_irqs_off</span><span class="w">  </span>
+<span class="o">-&gt;</span><span class="n">switch_mm</span><span class="w">  </span><span class="c1">// arch/arm64/include/asm/mmu_context.h  </span>
+<span class="w">    </span><span class="o">-&gt;</span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">prev</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">next</span><span class="p">)</span><span class="w">    </span>
+<span class="w">        </span><span class="n">__switch_mm</span><span class="p">(</span><span class="n">next</span><span class="p">)</span>
+</code></pre></div>
+<p><code>switch_mm</code>中，prev=prev-&gt;active_mm  而next= next-&gt;mm，在我们上面分析的场景user1 -&gt; kernel1 -&gt;user1，则<code>prev= kernel1-&gt;active_mm =user1-&gt;active_mm=user1-&gt;mm</code>，而next= user1-&gt;mm，可以发现两者相等，所以这种情况下是不需要切换地址空间的。 以下场景都不会导致地址空间切换：user1 -&gt; kernel1 -&gt; kernel2 -&gt; kernel3 -&gt;user1 user1 -&gt; kernel1 -&gt; user1 -&gt; kernel2 -&gt; kernel3</p>
+<p>下图给出了地址空间切换图示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210208-112000-5.png" alt=""></p>
+<p>我们只关注内核线程的切换情况，从Ub-&gt;ka-&gt;kb-&gt;Ub切换过程中，都不需要切换地址空间。</p>
+<h3>8.2 内核线程虚拟地址转换情况</h3>
+<p>下面我们来看下，内核线程虚拟地址转换的情况，我们都知道，对于用户任务，调度时会切换地址空间，即是将tsk-&gt;mm-&gt;pgd放到<code>ttbr0_el1</code>（对于arm 64来说）中，我们访问用户虚拟地址的时候，mmu通过<code>ttbr0_el1</code>查询各级页表最终找到物理地址（当然mmu首先会从tlb中查询页表项查询不到才进行多级页表遍历），那么对于内核线程怎么办，它可没有tsk-&gt;mm结构，那么它是如何进程地址转换的呢？</p>
+<p>答案就是：<strong>内核线程共享内核地址空间，也只能访问内核地址空间，使用<code>swapper_pg_dir</code>去查询页表就可以，而对于arm64来说<code>swapper_pg_dir</code>在内核初始化的时候被加载到<code>ttbr1_le1</code>中，一旦内核线程访问内核虚拟地址，则mmu就会从<code>ttbr1_le1</code>指向的页表基地址开始查询各级页表，进行正常的虚实地址转换。</strong>当然，上面是arm64这种架构的处理，它有两个页表基地址寄存器，其他很多处理器如x86, riscv处理器架构都只有一个页表基址寄存器，如x86的cr3，那么这个时候怎么办呢？答案是：使用内核线程借用的<code>prev-&gt;active_mm</code>来做，实际上前一个用户任务（记住：不一定是上一个，有可能上上个任务才是用户任务）的<code>active_mm=mm</code>,当切换到前一个用户任务的时候就会将tsk-&gt;mm-&gt;pgd放到cr3, 对于x86这样的只有一个页表基址寄存器的处理器架构来说，tsk-&gt;mm-&gt;pgd存放的是整个虚拟地址空间的页表基地址，在fork的时候会将主内核页表的pgd表项拷贝到tsk-&gt;mm-&gt;pgd对于表项中（有兴趣可以查看fork的<code>copy_mm</code>相关代码，对于arm64这样的架构没有做内核页表同步）。</p>
+<h2>9. 内核中创建内核线程用例</h2>
+<p>下面我们来看下，内核中创建内核线程为系统服务的用例，我们只提及不讲解具体的服务逻辑。</p>
+<p>用例1：linux系统中，当内存不足时，会唤醒kswapd内核线程来进行异步内存回收，下面我们来看他的创建过程：</p>
+<div class="highlight"><pre><code><span></span><span class="n">mm</span><span class="o">/</span><span class="n">vmscan</span><span class="p">.</span><span class="n">c</span><span class="w">  </span>
+
+<span class="n">kswapd_init</span><span class="w">  </span>
+<span class="o">-&gt;</span><span class="n">for_each_node_state</span><span class="p">(</span><span class="n">nid</span><span class="p">,</span><span class="w"> </span><span class="n">N_MEMORY</span><span class="p">)</span><span class="w">  </span><span class="c1">//对于每个内存节点都创建一个kswapd内核线程  </span>
+<span class="w">        </span><span class="n">kswapd_run</span><span class="p">(</span><span class="n">nid</span><span class="p">);</span><span class="w">  </span>
+<span class="w">        </span><span class="o">-&gt;</span><span class="n">pgdat</span><span class="o">-&gt;</span><span class="n">kswapd</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kthread_run</span><span class="p">(</span><span class="n">kswapd</span><span class="p">,</span><span class="w"> </span><span class="n">pgdat</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;kswapd%d&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">nid</span><span class="p">)</span><span class="w">   </span><span class="c1">//使用kthread_run结构创建并唤醒创建的内核线程 执行kswapd函数</span>
+</code></pre></div>
+<p>用例2：Linux软中断是下半部的一种机制，一般对效率要求较高的场景会使用到，如网卡收发包，每当上半部执行完了会执行到软中断，软中断会抢占进程上下文执行，但是如果软中断处理太频繁，会导致高优先级的进程得不到执行，所以在软中断执行的时候会对执行次数和执行时间做限制，会将超过限制的软中断处理推到ksoftirqd来执行。</p>
+<p>我们来看下ksoftirqd内核线程的创建：</p>
+<div class="highlight"><pre><code><span></span><span class="n">kernel</span><span class="o">/</span><span class="n">softirq</span><span class="p">.</span><span class="n">c</span><span class="w">  </span>
+
+<span class="k">static</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">smp_hotplug_thread</span><span class="w"> </span><span class="n">softirq_threads</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="p">.</span><span class="n">store</span><span class="w">                  </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">ksoftirqd</span><span class="p">,</span><span class="w">  </span>
+<span class="w">        </span><span class="p">.</span><span class="n">thread_should_run</span><span class="w">      </span><span class="o">=</span><span class="w"> </span><span class="n">ksoftirqd_should_run</span><span class="p">,</span><span class="w">  </span>
+<span class="w">        </span><span class="p">.</span><span class="n">thread_fn</span><span class="w">              </span><span class="o">=</span><span class="w"> </span><span class="n">run_ksoftirqd</span><span class="p">,</span><span class="w">  </span>
+<span class="w">        </span><span class="p">.</span><span class="n">thread_comm</span><span class="w">            </span><span class="o">=</span><span class="w"> </span><span class="s">&quot;ksoftirqd/%u&quot;</span><span class="p">,</span><span class="w">  </span>
+<span class="p">};</span><span class="w">    </span>
+
+<span class="n">spawn_ksoftirqd</span><span class="w">  </span>
+<span class="o">-&gt;</span><span class="n">for_each_online_cpu</span><span class="p">(</span><span class="n">cpu</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">//每个cpu创建一个ksoftirqd  </span>
+<span class="w">    </span><span class="n">__smpboot_create_thread</span><span class="p">(</span><span class="n">plug_thread</span><span class="p">,</span><span class="w"> </span><span class="n">cpu</span><span class="p">)</span><span class="w">  </span>
+<span class="w">    </span><span class="o">-&gt;</span><span class="n">kthread_create_on_cpu</span><span class="w">  </span>
+<span class="w">        </span><span class="o">-&gt;</span><span class="n">kthread_create_on_node</span><span class="w">  </span>
+<span class="w">            </span><span class="o">-&gt;</span><span class="n">__kthread_create_on_node</span><span class="w">  </span><span class="c1">//创建内核线程  </span>
+<span class="w">                    </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">create</span><span class="o">-&gt;</span><span class="n">threadfn</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">threadfn</span><span class="p">;</span><span class="w">  </span><span class="c1">//填充内核线程创建信息  执行函数即为run_ksoftirqd  </span>
+<span class="w">                        </span><span class="n">create</span><span class="o">-&gt;</span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">data</span><span class="p">;</span><span class="w">          </span>
+<span class="w">                    </span><span class="n">list_add_tail</span><span class="p">(</span><span class="o">&amp;</span><span class="n">create</span><span class="o">-&gt;</span><span class="n">list</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">kthread_create_list</span><span class="p">)</span><span class="w">  </span><span class="c1">//添加到kthreadd的kthread_create_list链表中  </span>
+<span class="w">                    </span><span class="n">wake_up_process</span><span class="p">(</span><span class="n">kthreadd_task</span><span class="p">)</span><span class="w">  </span><span class="c1">//唤醒kthreadd来创建内核线程  </span>
+<span class="w">        </span><span class="o">-&gt;</span><span class="n">kthread_bind</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="w"> </span><span class="n">cpu</span><span class="p">)</span><span class="w">   </span><span class="c1">//内核线程绑定cpu</span>
+</code></pre></div>
+<p>可以看到这里虽然没有使用<code>kthread_run</code>这样的api创建内核线程，但是还是和<code>kthread_run</code>实现一样将内核线程创建信息添加到<code>kthread_create_list</code>链表 然后唤醒kthreadd来创建内核线程，最后会绑定到对应的cpu上去。</p>
+<h2>10.实践环节</h2>
+<p>前面我们分析了内核线程的创建过程，也分析了很多的源代码，最后我们来实战一下，来使用内核的api来创建内核线程为我们服务（这里我们创建一个内核线程，然后每隔一秒打印一串字符 ：I am kernel thread: 小写字母循环）。</p>
+<p>内核模块代码：kthread_demo.c</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;linux/module.h&gt;</span><span class="c1">  </span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;linux/kernel.h&gt;</span><span class="c1">  </span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;linux/init.h&gt;</span><span class="c1">  </span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;linux/kthread.h&gt;</span><span class="c1">  </span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;linux/delay.h&gt;</span><span class="c1">  </span>
+
+<span class="k">static</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">task_struct</span><span class="w"> </span><span class="o">*</span><span class="n">tsk</span><span class="p">;</span><span class="w">  </span>
+
+<span class="k">static</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="nf">kthread_fn</span><span class="p">(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">data</span><span class="p">)</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="k">do</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">==</span><span class="mi">24</span><span class="p">)</span><span class="w">  </span>
+<span class="w">                        </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">                </span><span class="n">msleep</span><span class="p">(</span><span class="mi">1000</span><span class="p">);</span><span class="w">  </span>
+<span class="w">                </span><span class="n">pr_info</span><span class="p">(</span><span class="s">&quot;I am kernel thread: %c!</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="sc">&#39;a&#39;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">);</span><span class="w">  </span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">while</span><span class="p">(</span><span class="o">!</span><span class="n">kthread_should_stop</span><span class="p">());</span><span class="w">  </span>
+
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="k">static</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">__init</span><span class="w"> </span><span class="nf">kthread_demo_init</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="cp">#if 1  </span>
+<span class="w">    </span><span class="n">tsk</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kthread_run</span><span class="p">(</span><span class="n">kthread_fn</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;mykthread&quot;</span><span class="p">);</span><span class="w">    </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">tsk</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">pr_err</span><span class="p">(</span><span class="s">&quot;fail to create kthread</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">-1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="cp">#else  </span>
+<span class="w">    </span><span class="n">tsk</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kthread_create</span><span class="p">(</span><span class="n">kthread_fn</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;mykthread&quot;</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">tsk</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">pr_err</span><span class="p">(</span><span class="s">&quot;fail to create kthread</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">-1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+
+
+<span class="w">    </span><span class="n">wake_up_process</span><span class="p">(</span><span class="n">tsk</span><span class="p">);</span><span class="w">  </span>
+<span class="cp">#endif  </span>
+
+<span class="w">    </span><span class="n">pr_info</span><span class="p">(</span><span class="s">&quot;####### %s:%d ######</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">__func__</span><span class="p">,</span><span class="w"> </span><span class="n">__LINE__</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">__exit</span><span class="w"> </span><span class="nf">kthread_demo_exit</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">kthread_stop</span><span class="p">(</span><span class="n">tsk</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="n">pr_info</span><span class="p">(</span><span class="s">&quot;####### %s:%d ######</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">__func__</span><span class="p">,</span><span class="w"> </span><span class="n">__LINE__</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="n">module_init</span><span class="p">(</span><span class="n">kthread_demo_init</span><span class="p">);</span><span class="w">  </span>
+<span class="n">module_exit</span><span class="p">(</span><span class="n">kthread_demo_exit</span><span class="p">);</span><span class="w">  </span>
+<span class="n">MODULE_LICENSE</span><span class="p">(</span><span class="s">&quot;GPL&quot;</span><span class="p">);</span>
+</code></pre></div>
+<p>Makefile代码：</p>
+<div class="highlight"><pre><code><span></span><span class="n">export</span><span class="w"> </span><span class="n">ARCH</span><span class="o">=</span><span class="n">arm64</span><span class="w">  </span>
+<span class="n">export</span><span class="w"> </span><span class="n">CROSS_COMPILE</span><span class="o">=</span><span class="n">aarch64</span><span class="o">-</span><span class="n">linux</span><span class="o">-</span><span class="n">gnu</span><span class="o">-</span><span class="w">  </span>
+
+<span class="n">KERNEL_DIR</span><span class="w"> </span><span class="o">?=</span><span class="w"> </span><span class="o">~/</span><span class="n">kernel</span><span class="o">/</span><span class="n">linux</span><span class="mf">-5.11</span><span class="w">  </span>
+<span class="n">obj</span><span class="o">-</span><span class="n">m</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="n">kthread_demo</span><span class="p">.</span><span class="n">o</span><span class="w">  </span>
+
+<span class="nl">modules</span><span class="p">:</span><span class="w">  </span>
+<span class="w">    </span><span class="n">$</span><span class="p">(</span><span class="n">MAKE</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="n">C</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">KERNEL_DIR</span><span class="p">)</span><span class="w"> </span><span class="n">M</span><span class="o">=</span><span class="n">$</span><span class="p">(</span><span class="n">PWD</span><span class="p">)</span><span class="w"> </span><span class="n">modules</span><span class="w">  </span>
+
+<span class="nl">clean</span><span class="p">:</span><span class="w">  </span>
+<span class="w">    </span><span class="n">$</span><span class="p">(</span><span class="n">MAKE</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="n">C</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">KERNEL_DIR</span><span class="p">)</span><span class="w"> </span><span class="n">M</span><span class="o">=</span><span class="n">$</span><span class="p">(</span><span class="n">PWD</span><span class="p">)</span><span class="w"> </span><span class="n">clean</span><span class="w">  </span>
+
+<span class="nl">install</span><span class="p">:</span><span class="w">  </span>
+<span class="w">    </span><span class="n">cp</span><span class="w"> </span><span class="o">*</span><span class="p">.</span><span class="n">ko</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">KERNEL_DIR</span><span class="p">)</span><span class="o">/</span><span class="n">kmodules</span>
+</code></pre></div>
+<p>测试：</p>
+<div class="highlight"><pre><code><span></span><span class="n">编译</span><span class="w">  </span>
+<span class="n">$</span><span class="w"> </span><span class="n">make</span><span class="w"> </span><span class="n">modules</span><span class="w">  </span>
+
+<span class="n">拷贝到qemu共享目录下</span><span class="w">  </span>
+<span class="n">$</span><span class="w"> </span><span class="n">make</span><span class="w"> </span><span class="n">install</span><span class="w">       </span>
+
+<span class="n">在qemu的共享目录下加载内核模块</span><span class="err">：</span><span class="w">  </span>
+<span class="cp">## insmod kthread_demo.ko  </span>
+
+<span class="cp">## [  127.213718] I am kernel thread: a!  </span>
+<span class="p">[</span><span class="w">  </span><span class="mf">128.236550</span><span class="p">]</span><span class="w"> </span><span class="n">I</span><span class="w"> </span><span class="n">am</span><span class="w"> </span><span class="n">kernel</span><span class="w"> </span><span class="kr">thread</span><span class="o">:</span><span class="w"> </span><span class="n">b</span><span class="o">!</span><span class="w">  </span>
+<span class="p">[</span><span class="w">  </span><span class="mf">129.260426</span><span class="p">]</span><span class="w"> </span><span class="n">I</span><span class="w"> </span><span class="n">am</span><span class="w"> </span><span class="n">kernel</span><span class="w"> </span><span class="kr">thread</span><span class="o">:</span><span class="w"> </span><span class="n">c</span><span class="o">!</span><span class="w">  </span>
+<span class="p">[</span><span class="w">  </span><span class="mf">130.285099</span><span class="p">]</span><span class="w"> </span><span class="n">I</span><span class="w"> </span><span class="n">am</span><span class="w"> </span><span class="n">kernel</span><span class="w"> </span><span class="kr">thread</span><span class="o">:</span><span class="w"> </span><span class="n">d</span><span class="o">!</span><span class="w">  </span>
+<span class="p">[</span><span class="w">  </span><span class="mf">131.309761</span><span class="p">]</span><span class="w"> </span><span class="n">I</span><span class="w"> </span><span class="n">am</span><span class="w"> </span><span class="n">kernel</span><span class="w"> </span><span class="kr">thread</span><span class="o">:</span><span class="w"> </span><span class="n">e</span><span class="o">!</span><span class="w">  </span>
+<span class="p">[</span><span class="w">  </span><span class="mf">132.332991</span><span class="p">]</span><span class="w"> </span><span class="n">I</span><span class="w"> </span><span class="n">am</span><span class="w"> </span><span class="n">kernel</span><span class="w"> </span><span class="kr">thread</span><span class="o">:</span><span class="w"> </span><span class="n">f</span><span class="o">!</span><span class="w">  </span>
+<span class="p">[</span><span class="w">  </span><span class="mf">133.357061</span><span class="p">]</span><span class="w"> </span><span class="n">I</span><span class="w"> </span><span class="n">am</span><span class="w"> </span><span class="n">kernel</span><span class="w"> </span><span class="kr">thread</span><span class="o">:</span><span class="w"> </span><span class="n">g</span><span class="o">!</span><span class="w">  </span>
+<span class="p">[</span><span class="w">  </span><span class="mf">134.380538</span><span class="p">]</span><span class="w"> </span><span class="n">I</span><span class="w"> </span><span class="n">am</span><span class="w"> </span><span class="n">kernel</span><span class="w"> </span><span class="kr">thread</span><span class="o">:</span><span class="w"> </span><span class="n">h</span><span class="o">!</span><span class="w">  </span>
+<span class="p">[</span><span class="w">  </span><span class="mf">135.405403</span><span class="p">]</span><span class="w"> </span><span class="n">I</span><span class="w"> </span><span class="n">am</span><span class="w"> </span><span class="n">kernel</span><span class="w"> </span><span class="kr">thread</span><span class="o">:</span><span class="w"> </span><span class="n">i</span><span class="o">!</span><span class="w">  </span>
+<span class="p">[</span><span class="w">  </span><span class="mf">136.429392</span><span class="p">]</span><span class="w"> </span><span class="n">I</span><span class="w"> </span><span class="n">am</span><span class="w"> </span><span class="n">kernel</span><span class="w"> </span><span class="kr">thread</span><span class="o">:</span><span class="w"> </span><span class="n">j</span><span class="o">!</span><span class="w">  </span>
+<span class="p">[</span><span class="w">  </span><span class="mf">137.453583</span><span class="p">]</span><span class="w"> </span><span class="n">I</span><span class="w"> </span><span class="n">am</span><span class="w"> </span><span class="n">kernel</span><span class="w"> </span><span class="kr">thread</span><span class="o">:</span><span class="w"> </span><span class="n">k</span><span class="o">!</span><span class="w">  </span>
+<span class="p">[</span><span class="w">  </span><span class="mf">138.477794</span><span class="p">]</span><span class="w"> </span><span class="n">I</span><span class="w"> </span><span class="n">am</span><span class="w"> </span><span class="n">kernel</span><span class="w"> </span><span class="kr">thread</span><span class="o">:</span><span class="w"> </span><span class="n">l</span><span class="o">!</span><span class="w">  </span>
+<span class="p">[</span><span class="w">  </span><span class="mf">139.501392</span><span class="p">]</span><span class="w"> </span><span class="n">I</span><span class="w"> </span><span class="n">am</span><span class="w"> </span><span class="n">kernel</span><span class="w"> </span><span class="kr">thread</span><span class="o">:</span><span class="w"> </span><span class="n">m</span><span class="o">!</span><span class="w">  </span>
+<span class="p">[</span><span class="w">  </span><span class="mf">140.524980</span><span class="p">]</span><span class="w"> </span><span class="n">I</span><span class="w"> </span><span class="n">am</span><span class="w"> </span><span class="n">kernel</span><span class="w"> </span><span class="kr">thread</span><span class="o">:</span><span class="w"> </span><span class="n">n</span><span class="o">!</span><span class="w">  </span>
+<span class="p">[</span><span class="w">  </span><span class="mf">141.549121</span><span class="p">]</span><span class="w"> </span><span class="n">I</span><span class="w"> </span><span class="n">am</span><span class="w"> </span><span class="n">kernel</span><span class="w"> </span><span class="kr">thread</span><span class="o">:</span><span class="w"> </span><span class="n">o</span><span class="o">!</span><span class="w">  </span>
+<span class="p">[</span><span class="w">  </span><span class="mf">142.573509</span><span class="p">]</span><span class="w"> </span><span class="n">I</span><span class="w"> </span><span class="n">am</span><span class="w"> </span><span class="n">kernel</span><span class="w"> </span><span class="kr">thread</span><span class="o">:</span><span class="w"> </span><span class="n">p</span><span class="o">!</span><span class="w">  </span>
+
+<span class="n">查看我们创建的内核线程</span><span class="w">  </span>
+<span class="cp">## ps |grep mythread  </span>
+<span class="mi">1726</span><span class="w"> </span><span class="mi">0</span><span class="w">         </span><span class="mi">0</span><span class="o">:</span><span class="mo">00</span><span class="w"> </span><span class="n">grep</span><span class="w"> </span><span class="n">mythread</span>
+</code></pre></div>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "一篇文章读懂内核线程.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

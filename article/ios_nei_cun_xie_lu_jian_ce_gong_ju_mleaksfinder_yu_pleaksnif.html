@@ -1,0 +1,315 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>iOS内存泄露检测工具MLeaksFinder与PLeakSniffer - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="iOS内存泄露检测工具MLeaksFinder与PLeakSniffer,iOS,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="iOS内存泄露检测工具MLeaksFinder与PLeakSniffer" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>iOS内存泄露检测工具MLeaksFinder与PLeakSniffer</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2016-08-26 11:23
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_ios.html' class='article_tag'>iOS</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='http://wereadteam.github.io/2016/02/22/MLeaksFinder/' target='blank'>MLeaksFinder：精准iOS内存泄露检测工具</a></p></h4>
+<h2>背景</h2>
+<p>平常我们都会用 Instrument 的 Leaks / Allocations 或其他一些开源库进行内存泄露的排查，但它们都存在各种问题和不便，我们逐个来看这些工具的使用和存在的问题。</p>
+<h4>Leaks</h4>
+<p>先看看 Leaks，从苹果的开发者文档里可以看到，一个 app 的内存分三类：</p>
+<ul>
+<li><p><strong>Leaked memory</strong>: Memory unreferenced by your application that cannot be used again or freed (also detectable by using the Leaks instrument).</p>
+</li>
+<li><p><strong>Abandoned memory</strong>: Memory still referenced by your application that has no useful purpose.</p>
+</li>
+<li><p><strong>Cached memory</strong>: Memory still referenced by your application that might be used again for better performance.</p>
+</li>
+</ul>
+<p>其中 Leaked memory 和 Abandoned memory 都属于应该释放而没释放的内存，都是内存泄露，而 Leaks 工具只负责检测 Leaked memory，而不管 Abandoned memory。在 MRC 时代 Leaked memory 很常见，因为很容易忘了调用release，但在 ARC 时代更常见的内存泄露是循环引用导致的 Abandoned memory，Leaks 工具查不出这类内存泄露，应用有限。</p>
+<h4>Allocations</h4>
+<p>对于 Abandoned memory，可以用 Instrument 的 Allocations 检测出来。检测方法是用 Mark Generation的方式，当你每次点击 Mark Generation 时，Allocations 会生成当前 App 的内存快照，而且 Allocations会记录从上回内存快照到这次内存快照这个时间段内，新分配的内存信息。举一个最简单的例子：</p>
+<p>我们可以不断重复 push 和 pop 同一个 UIViewController，理论上来说，push 之前跟 pop 之后，app会回到相同的状态。因此，在 push 过程中新分配的内存，在 pop 之后应该被 dealloc 掉，除了前几次 push 可能有预热数据和 cache 数据的情况。如果在数次 push 跟 pop 之后，内存还不断增长，则有内存泄露。因此，我们在每回 push 之前跟 pop 之后，都 Mark Generation 一下，以此观察内存是不是无限制增长。这个方法在 WWDC 的视频里：<a href="http://developer.apple.com/videos/wwdc/2010/">Session 311 - Advanced Memory Analysis with
+Instruments</a>，以及苹果的开发者文档：<a href="https://developer.apple.com/library/mac/recipes/Instruments_help_articles/FindingAbandonedMemory/FindingAbandonedMemory.html">Finding Abandoned Memory</a> 里有介绍。</p>
+<p>用这种方法来发现内存泄露还是很不方便的：</p>
+<ul>
+<li>首先，你得打开 Allocations</li>
+<li>其次，你得一个个场景去重复的操作</li>
+<li>无法及时得知泄露，得专门做一遍上述操作，十分繁琐</li>
+</ul>
+<h4>开源库</h4>
+<p>在 GitHub 上有一些内存泄露检测相关的项目，例如 <a href="https://github.com/tapwork/HeapInspector-for-iOS">HeapInspector-for-iOS</a> 和 <a href="https://github.com/mindsnacks/MSLeakHunter">MSLeakHunter</a>。</p>
+<p>HeapInspector-for-iOS 可以说是 Allocations 的改进。它通过 hook 掉 alloc，dealloc，retain，release 等方法，来记录对象的生命周期。具体的检测内存泄露的方法和原理，与 Instrument 的Allocations 一致。然而它跟 Allocations 一样，存在的问题是，你需要一个个场景去重复的操作，还有检测不及时。</p>
+<p>MSLeakHunter 就简单得多，它只检测 UIViewController 和 UIView，通过 hook 掉 UIViewController 的<code>-viewDidDisappear:</code> 方法，并认为 <code>-viewDidDisappear:</code> 后，UIViewController 将很快被释放，如果UIViewController 没有被释放，则打个建议日志。这种做法其实不是很好，<code>-viewDidDisappear:</code> 被调用可能是因为又 push 进来一个新的 ViewController，把当前的 ViewController 挡住了，所以可能有很多错误的建议，需要结合你实际的操作去具体地分析日志。</p>
+<h2>MLeaksFinder</h2>
+<p><a href="https://github.com/Zepo/MLeaksFinder">MLeaksFinder</a> 提供了内存泄露检测更好的解决方案。只需要引入MLeaksFinder，就可以自动在 App 运行过程检测到内存泄露的对象并立即提醒，无需打开额外的工具，也无需为了检测内存泄露而一个个场景去重复地操作。MLeaksFinder 目前能自动检测UIViewController 和 UIView 对象的内存泄露，而且也可以扩展以检测其它类型的对象。</p>
+<p>MLeaksFinder 的使用很简单，参照 <a href="https://github.com/Zepo/MLeaksFinder">https://github.com/Zepo/MLeaksFinder</a>，基本上就是把
+MLeaksFinder 目录下的文件添加到你的项目中，就可以在运行时（debug 模式下）帮助你检测项目里的内存泄露了，无需修改任何业务逻辑代码，而且只在debug 下开启，完全不影响你的 release 包。</p>
+<p>当发生内存泄露时，MLeaksFinder 会中断言，并准确的告诉你哪个对象泄露了。这里设计为中断言而不是打日志让程序继续跑，是因为很多人不会去看日志，断言则能强制开发者注意到并去修改，而不是犯拖延症。</p>
+<p>中断言时，控制台会有如下提示，View-ViewController stack 从上往下看，该 stack
+告诉你，MyTableViewController 的 UITableView 的 subview UITableViewWrapperView 的subview MyTableViewCell 没被释放。而且，这里我们可以肯定的是MyTableViewController，UITableView，UITableViewWrapperView 这三个已经成功释放了。</p>
+<div class="highlight"><pre><code><span></span><span class="o">***</span><span class="w"> </span><span class="n">Terminating</span><span class="w"> </span><span class="n">app</span><span class="w"> </span><span class="n">due</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">uncaught</span><span class="w"> </span><span class="n">exception</span><span class="w"> </span><span class="err">&#39;</span><span class="n">NSInternalInconsistencyException</span><span class="err">&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">reason</span><span class="o">:</span><span class="w"> </span><span class="err">&#39;</span><span class="n">Possibly</span><span class="w"> </span><span class="n">Memory</span><span class="w"> </span><span class="n">Leak</span><span class="p">.</span><span class="w">  </span>
+<span class="n">In</span><span class="w"> </span><span class="k">case</span><span class="w"> </span><span class="no">that</span><span class="w"> </span><span class="no">MyTableViewCell</span><span class="w"> </span><span class="no">should</span><span class="w"> </span><span class="no">not</span><span class="w"> </span><span class="no">be</span><span class="w"> </span><span class="no">dealloced</span><span class="p">,</span><span class="w"> </span><span class="no">override</span><span class="w"> </span><span class="o">-</span><span class="no">willDealloc</span><span class="w"> </span><span class="no">in</span><span class="w"> </span><span class="no">MyTableViewCell</span><span class="w"> </span><span class="no">by</span><span class="w"> </span><span class="no">returning</span><span class="w"> </span><span class="no">NO</span><span class="p">.</span><span class="w">  </span>
+<span class="no">View</span><span class="o">-</span><span class="no">ViewController</span><span class="w"> </span><span class="no">stack</span><span class="p">:</span><span class="w"> </span><span class="p">(</span><span class="w">  </span>
+<span class="w">    </span><span class="n">MyTableViewController</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="n">UITableView</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="n">UITableViewWrapperView</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="n">MyTableViewCell</span><span class="w">  </span>
+<span class="p">)</span><span class="err">&#39;</span>
+</code></pre></div>
+<p>从 MLeaksFinder 的使用方法可以看出，MLeaksFinder 具备以下优点：</p>
+<ul>
+<li>使用简单，不侵入业务逻辑代码，不用打开 Instrument</li>
+<li>不需要额外的操作，你只需开发你的业务逻辑，在你运行调试时就能帮你检测</li>
+<li>内存泄露发现及时，更改完代码后一运行即能发现（这点很重要，你马上就能意识到哪里写错了）</li>
+<li>精准，能准确地告诉你哪个对象没被释放</li>
+</ul>
+<h2>原理</h2>
+<p>MLeaksFinder 一开始从 UIViewController 入手。我们知道，当一个 UIViewController 被 pop 或dismiss 后，该 UIViewController 包括它的 view，view 的 subviews等等将很快被释放（除非你把它设计成单例，或者持有它的强引用，但一般很少这样做）。于是，我们只需在一个 ViewController 被 pop 或dismiss 一小段时间后，看看该 UIViewController，它的 view，view 的 subviews 等等是否还存在。</p>
+<p>具体的方法是，为基类 NSObject 添加一个方法 <code>-willDealloc</code> 方法，该方法的作用是，先用一个弱指针指向self，并在一小段时间(3秒)后，通过这个弱指针调用 <code>-assertNotDealloc</code>，而 <code>-assertNotDealloc</code>主要作用是直接中断言。</p>
+<div class="highlight"><pre><code><span></span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="n">BOOL</span><span class="p">)</span><span class="n">willDealloc</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">__weak</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">weakSelf</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">self</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">dispatch_after</span><span class="p">(</span><span class="n">dispatch_time</span><span class="p">(</span><span class="n">DISPATCH_TIME_NOW</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">int64_t</span><span class="p">)(</span><span class="mi">3</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">NSEC_PER_SEC</span><span class="p">)),</span><span class="w"> </span><span class="n">dispatch_get_main_queue</span><span class="p">(),</span><span class="w"> </span><span class="o">^</span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="p">[</span><span class="n">weakSelf</span><span class="w"> </span><span class="n">assertNotDealloc</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="p">});</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">YES</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">assertNotDealloc</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">     </span><span class="n">NSAssert</span><span class="p">(</span><span class="n">NO</span><span class="p">,</span><span class="w"> </span><span class="err">@“”</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这样，当我们认为某个对象应该要被释放了，在释放前调用这个方法，如果3秒后它被释放成功，weakSelf 就指向 nil，不会调用到<code>-assertNotDealloc</code> 方法，也就不会中断言，如果它没被释放（泄露了），<code>-assertNotDealloc</code>就会被调用中断言。这样，当一个 UIViewController 被 pop 或 dismiss 时（我们认为它应该要被释放了），我们遍历该UIViewController 上的所有 view，依次调 <code>-willDealloc</code>，若3秒后没被释放，就会中断言。</p>
+<p>在这里，有几个问题需要解决：</p>
+<ol>
+<li>不入侵开发代码</li>
+</ol>
+<p>这里使用了 AOP 技术，hook 掉 UIViewController 和 UINavigationController 的 pop 跟 dismiss方法，关于如何 hook，请参考 <a href="http://nshipster.com/method-swizzling/">Method Swizzling</a>。</p>
+<ol>
+<li>遍历相关对象</li>
+</ol>
+<p>在实际项目中，我们发现有时候一个 UIViewController 被释放了，但它的 view 没被释放，或者一个 UIView 被释放了，但它的某个subview 没被释放。这种内存泄露的情况很常见，因此，我们有必要遍历基于 UIViewController 的整棵 View-ViewController 树。我们通过 UIViewController 的 presentedViewController 和 view属性，UIView 的 subviews 属性等递归遍历。对于某些 ViewController，如UINavigationController，UISplitViewController 等，我们还需要遍历 viewControllers 属性。</p>
+<ol>
+<li>构建堆栈信息</li>
+</ol>
+<p>需要构建 View-ViewController stack 信息以告诉开发者是哪个对象没被释放。在递归遍历 View-ViewController树时，子节点的 stack 信息由父节点的 stack 信息加上子结点信息即可。</p>
+<ol>
+<li>例外机制</li>
+</ol>
+<p>对于有些 ViewController，在被 pop 或 dismiss后，不会被释放（比如单例），因此需要提供机制让开发者指定哪个对象不会被释放，这里可以通过重载上面的 <code>-willDealloc</code> 方法，直接 return NO 即可。</p>
+<ol>
+<li>特殊情况</li>
+</ol>
+<p>对于某些特殊情况，释放的时机不大一样（比如系统手势返回时，在划到一半时 hold 住，虽然已被 pop，但这时还不会被释放，ViewController要等到完全 disappear 后才释放），需要做特殊处理，具体的特殊处理视具体情况而定。</p>
+<ol>
+<li>系统View</li>
+</ol>
+<p>某些系统的私有 View，不会被释放（可能是系统 bug 或者是系统出于某些原因故意这样做的，这里就不去深究了），因此需要建立白名单</p>
+<ol>
+<li>手动扩展</li>
+</ol>
+<p>MLeaksFinder目前只检测 ViewController 跟 View 对象。为此，MLeaksFinder 提供了一个手动扩展的机制，你可以从UIViewController 跟 UIView 出发，去检测其它类型的对象的内存泄露。如下所示，我们可以检测 UIViewController 底下的View Model：</p>
+<div class="highlight"><pre><code><span></span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="n">BOOL</span><span class="p">)</span><span class="n">willDealloc</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="p">[</span><span class="n">super</span><span class="w"> </span><span class="n">willDealloc</span><span class="p">])</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">NO</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="n">MLCheck</span><span class="p">(</span><span class="n">self</span><span class="p">.</span><span class="n">viewModel</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">YES</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这里的原理跟上面的是一样的，宏 MLCheck() 做的事就是为传进来的对象建立 View-ViewController stack信息，并对传进来的对象调用 <code>-willDealloc</code> 方法。</p>
+<h2>未来</h2>
+<p>MLeaksFinder 目前还在起步阶段，它的内存泄露检测的想法是很简单，很直接的。虽然目前只能自动地检测 UIViewController 和 UIView 相关的对象，然而在我们几个大的项目中，已经起到很大的作用，帮助我们发现很多历史存在的内存泄露，而且确保新提交的 UI相关代码不会引进新的问题。MLeaksFinder 会继续探索覆盖更广的情况，提供更全面的检测，包括网络层，数据存储层等等。</p>
+<hr>
+
+
+
+
+
+<h4><p>原文出处：<a href='http://wereadteam.github.io/2016/07/20/MLeaksFinder2/' target='blank'>MLeaksFinder 新特性</a></p></h4>
+<p><a href="https://github.com/Zepo/MLeaksFinder">MLeaksFinder</a> 是 iOS 平台的自动内存泄漏检测工具，引进MLeaksFinder 后，就可以在日常的开发，调试业务逻辑的过程中自动地发现并警告内存泄漏。开发者无需打开 instrument 等工具，也无需为了找内存泄漏而去跑额外的流程。并且，由于开发者是在修改代码之后一跑业务逻辑就能发现内存泄漏的，这使得开发者能很快地意识到是哪里的代码写得问题。这种及时的内存泄漏的发现在很大的程度上降低了修复内存泄漏的成本。</p>
+<p>MLeaksFinder 0.1 开源已经有一段时间，关于 MLeaksFinder的基本原理，可以参考这篇<a href="http://wereadteam.github.io/2016/02/22/MLeaksFinder/">文章</a>。在MLeaksFinder 开源之后，收到的最多的反馈是：MLeaksFinder 帮忙发现了内存泄漏，但是要去修复这些内存泄漏，找到造成问题的代码很难，特别是对于历史遗留的内存泄漏。</p>
+<p>现在，MLeaksFinder 0.2 来了。如果说 0.1 版本旨在帮助开发者发现内存泄漏，那么 0.2版本的新特性，正是旨在帮助开发者更好地解决内存泄漏。MLeaksFinder 0.2 包括以下几个新特性：</p>
+<ul>
+<li>assert 改为 alert</li>
+<li>追踪对象的生命周期</li>
+<li>查找循环引用链</li>
+</ul>
+<p>下面，我们来逐一看一下这几个特性。</p>
+<h2>assert 改为 alert</h2>
+<p>在 MLeaksFiner 0.1 版本，当 MLeaksFinder 发现内存泄漏时，会直接中 assert 并打出内存泄漏的信息。Assert能迫使开发者及时地去修复内存泄漏，并且，如果只是打日志，内存泄漏的日志很可能会被淹没在众多的日志中。这种 assert的方法在我们实际的项目取得了不错的效果。</p>
+<p>然而，assert 确实也有不好的一面。当开发者在调试业务逻辑的过程中，如果由于内存泄漏中 assert 而使得整个程序挂掉了，那么开发者的思维会因此被打断，并不得不在修复完内存泄漏之后，从头开始调试业务逻辑。有时候开发者更希望的是连贯地调完整个业务逻辑之后，再回过头来修复内存泄漏。</p>
+<p>因此，MLeaksFinder 0.2 把 assert 改成了 alert。当发现内存泄漏之后，开发者可以把 alert
+框关掉，并继续调试业务逻辑。而且，把 assert 改成 alert 之后，也使得进一步分析内存成为可能，为下面两个新特性垫定基础。</p>
+<h2>追踪对象的生命周期</h2>
+<p>当发现可能的内存泄漏对象并给出 alert 之后，MLeaksFinder 会进一步地追踪该对象的生命周期，并在该对象释放时给出 <code>Object Deallocated</code> 的 alert。</p>
+<p>为什么认为一个对象内存泄漏之后，还要进一步去追踪该对象后续会不会释放呢？MLeaksFinder 的基本原理是这样的，当一个 ViewController 被 pop 或 dismiss 之后，我们认为该 ViewController，包括它上面的子 ViewController，以及它的 View，View 的 subView 等等，都很快会被释放，如果某个 View 或者 ViewController没释放，我们就认为该对象泄漏了。然而，这样的判断内存泄漏的方法存在两个可能的“误判”：</p>
+<p><strong>1) 单例或者被 cache 起来复用的 View 或 ViewController</strong></p>
+<p>对于这样的 View 或 ViewController，在被 pop 或 dismiss 之后是不会被释放的。然而，由于 View
+相关的对象一般都占用了较多了内存，这样的设计通常来说不是好的设计。如果开发者由于性能问题等原因而不得不这样设计的时候，开发者可以在报泄漏的类里重载 <code>\-(BOOL)willDealloc</code> 方法，直接 <code>return NO;</code> 以消除内存泄漏的警告，这个消除内存泄漏警告的方法与 MLeaksFinder 0.1 版本一致。</p>
+<p><strong>2) 释放不及时的 View 或 ViewController</strong></p>
+<p>例如，发起网络请求的时候，在网络请求回调的 block 里强引用ViewController，以便在网络请求回来的时候刷新界面。在网络请求比较慢的情况下，这种做法存在两个问题：</p>
+<ul>
+<li>ViewController 被 pop 之后，由于被 block 强引用导致释放不及时</li>
+<li>ViewController 被 pop 之后，如果网络请求回来了，不应该继续做刷新界面的事，浪费 CPU</li>
+</ul>
+<p>所以，对于这种情况，我们应该在 block 里弱引用 ViewController，而不是强引用。</p>
+<p>下面我们来看如何利用对象的生命周期来分析内存的真正使用情况，分三种情况：</p>
+<p><strong>1) 单例或者被 cache 起来复用</strong></p>
+<p>如下面所示，在第一次 pop 的时候报 Memory Leak，在之后的重复 push 并 pop 同一个 ViewController 过程中，即不报 Object Deallocated，也不报 Memory Leak。这种情况下我们可以确定该对象被设计成单例或者 cache 起来了。</p>
+<div class="highlight"><pre><code><span></span><span class="n">pop</span><span class="w">             </span><span class="n">push</span><span class="w">           </span><span class="n">pop</span><span class="w">           </span><span class="n">push</span><span class="w">          </span><span class="n">pop</span><span class="w">  </span>
+<span class="o">----------&gt;</span><span class="w"> </span><span class="n">Leak</span><span class="w"> </span><span class="o">----------&gt;</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="o">----------&gt;</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="o">----------&gt;</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="o">----------&gt;</span>
+</code></pre></div>
+<p><strong>2) 释放不及时</strong></p>
+<p>如下面所示，在第一次 pop 的时候报 Memory Leak，在之后的重复 push 并 pop 同一个 ViewController过程中，对于同一个类不断地报 Object Deallocated 和 Memory Leak。这种情况属于释放不及时的情况。</p>
+<div class="highlight"><pre><code><span></span><span class="n">pop</span><span class="w">             </span><span class="n">push</span><span class="w">                 </span><span class="n">pop</span><span class="w">             </span><span class="n">push</span><span class="w">                 </span><span class="n">pop</span><span class="w">  </span>
+<span class="o">----------&gt;</span><span class="w"> </span><span class="n">Leak</span><span class="w"> </span><span class="o">----------&gt;</span><span class="w"> </span><span class="n">Dealloc</span><span class="w"> </span><span class="o">----------&gt;</span><span class="w"> </span><span class="n">Leak</span><span class="w"> </span><span class="o">----------&gt;</span><span class="w"> </span><span class="n">Dealloc</span><span class="w"> </span><span class="o">----------&gt;</span><span class="w"> </span><span class="n">Leak</span>
+</code></pre></div>
+<p><strong>3) 真正的内存泄漏</strong></p>
+<p>如下面所示，在第一次 pop 的时候报 Memory Leak，在之后的重复 push 并 pop 同一个 ViewController 过程中，不报Object Deallocated，但每次 pop 之后又报 Memory Leak。这种情况下每回进入并退出一个页面后，就报有新的内存泄漏，同时被报泄漏的对象又从来没有释放过，可以确定是真正的内存泄漏。</p>
+<div class="highlight"><pre><code><span></span><span class="n">pop</span><span class="w">             </span><span class="n">push</span><span class="w">           </span><span class="n">pop</span><span class="w">             </span><span class="n">push</span><span class="w">           </span><span class="n">pop</span><span class="w">  </span>
+<span class="o">----------&gt;</span><span class="w"> </span><span class="n">Leak</span><span class="w"> </span><span class="o">----------&gt;</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="o">----------&gt;</span><span class="w"> </span><span class="n">Leak</span><span class="w"> </span><span class="o">----------&gt;</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="o">----------&gt;</span><span class="w"> </span><span class="n">Leak</span>
+</code></pre></div>
+<h2>查找循环引用链</h2>
+<p>Facebook 在前阵子开源了一个循环引用检测工具 <a href="https://github.com/facebook/FBRetainCycleDetector">FBRetainCycleDetector</a>。当传入内存中的任意一个 OC 对象，FBRetainCycleDetector
+会递归遍历该对象的所有强引用的对象，以检测以该对象为根结点的强引用树有没有循环引用。</p>
+<p>我们知道，很多循环引用是 block 的使用不当造成的。而 FBRetainCycleDetector 最大的技术亮点，正在于如何找出一个 block的所有强引用对象。对于这个感兴趣的，可以看 facebook
+的这篇<a href="https://code.facebook.com/posts/583946315094347/automatic-memory-leak-detection-on-ios/">文章</a>。</p>
+<p>然而，FBRetainCycleDetector 的使用存在两个问题：</p>
+<ul>
+<li>需要找到候选的检测对象</li>
+<li>检测循环引用比较耗时</li>
+</ul>
+<p>正是由于这两个问题，FBRetainCycleDetector 通常是结合其它工具一起使用，通过其它工具先找出候选的检测对象，然后进行有选择的检测。当MLeaksFinder 与 FBRetainCycleDetector 结合使用时，正好能达到很好的效果。我们先通过 MLeaksFinder找到内存泄漏的对象，然后再过 FBRetainCycleDetector 检测该对象有没有循环引用即可。</p>
+<p>循环引用的输出信息如下：</p>
+<div class="highlight"><pre><code><span></span><span class="p">(</span><span class="w">  </span>
+<span class="w">    </span><span class="s">&quot;-&gt; MyTableViewCell &quot;</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="s">&quot;-&gt; _callback -&gt; __NSMallocBlock__ &quot;</span><span class="w">  </span>
+<span class="p">)</span>
+</code></pre></div>
+<p>上面的信息表示，<code>MyTableViewCell</code> 有一个强引用的成员变量 <code>_callback</code>，该变量的类型是<code>__NSMallocBlock__</code>，在 <code>_callback</code> 里，又强引用了 <code>MyTableViewCell</code> 造成循环引用。</p>
+<hr>
+
+
+
+
+
+<h4><p>原文出处：<a href='http://mrpeak.cn/blog/leak/' target='blank'>iOS内存泄漏自动检测工具PLeakSniffer</a></p></h4>
+<p>新款objective-C内存泄漏自动检测工具<strong>PLeakSniffer</strong>，<a href="https://github.com/music4kid/PLeakSniffer">GitHub地址</a>。</p>
+<h3><strong>背景</strong></h3>
+<p>前些天读到WeRead团队分享的一款内存泄漏检测工具<a href="http://wereadteam.github.io/2016/02/22/MLeaksFinder/">MLeaksFinder</a>，恍惚想起早些时候自己也有过编写这样一个小工具的想法，不知道由于什么原因把这事给忘记了。在仔细读过MLeaksFinder源码，了解实现思路之后，发现和自己最初的想法并不相同，终于在上个周末战胜拖延症将之前的想法付诸于代码，也就诞生了这款功能类似的内存泄漏检测工具PLeakSniffer。建议读者先详细阅读下<a href="http://wereadteam.github.io/2016/02/22/MLeaksFinder/">MLeaksFinder</a>这篇博客。</p>
+<h3><strong>为什么要再造轮子</strong></h3>
+<p>我在公司的项目里实际试用了MLeaksFinder，还查处了2处泄漏😓。根据MLeaksFinder代码文件中日期推测，这个项目至少已开始半年有余，并在微信读书上得到了实践验证，在功能性和稳定性上都应该有不错的表现。</p>
+<p>在编写完PLeakSniffer之后，查出了与MLeaksFinder相同的内存泄漏，思路迥异的代码抵达了相同的终点，写代码的乐趣莫过于此。新的思路或许还能抛砖引玉，如果激发更多的创意，也算是对iOS开发社区的一点小贡献。</p>
+<p>MLeaksFinder现阶段能查处UIViewController和UIView的泄漏，我早先的想法还能递归的查出UIViewController之下所有Property的泄漏，并在PLeakSniffer及公司项目中得到了初步的验证，这算是对MLeaksFinder功能的一个小补充。</p>
+<h3><strong>这类工具的意义</strong></h3>
+<p>在我们讨论这类工具的意义之前，我们先得明确一点：</p>
+<blockquote><p>如果不使用Instrument当中的Leak检测工具，并没有什么轻易的100%精准的内存泄漏检测方式。</p>
+</blockquote>
+<p>但这类工具还是有其存在价值的，内存泄漏的危害不用赘述，如果有一款工具能在80%的场景下检测出可能的内存泄漏，而且这种检测并不会带来任何副作用（不影响生产环境代码），为什么不使用它呢。</p>
+<p>大部分人都低估了他们写代码时导致意外内存泄漏的可能性。Retain Cycle，Block强引用，NSTimer释放不当，这些常见的错误还是很容易出现在我们的代码里，Instrument每使用一次要费些精力，适合做定期的大排查。平常时候就更适合用MLeaksFinder，PLeakSniffer这类工具来做实时监控，提供免费建议。</p>
+<h3><strong>PLeakSniffer实现思路</strong></h3>
+<p>我们绝大部分时候都是在编写UIViewController，UIViewController就像一个根节点，持有并管理着很多的子节点对象，这些子节点的生命周期都依赖于Controller，Controller释放的时候，他们也随之释放。用一张图简单的描述他们的关系：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/sniffer1.png" alt=""></p>
+<p>根据各个应用使用的设计模式不同（MVC，MVP，MVVM等），Controller所持有的Property也不相同。这里我们使用MVP作为例子，Controller所包含的对象就包括各种View对象，和Presenter，Model对象。当然每个对象又有可能持有更多的子对象。</p>
+<p>PLeakSniffer基于这样一个假设： &gt; 如果Controller被释放了，但其曾经持有过的子对象如果还存在，那么这些子对象就是泄漏的可疑目标。</p>
+<p>当然这个假设并不是一个100%适用的真理，不同工程师编写代码的方式风格差别很大，有些会把某些UIViewController做成单例（个人觉得这不是个好主意。。），有些会把某些View缓存起来（即使Controller已被释放），还会有其他考虑不到的场景。但在80%以上的场景，我们在Controller结束生命
+周期之后会将其持有的资源一并释放。这时候PLeakSniffer可以发挥用处，给你一些免费的泄漏建议。</p>
+<p><strong>那么怎么在Controller被释放之后，知道其持有的对象没有被释放呢？</strong></p>
+<p>一个小技巧可以达成这个目标：子对象（比如view）建立一个对controller的weak引用，如果Controller被释放，这个weak引用也随之置为nil。那怎么知道子对象没有被释放呢？用一个单例对象每个一小段时间发出一个ping通知去ping这个子对象，如果子对象还活着就会一个pong通知。所以结论就是：如果子对象的controller已不存在，但还能响应这个ping通知，那么这个对象就是可疑的泄漏对象。完整的结构可以用下图表示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/sniffer2.png" alt=""></p>
+<p>通知移除需要一个时机，这里我们使用Associated Object机制给每一个子对象再生成一个Proxy对象，在Proxy对象的dealloc里面移除通知。</p>
+<p>当然什么时候去判断一个对象的生命周期开始，什么时候判断为结束，需要一个精挑细选的机制。View，Controller，Property各不相同。</p>
+<p>PLeakSniffer采取保守的策略，通过Objective C的runtime机制，递归的将一个Controller所有强引用的property找出，并安装proxy监听Ping通知。在我的测试下，基本上能将property泄漏的场景找出。</p>
+<p>PLeakSniffer的使用方式很简答，通过Pod安装后，通过以下代码激活即可。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#if MY_DEBUG_ENV</span>
+<span class="p">[[</span><span class="n">PLeakSniffer</span><span class="w"> </span><span class="n">sharedInstance</span><span class="p">]</span><span class="w"> </span><span class="n">installLeakSniffer</span><span class="p">];</span>
+<span class="p">[[</span><span class="n">PLeakSniffer</span><span class="w"> </span><span class="n">sharedInstance</span><span class="p">]</span><span class="w"> </span><span class="n">addIgnoreList</span><span class="o">:</span><span class="err">@</span><span class="p">[</span><span class="err">@</span><span class="s">&quot;MySingletonController&quot;</span><span class="p">]];</span>
+<span class="cp">#endif</span>
+</code></pre></div>
+<p>addIgnoreList可以添加一些特殊的忽略名单，比如单例这种无法正确预测泄漏的对象。切记用Debug的宏将上述代码包住，不要把这些检测泄漏的代码带进线上环境。</p>
+<p>如果检测到可疑泄漏，PLeakSniffer会在控制台打印一条日志：</p>
+<p><strong>Controller泄漏：Detect Possible Controller Leak: %@</strong></p>
+<p><strong>其他对象泄漏：Detect Possible Leak: %@</strong></p>
+<p>更多的细节请查阅代码：<a href="https://github.com/music4kid/PLeakSniffer">GitHub地址</a>。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "iOS内存泄露检测工具MLeaksFinder与PLeakSniffer.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

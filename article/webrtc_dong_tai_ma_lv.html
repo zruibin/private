@@ -1,0 +1,1273 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>WebRTC动态码率 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="WebRTC动态码率,WebRTC,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="WebRTC动态码率-AlrDetector原理<br/>WebRTC动态码率-基于丢包的码率估计原理<br/>WebRTC动态码率-基于transport wide cc的延迟码率估计原理<br/>WebRTC动态码率-IntervalBudget发送间隔预算原理" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>WebRTC动态码率</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2021-07-12 18:00
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_webrtc.html' class='article_tag'>WebRTC</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://www.jianshu.com/p/55e5246f12b9' target='blank'>WebRTC动态码率-AlrDetector原理</a></p></h4>
+<h2>前言</h2>
+<ul>
+<li><p><strong>AlrDetector</strong>即（应用受限区域探测器，Application limited region detector）模块，该模块利用某段时间值，以及这段时间发送的字节数判断当前输出网络流量是否受限。这些限制主要跟应用程序本身输出网络流量的能力有关，例如编码器性能，不能编码出设置的目标码率</p>
+</li>
+<li><p><strong>WebRTC GCC(Google Congestion Control)</strong> 模块中首先根据rtp包发送评估出一个实际码率（target_bitrate_bps），此时理论上程序会按照该码率进行数据发送，但是在实际的运行过程中，由于网络环境的复杂性，或者硬件的性能等一系列的原因如，编码速度跟不上，假设编码出的数据码率比（target_bitrate_bps）要低，使得数据发送码率低于目标码率，带宽利用率不足，发送码率占最大预算码率值比例低于某个值的话Alr（Application limited region）就会被触发了，恢复到某个值以上，Alr会停止。</p>
+</li>
+</ul>
+<h2>工作流程</h2>
+<h3>1）AlrDetector相关数据结构及其初始化</h3>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210712-140000-0.png" alt=""></p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">AlrDetectorConfig</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Sent traffic ratio as a function of network capacity used to determine</span>
+<span class="w">  </span><span class="c1">// application-limited region. ALR region start when bandwidth usage drops</span>
+<span class="w">  </span><span class="c1">// below kAlrStartUsageRatio and ends when it raises above</span>
+<span class="w">  </span><span class="c1">// kAlrEndUsageRatio. NOTE: This is intentionally conservative at the moment</span>
+<span class="w">  </span><span class="c1">// until BW adjustments of application limited region is fine tuned.</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="n">bandwidth_usage_ratio</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.65</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="n">start_budget_level_ratio</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.80</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="n">stop_budget_level_ratio</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.50</span><span class="p">;</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">StructParametersParser</span><span class="o">&gt;</span><span class="w"> </span><span class="n">Parser</span><span class="p">();</span>
+<span class="p">};</span>
+</code></pre></div>
+<ul>
+<li>配置结构，根据其注释可得当bandwidth降低到kAlrStartUsageRatio的时候和bandwidth高于kAlrEndUsageRatio的时候会出发ALR。</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">AlrDetector</span><span class="o">::</span><span class="n">AlrDetector</span><span class="p">(</span><span class="n">AlrDetectorConfig</span><span class="w"> </span><span class="n">config</span><span class="p">,</span><span class="w"> </span><span class="n">RtcEventLog</span><span class="o">*</span><span class="w"> </span><span class="n">event_log</span><span class="p">)</span>
+<span class="w">    </span><span class="o">:</span><span class="w"> </span><span class="n">conf_</span><span class="p">(</span><span class="n">config</span><span class="p">),</span><span class="w"> </span><span class="n">alr_budget_</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="nb">true</span><span class="p">),</span><span class="w"> </span><span class="n">event_log_</span><span class="p">(</span><span class="n">event_log</span><span class="p">)</span><span class="w"> </span><span class="p">{}</span>
+<span class="n">AlrDetector</span><span class="o">::</span><span class="n">AlrDetector</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">WebRtcKeyValueConfig</span><span class="o">*</span><span class="w"> </span><span class="n">key_value_config</span><span class="p">)</span>
+<span class="w">    </span><span class="o">:</span><span class="w"> </span><span class="n">AlrDetector</span><span class="p">(</span><span class="n">GetConfigFromTrials</span><span class="p">(</span><span class="n">key_value_config</span><span class="p">),</span><span class="w"> </span><span class="k">nullptr</span><span class="p">)</span><span class="w"> </span><span class="p">{}</span>
+<span class="n">AlrDetector</span><span class="o">::</span><span class="n">AlrDetector</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">WebRtcKeyValueConfig</span><span class="o">*</span><span class="w"> </span><span class="n">key_value_config</span><span class="p">,</span>
+<span class="w">                          </span><span class="n">RtcEventLog</span><span class="o">*</span><span class="w"> </span><span class="n">event_log</span><span class="p">)</span>
+<span class="w">    </span><span class="o">:</span><span class="w"> </span><span class="n">AlrDetector</span><span class="p">(</span><span class="n">GetConfigFromTrials</span><span class="p">(</span><span class="n">key_value_config</span><span class="p">),</span><span class="w"> </span><span class="n">event_log</span><span class="p">)</span><span class="w"> </span><span class="p">{}</span>
+</code></pre></div>
+<ul>
+<li>默认初始化设置 <code>IntervalBudget</code>的<code>can_build_up_underuse_</code>成员变量为true。</li>
+<li><code>IntervalBudget</code>根据输入的评估码率，计算当前还能发送多少数据。</li>
+</ul>
+<h3>2）AlrDetector主动函数调用栈及其原理</h3>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210712-140000-1.png" alt=""></p>
+<ul>
+<li>在<code>GoogCcNetworkController</code>模块中经过相应的算法处理，判断当前的网络状态，在MaybeTriggerOnNetworkChanged函数中会评估出一个新码率。</li>
+<li>将新码率通过<code>AlrDetector::SetEstimatedBitrate()</code>函数作用到<code>AlrDetector</code>模块,同时计算目标码率。</li>
+<li>然后调用<code>IntervalBudget::set_target_rate_kbps()</code>将目标码率作用到<code>IntervalBudget</code>。</li>
+<li>最终<code>IntervalBudget</code>会根据目标码率更新预算。</li>
+<li>其代码如下：</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">AlrDetector::SetEstimatedBitrate</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">bitrate_bps</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">bitrate_bps</span><span class="p">);</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">target_rate_kbps</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">double</span><span class="o">&gt;</span><span class="p">(</span><span class="n">bitrate_bps</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">conf_</span><span class="p">.</span><span class="n">bandwidth_usage_ratio</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">1000</span><span class="p">;</span>
+<span class="w">  </span><span class="n">alr_budget_</span><span class="p">.</span><span class="n">set_target_rate_kbps</span><span class="p">(</span><span class="n">target_rate_kbps</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>现假设<code>bitrate_bps</code>为300kbps，<code>bandwidth_usage_ratio = 0.8</code>,<code>bandwidth_usage_ratio:0.8 start_budget_level_ratio:0.4 stop_budget_level_ratio:-0.6</code></li>
+<li>经过alr处理评估目标码率为300000 * 0.8 / 1000 = 240kbps</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">IntervalBudget::set_target_rate_kbps</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">target_rate_kbps</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">target_rate_kbps_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">target_rate_kbps</span><span class="p">;</span>
+<span class="w">  </span><span class="n">max_bytes_in_budget_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">kWindowMs</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">target_rate_kbps_</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">8</span><span class="p">;</span>
+<span class="w">  </span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">(</span><span class="o">-</span><span class="n">max_bytes_in_budget_</span><span class="p">,</span><span class="w"> </span><span class="n">bytes_remaining_</span><span class="p">),</span>
+<span class="w">                              </span><span class="n">max_bytes_in_budget_</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>在IntervalBudget中根据目标码率配合时间窗口进行发送预算。</li>
+<li>按照上面的假设经计算得出<code>max_bytes_in_budget_</code>按照500ms最大时间窗口进行最大预算为15000字节。</li>
+<li>计算剩余预算，<code>bytes_remaining_</code>首次默认情况下为0，那么经过赋值后本次剩余的预算为0（初始值）。</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="k">namespace</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">constexpr</span><span class="w"> </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">kWindowMs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">500</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>3）AlrDetector函数回调栈及其原理</h3>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210712-140000-2.png" alt=""></p>
+<ul>
+<li>静paced模块发送rtp包时，发送成功后会进行发送成功回调，经call模块最后作用到<code>GoogCcNetworkController</code>模块</li>
+<li>最后在<code>AlrDetector</code>模块中根据本次发送的数据大小进行发送预算代码如下：</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">AlrDetector::OnBytesSent</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">bytes_sent</span><span class="p">,</span><span class="w"> </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">send_time_ms</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">last_send_time_ms_</span><span class="p">.</span><span class="n">has_value</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">last_send_time_ms_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">send_time_ms</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// Since the duration for sending the bytes is unknwon, return without</span>
+<span class="w">    </span><span class="c1">// updating alr state.</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">delta_time_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">send_time_ms</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">*</span><span class="n">last_send_time_ms_</span><span class="p">;</span>
+<span class="w">  </span><span class="n">last_send_time_ms_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">send_time_ms</span><span class="p">;</span>
+<span class="w">  </span><span class="n">alr_budget_</span><span class="p">.</span><span class="n">UseBudget</span><span class="p">(</span><span class="n">bytes_sent</span><span class="p">);</span>
+<span class="w">  </span><span class="n">alr_budget_</span><span class="p">.</span><span class="n">IncreaseBudget</span><span class="p">(</span><span class="n">delta_time_ms</span><span class="p">);</span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">state_changed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">alr_budget_</span><span class="p">.</span><span class="n">budget_ratio</span><span class="p">()</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">conf_</span><span class="p">.</span><span class="n">start_budget_level_ratio</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">      </span><span class="o">!</span><span class="n">alr_started_time_ms_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">alr_started_time_ms_</span><span class="p">.</span><span class="n">emplace</span><span class="p">(</span><span class="n">rtc</span><span class="o">::</span><span class="n">TimeMillis</span><span class="p">());</span>
+<span class="w">    </span><span class="n">state_changed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">alr_budget_</span><span class="p">.</span><span class="n">budget_ratio</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">conf_</span><span class="p">.</span><span class="n">stop_budget_level_ratio</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">              </span><span class="n">alr_started_time_ms_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">state_changed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">    </span><span class="n">alr_started_time_ms_</span><span class="p">.</span><span class="n">reset</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">event_log_</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">state_changed</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">event_log_</span><span class="o">-&gt;</span><span class="n">Log</span><span class="p">(</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">make_unique</span><span class="o">&lt;</span><span class="n">RtcEventAlrState</span><span class="o">&gt;</span><span class="p">(</span><span class="n">alr_started_time_ms_</span><span class="p">.</span><span class="n">has_value</span><span class="p">()));</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>首先得到时延（当前次发送时间-上一次发送的时间），并更新上次发送时间供下一次使用。</li>
+<li>现在假设每隔10ms发送一次数据，并且以带宽利用率的90%进行数据发送，将码率和时间间隔转换成实际发送的字节数如下：</li>
+<li><code>kEstimatedBitrateBps * usage_percentage_ * kTimeStepMs / (8 * 100 * 1000)</code> ,其中<code>usage_percentage_</code>为90，kTimeStepMs 为10ms,kEstimatedBitrateBps为300000bps 得到每隔10ms将发送337字节的数据。</li>
+<li>那么首次发送<code>bytes_sent = 337，delta_time_ms = 10</code>，后续以该速度进行发送。</li>
+<li>调用<code>alr_budget_.UseBudget(bytes_sent)</code>对<strong>剩余</strong>要发送的数据量进行更新。</li>
+<li>调用<code>alr_budget_.IncreaseBudget(bytes_sent)</code>来增加预算。</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">IntervalBudget::UseBudget</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">bytes</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">(</span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">bytes</span><span class="p">),</span>
+<span class="w">                              </span><span class="o">-</span><span class="n">max_bytes_in_budget_</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>实际本次发送了多少字节，用<code>bytes_remaining_</code>和bytes相减然后和最大预算的反值取最大</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">IntervalBudget::IncreaseBudget</span><span class="p">(</span><span class="kt">int64_t</span><span class="w"> </span><span class="n">delta_time_ms</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">bytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">target_rate_kbps_</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">delta_time_ms</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">8</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">can_build_up_underuse_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// We overused last interval, compensate this interval.</span>
+<span class="w">    </span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">bytes</span><span class="p">,</span><span class="w"> </span><span class="n">max_bytes_in_budget_</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// If we underused last interval we can&#39;t use it this interval.</span>
+<span class="w">    </span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">bytes</span><span class="p">,</span><span class="w"> </span><span class="n">max_bytes_in_budget_</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li><p>按照目标码率（240kbps），上面假设这个目标码率进行预算增加</p>
+</li>
+<li><p>最后调用<code>alr_budget_.budget_ratio()</code>和<code>start_budget_level_ratio</code>以及<code>stop_budget_level_ratio</code>进行比较</p>
+</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">double</span><span class="w"> </span><span class="nf">IntervalBudget::budget_ratio</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">max_bytes_in_budget_</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mf">0.0</span><span class="p">;</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">double</span><span class="o">&gt;</span><span class="p">(</span><span class="n">bytes_remaining_</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">max_bytes_in_budget_</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li><code>budget_ratio()</code>表示<strong>剩余</strong>要发送的数据占最大预算发送数据<code>max_bytes_in_budget_</code>的比例。</li>
+<li>回到AlrDetector::OnBytesSent（）函数如果<code>IntervalBudget::budget_ratio()</code>大于<code>start_budget_level_ratio</code>，即剩余数据还有很多，发送码率低了，带宽没充分利用，Alr将被触发，若<code>IntervalBudget::budget_ratio()</code>小于<code>stop_budget_level_ratio</code>时，<code>alr_started_time_ms_</code>将被重置，Alr停止。</li>
+<li>alr如果被触发则更新<code>alr_started_time_ms_</code>为rtc::TimeMillis(),被设置成当前时间。</li>
+<li>最终<code>GoogCcNetworkController</code>模块会通过调用alr模块的GetApplicationLimitedRegionStartTime()函数来得到受限区域的时间，进而进行新的码率估计。</li>
+<li>该函数在<code>GoogCcNetworkController</code>模块的三个地方被调用：</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">NetworkControlUpdate</span><span class="w"> </span><span class="nf">GoogCcNetworkController::OnProcessInterval</span><span class="p">(</span>
+<span class="w">    </span><span class="n">ProcessInterval</span><span class="w"> </span><span class="n">msg</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="w">  </span><span class="n">bandwidth_estimation_</span><span class="o">-&gt;</span><span class="n">UpdateEstimate</span><span class="p">(</span><span class="n">msg</span><span class="p">.</span><span class="n">at_time</span><span class="p">);</span>
+<span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="kt">int64_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">start_time_ms</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">alr_detector_</span><span class="o">-&gt;</span><span class="n">GetApplicationLimitedRegionStartTime</span><span class="p">();</span>
+<span class="w">  </span><span class="n">probe_controller_</span><span class="o">-&gt;</span><span class="n">SetAlrStartTimeMs</span><span class="p">(</span><span class="n">start_time_ms</span><span class="p">);</span><span class="w">    </span>
+<span class="p">}</span>
+</code></pre></div>
+<div class="highlight"><pre><code><span></span><span class="n">NetworkControlUpdate</span><span class="w"> </span><span class="nf">GoogCcNetworkController::OnSentPacket</span><span class="p">(</span>
+<span class="w">    </span><span class="n">SentPacket</span><span class="w"> </span><span class="n">sent_packet</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">alr_detector_</span><span class="o">-&gt;</span><span class="n">OnBytesSent</span><span class="p">(</span><span class="n">sent_packet</span><span class="p">.</span><span class="n">size</span><span class="p">.</span><span class="n">bytes</span><span class="p">(),</span>
+<span class="w">                              </span><span class="n">sent_packet</span><span class="p">.</span><span class="n">send_time</span><span class="p">.</span><span class="n">ms</span><span class="p">());</span>
+<span class="w">  </span><span class="n">acknowledged_bitrate_estimator_</span><span class="o">-&gt;</span><span class="n">SetAlr</span><span class="p">(</span>
+<span class="w">      </span><span class="n">alr_detector_</span><span class="o">-&gt;</span><span class="n">GetApplicationLimitedRegionStartTime</span><span class="p">().</span><span class="n">has_value</span><span class="p">());</span>
+<span class="w">  </span><span class="p">.....</span>
+<span class="p">}</span>
+</code></pre></div>
+<div class="highlight"><pre><code><span></span><span class="n">NetworkControlUpdate</span><span class="w"> </span><span class="nf">GoogCcNetworkController::OnTransportPacketsFeedback</span><span class="p">(</span>
+<span class="w">    </span><span class="n">TransportPacketsFeedback</span><span class="w"> </span><span class="n">report</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="kt">int64_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">alr_start_time</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">alr_detector_</span><span class="o">-&gt;</span><span class="n">GetApplicationLimitedRegionStartTime</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>以上分别做了什么？后续进行分析</li>
+</ul>
+<h3>4）总结</h3>
+<ul>
+<li><code>AlrDetector</code>模块的核心作用是根据每次数据的发送的字节数，以500ms为时间窗口，以及实际的发送码率，对当前网络带宽是否被有效利用或是否已经发送过载，进行检测。其最终的产物是一个时间区域的起点（受限区域起点）。</li>
+<li>同理<code>GoogCcNetworkController</code>模块在其工作流程中会通过调用<code>AlrDetector</code>模块的GetApplicationLimitedRegionStartTime()来获取受限时间起点时间是否触发，如果触发则会进行新的码率估计。</li>
+</ul>
+<hr>
+
+
+<h4><p>原文出处：<a href='https://www.jianshu.com/p/a3310e5d3768' target='blank'>WebRTC动态码率-基于丢包的码率估计原理</a></p></h4>
+<h2>1）前言</h2>
+<ul>
+<li>WebRtc基于发送端的动态码率调控主要分成两大块，其中一部分是基于丢包率的码率控制，另一部分是基于延迟的码率控制。</li>
+<li>本文主要分析WebRtc中基于丢包率的码率控制。</li>
+<li>WebRtc中基于丢包率的码率控制的实现原理是基于发送端接收对端反馈过来的RR或SR报文，并对报文的发送者报告块进行解析，解析其RTT和丢包率。</li>
+<li>如果丢包率比较大说明网络状态不大好，将丢包信息和RTT更新到<code>GoogCcNetworkController</code>模块，评估新的发送码率。</li>
+<li>最后在<code>RtpTransportControllerSend</code>模块中将新评估出的码率作用到<code>pacer</code>模块。</li>
+</ul>
+<h2>2）RTCP报文接收大致流程</h2>
+<ul>
+<li>在<a href="https://www.jianshu.com/p/f13c9b730658">WebRTC RTP/RTCP协议分析(一)</a>一文中有分析RTCP报文的接收流程，那篇文章是基于m76版本的分支进行分析的，而本文是基于m79版本进行分析，在分析过程中发现函数调用栈有些出入。</li>
+<li>其调用流程大致如下：</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210712-190000-0.png" alt=""></p>
+<ul>
+<li>上图忽略从网络部分得到RTCP包的业务逻辑，直接从Call模块说起。</li>
+<li>同时在Call模块收到RTCP报文后会进行一系列的处理，本文业务逻辑图也未画出。</li>
+<li>对于音频流RTCP报文的处理逻辑在第三步，有一些变化如下图：</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210712-190000-1.png" alt=""></p>
+<ul>
+<li>从上图可以看出对于音频流<code>RCPReceiver</code>模块在调用TriggerCallbacksFromRtcpPacket函数触发回调的时候首先是将报文送给<code>VoERtcpObserver</code>块进行处理。</li>
+<li>而根据上图得知<code>VoERtcpObserver</code>和<code>RtpTransportControllerSend</code>都是<code>RtcpBandwidthObserver</code>的子类。</li>
+<li>最终在<code>VoERtcpObserver</code>中先调用OnReceivedRtcpReceiverReport将报告块作用到<code>GoogCcNetworkController</code>模块，后经过相应处理作用到编码器。</li>
+</ul>
+<h2>3）RTCP报文RTT计算和丢包统计</h2>
+<ul>
+<li>SR或RR报文的RTT信息和丢包信息包含在发送者报告块，定义在<a href="https://links.jianshu.com/go?to=https%3A%2F%2Ftools.ietf.org%2Fhtml%2Frfc3550%23section-6.4">RFC3550</a>中,以RR报文为例，如下：</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="mi">0</span><span class="w">                   </span><span class="mi">1</span><span class="w">                   </span><span class="mi">2</span><span class="w">                   </span><span class="mi">3</span>
+<span class="w">        </span><span class="mi">0</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="mi">6</span><span class="w"> </span><span class="mi">7</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="mi">6</span><span class="w"> </span><span class="mi">7</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="mi">6</span><span class="w"> </span><span class="mi">7</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">1</span>
+<span class="w">        </span><span class="o">+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+</span>
+<span class="w"> </span><span class="n">header</span><span class="w"> </span><span class="o">|</span><span class="n">V</span><span class="o">=</span><span class="mi">2</span><span class="o">|</span><span class="n">P</span><span class="o">|</span><span class="w">    </span><span class="n">RC</span><span class="w">   </span><span class="o">|</span><span class="w">   </span><span class="n">PT</span><span class="o">=</span><span class="n">RR</span><span class="o">=</span><span class="mi">201</span><span class="w">   </span><span class="o">|</span><span class="w">             </span><span class="n">length</span><span class="w">            </span><span class="o">|</span>
+<span class="w">        </span><span class="o">+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+</span>
+<span class="w">        </span><span class="o">|</span><span class="w">                     </span><span class="n">SSRC</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">packet</span><span class="w"> </span><span class="n">sender</span><span class="w">                     </span><span class="o">|</span>
+<span class="w">        </span><span class="o">+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+</span>
+<span class="w"> </span><span class="n">report</span><span class="w"> </span><span class="o">|</span><span class="w">                 </span><span class="n">SSRC_1</span><span class="w"> </span><span class="p">(</span><span class="n">SSRC</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">first</span><span class="w"> </span><span class="n">source</span><span class="p">)</span><span class="w">                 </span><span class="o">|</span>
+<span class="w"> </span><span class="n">block</span><span class="w">  </span><span class="o">+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+</span>
+<span class="w">        </span><span class="mi">1</span><span class="w">    </span><span class="o">|</span><span class="w"> </span><span class="n">fraction</span><span class="w"> </span><span class="n">lost</span><span class="w"> </span><span class="o">|</span><span class="w">       </span><span class="n">cumulative</span><span class="w"> </span><span class="n">number</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">packets</span><span class="w"> </span><span class="n">lost</span><span class="w">       </span><span class="o">|</span>
+<span class="w">        </span><span class="o">+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+</span>
+<span class="w">        </span><span class="o">|</span><span class="w">           </span><span class="n">extended</span><span class="w"> </span><span class="n">highest</span><span class="w"> </span><span class="n">sequence</span><span class="w"> </span><span class="n">number</span><span class="w"> </span><span class="n">received</span><span class="w">           </span><span class="o">|</span>
+<span class="w">        </span><span class="o">+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+</span>
+<span class="w">        </span><span class="o">|</span><span class="w">                      </span><span class="n">interarrival</span><span class="w"> </span><span class="n">jitter</span><span class="w">                      </span><span class="o">|</span>
+<span class="w">        </span><span class="o">+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+</span>
+<span class="w">        </span><span class="o">|</span><span class="w">                         </span><span class="n">last</span><span class="w"> </span><span class="n">SR</span><span class="w"> </span><span class="p">(</span><span class="n">LSR</span><span class="p">)</span><span class="w">                         </span><span class="o">|</span>
+<span class="w">        </span><span class="o">+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+</span>
+<span class="w">        </span><span class="o">|</span><span class="w">                   </span><span class="n">delay</span><span class="w"> </span><span class="n">since</span><span class="w"> </span><span class="n">last</span><span class="w"> </span><span class="n">SR</span><span class="w"> </span><span class="p">(</span><span class="n">DLSR</span><span class="p">)</span><span class="w">                  </span><span class="o">|</span>
+<span class="w">        </span><span class="o">+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+</span>
+<span class="w"> </span><span class="n">report</span><span class="w"> </span><span class="o">|</span><span class="w">                 </span><span class="n">SSRC_2</span><span class="w"> </span><span class="p">(</span><span class="n">SSRC</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">second</span><span class="w"> </span><span class="n">source</span><span class="p">)</span><span class="w">                </span><span class="o">|</span>
+<span class="w"> </span><span class="n">block</span><span class="w">  </span><span class="o">+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+</span>
+<span class="w">        </span><span class="mi">2</span><span class="w">    </span><span class="o">:</span><span class="w">                               </span><span class="p">...</span><span class="w">                             </span><span class="o">:</span>
+<span class="w">        </span><span class="o">+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+</span>
+<span class="w">        </span><span class="o">|</span><span class="w">                  </span><span class="n">profile</span><span class="o">-</span><span class="n">specific</span><span class="w"> </span><span class="n">extensions</span><span class="w">                  </span><span class="o">|</span>
+<span class="w">        </span><span class="o">+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+</span>
+</code></pre></div>
+<ul>
+<li>报告块的解析代码如下：</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">RTCPReceiver::HandleReportBlock</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">ReportBlock</span><span class="o">&amp;</span><span class="w"> </span><span class="n">report_block</span><span class="p">,</span>
+<span class="w">                                      </span><span class="n">PacketInformation</span><span class="o">*</span><span class="w"> </span><span class="n">packet_information</span><span class="p">,</span>
+<span class="w">                                      </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">remote_ssrc</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// This will be called once per report block in the RTCP packet.</span>
+<span class="w">  </span><span class="c1">// We filter out all report blocks that are not for us.</span>
+<span class="w">  </span><span class="c1">// Each packet has max 31 RR blocks.</span>
+<span class="w">  </span><span class="c1">//</span>
+<span class="w">  </span><span class="c1">// We can calc RTT if we send a send report and get a report block back.</span>
+<span class="w">  </span><span class="c1">// |report_block.source_ssrc()| is the SSRC identifier of the source to</span>
+<span class="w">  </span><span class="c1">// which the information in this reception report block pertains.</span>
+<span class="w">  </span><span class="c1">// Filter out all report blocks that are not for us.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">registered_ssrcs_</span><span class="p">.</span><span class="n">count</span><span class="p">(</span><span class="n">report_block</span><span class="p">.</span><span class="n">source_ssrc</span><span class="p">())</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="n">last_received_rb_ms_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock_</span><span class="o">-&gt;</span><span class="n">TimeInMilliseconds</span><span class="p">();</span>
+<span class="w">  </span><span class="n">ReportBlockData</span><span class="o">*</span><span class="w"> </span><span class="n">report_block_data</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="o">&amp;</span><span class="n">received_report_blocks_</span><span class="p">[</span><span class="n">report_block</span><span class="p">.</span><span class="n">source_ssrc</span><span class="p">()][</span><span class="n">remote_ssrc</span><span class="p">];</span>
+<span class="w">  </span><span class="n">RTCPReportBlock</span><span class="w"> </span><span class="n">rtcp_report_block</span><span class="p">;</span>
+<span class="w">  </span><span class="n">rtcp_report_block</span><span class="p">.</span><span class="n">sender_ssrc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">remote_ssrc</span><span class="p">;</span>
+<span class="w">  </span><span class="n">rtcp_report_block</span><span class="p">.</span><span class="n">source_ssrc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">report_block</span><span class="p">.</span><span class="n">source_ssrc</span><span class="p">();</span>
+<span class="w">  </span><span class="n">rtcp_report_block</span><span class="p">.</span><span class="n">fraction_lost</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">report_block</span><span class="p">.</span><span class="n">fraction_lost</span><span class="p">();</span>
+<span class="w">  </span><span class="n">rtcp_report_block</span><span class="p">.</span><span class="n">packets_lost</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">report_block</span><span class="p">.</span><span class="n">cumulative_lost_signed</span><span class="p">();</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">report_block</span><span class="p">.</span><span class="n">extended_high_seq_num</span><span class="p">()</span><span class="w"> </span><span class="o">&gt;</span>
+<span class="w">      </span><span class="n">report_block_data</span><span class="o">-&gt;</span><span class="n">report_block</span><span class="p">().</span><span class="n">extended_highest_sequence_number</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// We have successfully delivered new RTP packets to the remote side after</span>
+<span class="w">    </span><span class="c1">// the last RR was sent from the remote side.</span>
+<span class="w">    </span><span class="n">last_increased_sequence_number_ms_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock_</span><span class="o">-&gt;</span><span class="n">TimeInMilliseconds</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">rtcp_report_block</span><span class="p">.</span><span class="n">extended_highest_sequence_number</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">report_block</span><span class="p">.</span><span class="n">extended_high_seq_num</span><span class="p">();</span>
+<span class="w">  </span><span class="n">rtcp_report_block</span><span class="p">.</span><span class="n">jitter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">report_block</span><span class="p">.</span><span class="n">jitter</span><span class="p">();</span>
+<span class="w">  </span><span class="n">rtcp_report_block</span><span class="p">.</span><span class="n">delay_since_last_sender_report</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">report_block</span><span class="p">.</span><span class="n">delay_since_last_sr</span><span class="p">();</span>
+<span class="w">  </span><span class="n">rtcp_report_block</span><span class="p">.</span><span class="n">last_sender_report_timestamp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">report_block</span><span class="p">.</span><span class="n">last_sr</span><span class="p">();</span>
+<span class="w">  </span><span class="n">report_block_data</span><span class="o">-&gt;</span><span class="n">SetReportBlock</span><span class="p">(</span><span class="n">rtcp_report_block</span><span class="p">,</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">TimeUTCMicros</span><span class="p">());</span>
+<span class="w">  </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">rtt_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">send_time_ntp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">report_block</span><span class="p">.</span><span class="n">last_sr</span><span class="p">();</span>
+<span class="w">  </span><span class="c1">// RFC3550, section 6.4.1, LSR field discription states:</span>
+<span class="w">  </span><span class="c1">// If no SR has been received yet, the field is set to zero.</span>
+<span class="w">  </span><span class="c1">// Receiver rtp_rtcp module is not expected to calculate rtt using</span>
+<span class="w">  </span><span class="c1">// Sender Reports even if it accidentally can.</span>
+<span class="w">  </span><span class="c1">// TODO(nisse): Use this way to determine the RTT only when |receiver_only_|</span>
+<span class="w">  </span><span class="c1">// is false. However, that currently breaks the tests of the</span>
+<span class="w">  </span><span class="c1">// googCaptureStartNtpTimeMs stat for audio receive streams. To fix, either</span>
+<span class="w">  </span><span class="c1">// delete all dependencies on RTT measurements for audio receive streams, or</span>
+<span class="w">  </span><span class="c1">// ensure that audio receive streams that need RTT and stats that depend on it</span>
+<span class="w">  </span><span class="c1">// are configured with an associated audio send stream.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">send_time_ntp</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">delay_ntp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">report_block</span><span class="p">.</span><span class="n">delay_since_last_sr</span><span class="p">();</span>
+<span class="w">    </span><span class="c1">// Local NTP time.</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">receive_time_ntp</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">CompactNtp</span><span class="p">(</span><span class="n">TimeMicrosToNtp</span><span class="p">(</span><span class="n">clock_</span><span class="o">-&gt;</span><span class="n">TimeInMicroseconds</span><span class="p">()));</span>
+<span class="w">    </span><span class="c1">// RTT in 1/(2^16) seconds.</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">rtt_ntp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">receive_time_ntp</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">delay_ntp</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">send_time_ntp</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// Convert to 1/1000 seconds (milliseconds).</span>
+<span class="w">    </span><span class="n">rtt_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">CompactNtpRttToMs</span><span class="p">(</span><span class="n">rtt_ntp</span><span class="p">);</span>
+<span class="w">    </span><span class="n">report_block_data</span><span class="o">-&gt;</span><span class="n">AddRoundTripTimeSample</span><span class="p">(</span><span class="n">rtt_ms</span><span class="p">);</span>
+<span class="w">    </span><span class="n">packet_information</span><span class="o">-&gt;</span><span class="n">rtt_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rtt_ms</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">packet_information</span><span class="o">-&gt;</span><span class="n">report_blocks</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span>
+<span class="w">      </span><span class="n">report_block_data</span><span class="o">-&gt;</span><span class="n">report_block</span><span class="p">());</span>
+<span class="w">  </span><span class="n">packet_information</span><span class="o">-&gt;</span><span class="n">report_block_datas</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="o">*</span><span class="n">report_block_data</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>该函数的核心的作用是求得RTT时间，单位为1/(2^16) seconds.，计算公式为<code>receive_time_ntp(当前ntp) - delay_ntp(对端收到SR后发送SR或RR之间的延迟) - send_time_ntp(对端在发送SR或者RR之前收到发送者报告的时间)</code>。</li>
+<li>另外获取上一次和本次之间的丢包率，以及总的丢包数。</li>
+<li>RTT计算公式如下：</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="p">[</span><span class="mi">10</span><span class="w"> </span><span class="n">Nov</span><span class="w"> </span><span class="mi">1995</span><span class="w"> </span><span class="mi">11</span><span class="o">:</span><span class="mi">33</span><span class="o">:</span><span class="mf">25.125</span><span class="w"> </span><span class="n">UTC</span><span class="p">]</span><span class="w">       </span><span class="p">[</span><span class="mi">10</span><span class="w"> </span><span class="n">Nov</span><span class="w"> </span><span class="mi">1995</span><span class="w"> </span><span class="mi">11</span><span class="o">:</span><span class="mi">33</span><span class="o">:</span><span class="mf">36.5</span><span class="w"> </span><span class="n">UTC</span><span class="p">]</span>
+<span class="w">    </span><span class="n">n</span><span class="w">                 </span><span class="n">SR</span><span class="p">(</span><span class="n">n</span><span class="p">)</span><span class="w">              </span><span class="n">A</span><span class="o">=</span><span class="n">b710</span><span class="o">:</span><span class="mi">8000</span><span class="w"> </span><span class="p">(</span><span class="mf">46864.500</span><span class="w"> </span><span class="n">s</span><span class="p">)</span>
+<span class="w">    </span><span class="o">----------------------------------------------------------------&gt;</span>
+<span class="w">                      </span><span class="n">v</span><span class="w">                 </span><span class="o">^</span>
+<span class="w">    </span><span class="n">ntp_sec</span><span class="w"> </span><span class="o">=</span><span class="mh">0xb44db705</span><span class="w"> </span><span class="n">v</span><span class="w">               </span><span class="o">^</span><span class="w"> </span><span class="n">dlsr</span><span class="o">=</span><span class="mh">0x0005</span><span class="o">:</span><span class="mi">4000</span><span class="w"> </span><span class="p">(</span><span class="w">    </span><span class="mf">5.250</span><span class="n">s</span><span class="p">)</span>
+<span class="w">    </span><span class="n">ntp_frac</span><span class="o">=</span><span class="mh">0x20000000</span><span class="w">  </span><span class="n">v</span><span class="w">             </span><span class="o">^</span><span class="w">  </span><span class="n">lsr</span><span class="w"> </span><span class="o">=</span><span class="mh">0xb705</span><span class="o">:</span><span class="mi">2000</span><span class="w"> </span><span class="p">(</span><span class="mf">46853.125</span><span class="n">s</span><span class="p">)</span>
+<span class="w">      </span><span class="p">(</span><span class="mf">3024992005.125</span><span class="w"> </span><span class="n">s</span><span class="p">)</span><span class="w">  </span><span class="n">v</span><span class="w">           </span><span class="o">^</span>
+<span class="w">    </span><span class="n">r</span><span class="w">                      </span><span class="n">v</span><span class="w">         </span><span class="o">^</span><span class="w"> </span><span class="n">RR</span><span class="p">(</span><span class="n">n</span><span class="p">)</span>
+<span class="w">    </span><span class="o">----------------------------------------------------------------&gt;</span>
+<span class="w">                          </span><span class="o">|&lt;-</span><span class="n">DLSR</span><span class="o">-&gt;|</span>
+<span class="w">                            </span><span class="p">(</span><span class="mf">5.250</span><span class="w"> </span><span class="n">s</span><span class="p">)</span>
+<span class="w">    </span><span class="n">A</span><span class="w">     </span><span class="mh">0xb710</span><span class="o">:</span><span class="mi">8000</span><span class="w"> </span><span class="p">(</span><span class="mf">46864.500</span><span class="w"> </span><span class="n">s</span><span class="p">)</span>
+<span class="w">    </span><span class="n">DLSR</span><span class="w"> </span><span class="mh">-0x0005</span><span class="o">:</span><span class="mi">4000</span><span class="w"> </span><span class="p">(</span><span class="w">    </span><span class="mf">5.250</span><span class="w"> </span><span class="n">s</span><span class="p">)</span>
+<span class="w">    </span><span class="n">LSR</span><span class="w">  </span><span class="mh">-0xb705</span><span class="o">:</span><span class="mi">2000</span><span class="w"> </span><span class="p">(</span><span class="mf">46853.125</span><span class="w"> </span><span class="n">s</span><span class="p">)</span>
+<span class="w">    </span><span class="o">-------------------------------</span>
+<span class="w">    </span><span class="n">delay</span><span class="w"> </span><span class="mh">0x0006</span><span class="o">:</span><span class="mi">2000</span><span class="w"> </span><span class="p">(</span><span class="w">    </span><span class="mf">6.125</span><span class="w"> </span><span class="n">s</span><span class="p">)</span>
+</code></pre></div>
+<ul>
+<li>最后是将信息封装到PacketInformation结构当中，然后调用RTCPReceiver::TriggerCallbacksFromRtcpPacket函数进行回调处理。</li>
+</ul>
+<h2>4）RTCP触发回调</h2>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">RTCPReceiver::TriggerCallbacksFromRtcpPacket</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">PacketInformation</span><span class="o">&amp;</span><span class="w"> </span><span class="n">packet_information</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="p">....</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">rtcp_bandwidth_observer_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="o">!</span><span class="n">receiver_only_</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">packet_information</span><span class="p">.</span><span class="n">packet_type_flags</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">kRtcpSr</span><span class="p">)</span><span class="w"> </span><span class="o">||</span>
+<span class="w">        </span><span class="p">(</span><span class="n">packet_information</span><span class="p">.</span><span class="n">packet_type_flags</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">kRtcpRr</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">now_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock_</span><span class="o">-&gt;</span><span class="n">TimeInMilliseconds</span><span class="p">();</span>
+<span class="w">      </span><span class="n">rtcp_bandwidth_observer_</span><span class="o">-&gt;</span><span class="n">OnReceivedRtcpReceiverReport</span><span class="p">(</span>
+<span class="w">          </span><span class="n">packet_information</span><span class="p">.</span><span class="n">report_blocks</span><span class="p">,</span><span class="w"> </span><span class="n">packet_information</span><span class="p">.</span><span class="n">rtt_ms</span><span class="p">,</span><span class="w"> </span><span class="n">now_ms</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="p">.....</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">packet_information</span><span class="p">.</span><span class="n">packet_type_flags</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">kRtcpSr</span><span class="p">)</span><span class="w"> </span><span class="o">||</span>
+<span class="w">      </span><span class="p">(</span><span class="n">packet_information</span><span class="p">.</span><span class="n">packet_type_flags</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">kRtcpRr</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">rtp_rtcp_</span><span class="o">-&gt;</span><span class="n">OnReceivedRtcpReportBlocks</span><span class="p">(</span><span class="n">packet_information</span><span class="p">.</span><span class="n">report_blocks</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>保留相关的,改函数通过调用<code>RtcpBandwidthObserver</code>模块的OnReceivedRtcpReceiverReport函数,来传递信息。</li>
+<li>根据上面的业务图,<code>RtcpBandwidthObserver</code>模块的最终实现为<code>RtpTransportControllerSend</code>，在创建RTCPReceiver实例的时候会实例化<code>rtcp_bandwidth_observer_</code>，</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">RTCPReceiver</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">public</span><span class="o">:</span><span class="w"> </span>
+<span class="w">    </span><span class="p">.....</span>
+<span class="w">  </span><span class="k">private</span><span class="o">:</span>
+<span class="w">    </span><span class="n">RtcpBandwidthObserver</span><span class="o">*</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">rtcp_bandwidth_observer_</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li><code>RtpTransportControllerSend</code>模块的OnReceivedRtcpReceiverReport函数对RTCP 反馈信息的处理主要分成两个步骤</li>
+<li>其一是调用OnReceivedRtcpReceiverReportBlocks函数封装TransportLossReport结构消息，并最后调用<code>PostUpdates(controller_-&gt;OnTransportLossReport(msg))</code>，首先将TransportLossReport消息传递给<code>GoogCcNetworkController</code>模块进行码率估计，其次是调用PostUpdates来将新估计得码率值作用到pacer模块</li>
+<li>其二是封装RoundTripTimeUpdate消息，并调用<code>PostUpdates(controller_-&gt;OnRoundTripTimeUpdate(report));</code>，<code>GoogCcNetworkController</code>模块接收消息后先计算基于RTT时间延迟的码率，最后调用PostUpdates来刷新码率，作用到发送模块</li>
+</ul>
+<h2>5）TransportLossReport和RoundTripTimeUpdate结构封装</h2>
+<div class="highlight"><pre><code><span></span><span class="n">task_queue_</span><span class="p">.</span><span class="n">PostTask</span><span class="p">([</span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="n">report_blocks</span><span class="p">,</span><span class="w"> </span><span class="n">now_ms</span><span class="p">]()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK_RUN_ON</span><span class="p">(</span><span class="o">&amp;</span><span class="n">task_queue_</span><span class="p">);</span>
+<span class="w">  </span><span class="n">OnReceivedRtcpReceiverReportBlocks</span><span class="p">(</span><span class="n">report_blocks</span><span class="p">,</span><span class="w"> </span><span class="n">now_ms</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="n">task_queue_</span><span class="p">.</span><span class="n">PostTask</span><span class="p">([</span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="n">now_ms</span><span class="p">,</span><span class="w"> </span><span class="n">rtt_ms</span><span class="p">]()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK_RUN_ON</span><span class="p">(</span><span class="o">&amp;</span><span class="n">task_queue_</span><span class="p">);</span>
+<span class="w">  </span><span class="n">RoundTripTimeUpdate</span><span class="w"> </span><span class="n">report</span><span class="p">;</span>
+<span class="w">  </span><span class="n">report</span><span class="p">.</span><span class="n">receive_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Timestamp</span><span class="o">::</span><span class="n">ms</span><span class="p">(</span><span class="n">now_ms</span><span class="p">);</span>
+<span class="w">  </span><span class="n">report</span><span class="p">.</span><span class="n">round_trip_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TimeDelta</span><span class="o">::</span><span class="n">ms</span><span class="p">(</span><span class="n">rtt_ms</span><span class="p">);</span>
+<span class="w">  </span><span class="n">report</span><span class="p">.</span><span class="n">smoothed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">controller_</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="n">report</span><span class="p">.</span><span class="n">round_trip_time</span><span class="p">.</span><span class="n">IsZero</span><span class="p">())</span>
+<span class="w">    </span><span class="n">PostUpdates</span><span class="p">(</span><span class="n">controller_</span><span class="o">-&gt;</span><span class="n">OnRoundTripTimeUpdate</span><span class="p">(</span><span class="n">report</span><span class="p">));</span>
+<span class="p">});</span>
+</code></pre></div>
+<ul>
+<li>传递过来的<code>now_ms</code>参数为当前ntp时间，也就是收到该rtcp sr或rr报文的时间。</li>
+<li>同时这两个步骤使用的是同一个<code>task_queue_</code>任务队列，这说明先进行基于丢包的码率估计，然后再进行基于延迟的码率估计。</li>
+</ul>
+<h3>5.1）TransportLossReport封装</h3>
+<ul>
+<li>通过OnReceivedRtcpReceiverReportBlocks函数对<code>report_blocks</code>消息进行再封装，将其封装成TransportLossReport格式，其定义如下</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="cp">#network_types.h</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">TransportLossReport</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="cm">/*表示当前接收到该消息的ntp时间*/</span>
+<span class="w">  </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">receive_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Timestamp</span><span class="o">::</span><span class="n">PlusInfinity</span><span class="p">();</span>
+<span class="w">  </span><span class="cm">/*上一次接收到SR或者RR报文的时间*/</span>
+<span class="w">  </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">start_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Timestamp</span><span class="o">::</span><span class="n">PlusInfinity</span><span class="p">();</span>
+<span class="w">  </span><span class="cm">/*当前接收到该消息的ntp时间*/</span><span class="w">  </span>
+<span class="w">  </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">end_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Timestamp</span><span class="o">::</span><span class="n">PlusInfinity</span><span class="p">();</span>
+<span class="w">  </span><span class="cm">/*在上一次处理和本次处理时间差范围内也就是end_time - start_time 之间的丢包数量*/</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">packets_lost_delta</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="cm">/*在上一次处理和本次处理时间差范围内也就是end_time - start_time 之间实际发送成功的包数*/</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">packets_received_delta</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">};</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">RtpTransportControllerSend::OnReceivedRtcpReceiverReportBlocks</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">ReportBlockList</span><span class="o">&amp;</span><span class="w"> </span><span class="n">report_blocks</span><span class="p">,</span>
+<span class="w">    </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">now_ms</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">report_blocks</span><span class="p">.</span><span class="n">empty</span><span class="p">())</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">total_packets_lost_delta</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">total_packets_delta</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// Compute the packet loss from all report blocks.</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">RTCPReportBlock</span><span class="o">&amp;</span><span class="w"> </span><span class="n">report_block</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">report_blocks</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">it</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">last_report_blocks_</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">report_block</span><span class="p">.</span><span class="n">source_ssrc</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">it</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">last_report_blocks_</span><span class="p">.</span><span class="n">end</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">auto</span><span class="w"> </span><span class="n">number_of_packets</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">report_block</span><span class="p">.</span><span class="n">extended_highest_sequence_number</span><span class="w"> </span><span class="o">-</span>
+<span class="w">                                </span><span class="n">it</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">.</span><span class="n">extended_highest_sequence_number</span><span class="p">;</span>
+<span class="w">      </span><span class="n">total_packets_delta</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">number_of_packets</span><span class="p">;</span>
+<span class="w">      </span><span class="k">auto</span><span class="w"> </span><span class="n">lost_delta</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">report_block</span><span class="p">.</span><span class="n">packets_lost</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">it</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">.</span><span class="n">packets_lost</span><span class="p">;</span>
+<span class="w">      </span><span class="n">total_packets_lost_delta</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">lost_delta</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">last_report_blocks_</span><span class="p">[</span><span class="n">report_block</span><span class="p">.</span><span class="n">source_ssrc</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">report_block</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// Can only compute delta if there has been previous blocks to compare to. If</span>
+<span class="w">  </span><span class="c1">// not, total_packets_delta will be unchanged and there&#39;s nothing more to do.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">total_packets_delta</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">packets_received_delta</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">total_packets_delta</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">total_packets_lost_delta</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// To detect lost packets, at least one packet has to be received. This check</span>
+<span class="w">  </span><span class="c1">// is needed to avoid bandwith detection update in</span>
+<span class="w">  </span><span class="c1">// VideoSendStreamTest.SuspendBelowMinBitrate</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">packets_received_delta</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">now</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Timestamp</span><span class="o">::</span><span class="n">ms</span><span class="p">(</span><span class="n">now_ms</span><span class="p">);</span>
+<span class="w">  </span><span class="n">TransportLossReport</span><span class="w"> </span><span class="n">msg</span><span class="p">;</span>
+<span class="w">  </span><span class="n">msg</span><span class="p">.</span><span class="n">packets_lost_delta</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">total_packets_lost_delta</span><span class="p">;</span>
+<span class="w">  </span><span class="n">msg</span><span class="p">.</span><span class="n">packets_received_delta</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packets_received_delta</span><span class="p">;</span>
+<span class="w">  </span><span class="n">msg</span><span class="p">.</span><span class="n">receive_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">now</span><span class="p">;</span>
+<span class="w">  </span><span class="n">msg</span><span class="p">.</span><span class="n">start_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">last_report_block_time_</span><span class="p">;</span>
+<span class="w">  </span><span class="n">msg</span><span class="p">.</span><span class="n">end_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">now</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">controller_</span><span class="p">)</span>
+<span class="w">    </span><span class="n">PostUpdates</span><span class="p">(</span><span class="n">controller_</span><span class="o">-&gt;</span><span class="n">OnTransportLossReport</span><span class="p">(</span><span class="n">msg</span><span class="p">));</span>
+<span class="w">  </span><span class="n">last_report_block_time_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">now</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li><p>首先根据报告块得出，上一次和本次时间戳之内总共的发包数量<code>number_of_packets</code>，并对不同SSR进行累加得出<code>total_packets_delta</code>。</p>
+</li>
+<li><p>计算<code>total_packets_lost_delta</code>，上一次总丢包数量减去本次总丢包数量，从而可知<code>total_packets_lost_delta</code>表示的是<code>msg.end_time - msg.start_time</code>时间差之间的丢包数量。</p>
+</li>
+<li><p>根据<code>total_packets_delta</code>计算<code>packets_received_delta</code>，使用<code>total_packets_delta - total_packets_lost_delta</code>获得，在<code>msg.end_time - msg.start_time</code>时间差之间的总发包数量减去本段时间差之内总丢包数，最终得出的就是实际发送成功的包数量。</p>
+</li>
+<li><p>封装TransportLossReport并触发OnTransportLossReport将TransportLossReport消息传递给<code>GoogCcNetworkController</code>模块。</p>
+</li>
+<li><p>为使分析逻辑清晰，在后面再确切分析<code>GoogCcNetworkController</code>模块对TransportLossReport消息的处理和对码率的估计。</p>
+</li>
+</ul>
+<h3>5.2）RoundTripTimeUpdate封装</h3>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">RoundTripTimeUpdate</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="cm">/*表示当前接收到该消息的ntp时间*/</span><span class="w">  </span>
+<span class="w">  </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">receive_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Timestamp</span><span class="o">::</span><span class="n">PlusInfinity</span><span class="p">();</span>
+<span class="w">  </span><span class="cm">/*rtt时间*/</span><span class="w">  </span>
+<span class="w">  </span><span class="n">TimeDelta</span><span class="w"> </span><span class="n">round_trip_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TimeDelta</span><span class="o">::</span><span class="n">PlusInfinity</span><span class="p">();</span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">smoothed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<ul>
+<li>封装RoundTripTimeUpdate结构</li>
+<li>调用<code>controller_-&gt;OnRoundTripTimeUpdate(report)</code>，将消息传递给<code>GoogCcNetworkController</code>模块，进行码率估计并得出新码率。</li>
+<li>调用PostUpdates更新pacer模块的实时发送码率。</li>
+</ul>
+<h2>6）丢包对GoogCcNetworkController模块的影响</h2>
+<div class="highlight"><pre><code><span></span><span class="n">NetworkControlUpdate</span><span class="w"> </span><span class="nf">GoogCcNetworkController::OnTransportLossReport</span><span class="p">(</span>
+<span class="w">    </span><span class="n">TransportLossReport</span><span class="w"> </span><span class="n">msg</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">packet_feedback_only_</span><span class="p">)</span><span class="c1">//默认为false,这里可以通过配置该变量让码率估计只依据packet_feedback_only_</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">NetworkControlUpdate</span><span class="p">();</span>
+<span class="w">  </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">total_packets_delta</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">msg</span><span class="p">.</span><span class="n">packets_received_delta</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">msg</span><span class="p">.</span><span class="n">packets_lost_delta</span><span class="p">;</span>
+<span class="w">  </span><span class="n">bandwidth_estimation_</span><span class="o">-&gt;</span><span class="n">UpdatePacketsLost</span><span class="p">(</span>
+<span class="w">      </span><span class="n">msg</span><span class="p">.</span><span class="n">packets_lost_delta</span><span class="p">,</span><span class="w"> </span><span class="n">total_packets_delta</span><span class="p">,</span><span class="w"> </span><span class="n">msg</span><span class="p">.</span><span class="n">receive_time</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">NetworkControlUpdate</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li><p><code>total_packets_delta</code>为实际发送成功（对端收到的包） + 丢包数 。</p>
+</li>
+<li><p>调用SendSideBandwidthEstimation::UpdatePacketsLost更新当前时间差范围内的总发包数和丢包信息。</p>
+</li>
+<li><p>返回NetworkControlUpdate(),从这里可以看出在此时只是直接new 了一个NetworkControlUpdate，并未对其中的成员进行赋值，所以由此可知，经由RR或者SR报文的丢包情况对<code>GoogCcNetworkController</code>模块的真实作用是更新了<code>SendSideBandwidthEstimation</code>模块中的发包数量和丢包数量，而在<code>RtpTransportControllerSend</code>模块该阶段的最后调用栈中调用的PostUpdates函数实际上会直接返回，不会做任何事情。</p>
+</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">SendSideBandwidthEstimation::UpdatePacketsLost</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">packets_lost</span><span class="p">,</span>
+<span class="w">                                                    </span><span class="kt">int</span><span class="w"> </span><span class="n">number_of_packets</span><span class="p">,</span>
+<span class="w">                                                    </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">at_time</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">last_loss_feedback_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">at_time</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">first_report_time_</span><span class="p">.</span><span class="n">IsInfinite</span><span class="p">())</span>
+<span class="w">    </span><span class="n">first_report_time_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">at_time</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// Check sequence number diff and weight loss report</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">number_of_packets</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Accumulate reports.</span>
+<span class="w">    </span><span class="n">lost_packets_since_last_loss_update_</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">packets_lost</span><span class="p">;</span>
+<span class="w">    </span><span class="n">expected_packets_since_last_loss_update_</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">number_of_packets</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// Don&#39;t generate a loss rate until it can be based on enough packets.</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">expected_packets_since_last_loss_update_</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">kLimitNumPackets</span><span class="p">)</span>
+<span class="w">      </span><span class="k">return</span><span class="p">;</span>
+<span class="w">    </span><span class="n">has_decreased_since_last_fraction_loss_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">lost_q8</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">lost_packets_since_last_loss_update_</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">8</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">expected</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">expected_packets_since_last_loss_update_</span><span class="p">;</span>
+<span class="w">    </span><span class="n">last_fraction_loss_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">min</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">lost_q8</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">expected</span><span class="p">,</span><span class="w"> </span><span class="mi">255</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// Reset accumulators.</span>
+<span class="w">    </span><span class="n">lost_packets_since_last_loss_update_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="n">expected_packets_since_last_loss_update_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="n">last_loss_packet_report_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">at_time</span><span class="p">;</span>
+<span class="w">    </span><span class="n">UpdateEstimate</span><span class="p">(</span><span class="n">at_time</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">UpdateUmaStatsPacketsLost</span><span class="p">(</span><span class="n">at_time</span><span class="p">,</span><span class="w"> </span><span class="n">packets_lost</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li><code>lost_packets_since_last_loss_update_</code>表示上截止上一次基于丢包的回调的丢包数量，这两将上一次处理RR或者SR报告时的丢包数和本次接收到的丢包数进行累加。</li>
+<li><code>expected_packets_since_last_loss_update_</code>期望发送成功的总包数，发送多少对方收到多少，这里其实就是自上一次处理基于丢包码率估计到本次处理时间差之间总共的发包数量。</li>
+<li>判断<code>expected_packets_since_last_loss_update_ &lt; kLimitNumPackets</code>(默认20)，从这可以看出，如果在上一次处理丢包码率估计到本次处理丢包估计之间的时间差内如果总发包数小于20个，则直接返回，如果大于20个则求出<code>last_fraction_loss_ = 上一次处理到本次处理时间差内的总丢包数 * 256 / 本段时间内总发包数，然后和255 取最小值</code>。</li>
+<li>假设本段时间内丢包率为1，那肯定大于255，理论上丢包率肯定是小于1的，所以这里得到的丢包率是2^8 * 丢包数 / 发包数。</li>
+<li>如果发包数大于20的话计算出丢包率后需要进行清除。</li>
+<li>由以上可知，这段代码的时间差为 大于发送20个数据包的时间差，可以理解成每相隔20个数据包的时间差会进行一次丢包统计。</li>
+<li>调用UpdateEstimate进行码率估计。</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="k">constexpr</span><span class="w"> </span><span class="n">TimeDelta</span><span class="w"> </span><span class="n">kBweIncreaseInterval</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TimeDelta</span><span class="o">::</span><span class="n">Millis</span><span class="o">&lt;</span><span class="mi">1000</span><span class="o">&gt;</span><span class="p">();</span>
+<span class="k">constexpr</span><span class="w"> </span><span class="n">TimeDelta</span><span class="w"> </span><span class="n">kMaxRtcpFeedbackInterval</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TimeDelta</span><span class="o">::</span><span class="n">Millis</span><span class="o">&lt;</span><span class="mi">5000</span><span class="o">&gt;</span><span class="p">();</span>
+<span class="k">constexpr</span><span class="w"> </span><span class="n">TimeDelta</span><span class="w"> </span><span class="n">kBweDecreaseInterval</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TimeDelta</span><span class="o">::</span><span class="n">Millis</span><span class="o">&lt;</span><span class="mi">300</span><span class="o">&gt;</span><span class="p">();</span>
+<span class="k">constexpr</span><span class="w"> </span><span class="kt">float</span><span class="w"> </span><span class="n">kDefaultLowLossThreshold</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.02f</span><span class="p">;</span>
+<span class="k">constexpr</span><span class="w"> </span><span class="kt">float</span><span class="w"> </span><span class="n">kDefaultHighLossThreshold</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.1f</span><span class="p">;</span>
+<span class="k">constexpr</span><span class="w"> </span><span class="n">DataRate</span><span class="w"> </span><span class="n">kDefaultBitrateThreshold</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">DataRate</span><span class="o">::</span><span class="n">Zero</span><span class="p">();</span>
+</code></pre></div>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">SendSideBandwidthEstimation::UpdateEstimate</span><span class="p">(</span><span class="n">Timestamp</span><span class="w"> </span><span class="n">at_time</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">.........</span>
+<span class="w">  </span><span class="n">UpdateMinHistory</span><span class="p">(</span><span class="n">at_time</span><span class="p">);</span>
+<span class="w">  </span><span class="p">.......</span>
+<span class="w">  </span><span class="cm">/*是否启用WebRTC-Bwe-LossBasedControl,正常情况除非用户自己配置否则不启用*/</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">loss_based_bandwidth_estimation_</span><span class="p">.</span><span class="n">Enabled</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">loss_based_bandwidth_estimation_</span><span class="p">.</span><span class="n">Update</span><span class="p">(</span>
+<span class="w">        </span><span class="n">at_time</span><span class="p">,</span><span class="w"> </span><span class="n">min_bitrate_history_</span><span class="p">.</span><span class="n">front</span><span class="p">().</span><span class="n">second</span><span class="p">,</span><span class="w"> </span><span class="n">last_round_trip_time_</span><span class="p">);</span>
+<span class="w">    </span><span class="n">DataRate</span><span class="w"> </span><span class="n">new_bitrate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">MaybeRampupOrBackoff</span><span class="p">(</span><span class="n">current_target_</span><span class="p">,</span><span class="w"> </span><span class="n">at_time</span><span class="p">);</span>
+<span class="w">    </span><span class="n">UpdateTargetBitrate</span><span class="p">(</span><span class="n">new_bitrate</span><span class="p">,</span><span class="w"> </span><span class="n">at_time</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">TimeDelta</span><span class="w"> </span><span class="n">time_since_loss_packet_report</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">at_time</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">last_loss_packet_report_</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">time_since_loss_packet_report</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mf">1.2</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">kMaxRtcpFeedbackInterval</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// We only care about loss above a given bitrate threshold.</span>
+<span class="w">    </span><span class="c1">//上面分析到last_fraction_loss_位丢包率*2^8</span>
+<span class="w">    </span><span class="kt">float</span><span class="w"> </span><span class="n">loss</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">last_fraction_loss_</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mf">256.0f</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// We only make decisions based on loss when the bitrate is above a</span>
+<span class="w">    </span><span class="c1">// threshold. This is a crude way of handling loss which is uncorrelated</span>
+<span class="w">    </span><span class="c1">// to congestion.</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">current_target_</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">bitrate_threshold_</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">loss</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">low_loss_threshold_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Loss &lt; 2%: Increase rate by 8% of the min bitrate in the last</span>
+<span class="w">      </span><span class="c1">// kBweIncreaseInterval.</span>
+<span class="w">      </span><span class="c1">// Note that by remembering the bitrate over the last second one can</span>
+<span class="w">      </span><span class="c1">// rampup up one second faster than if only allowed to start ramping</span>
+<span class="w">      </span><span class="c1">// at 8% per second rate now. E.g.:</span>
+<span class="w">      </span><span class="c1">//   If sending a constant 100kbps it can rampup immediately to 108kbps</span>
+<span class="w">      </span><span class="c1">//   whenever a receiver report is received with lower packet loss.</span>
+<span class="w">      </span><span class="c1">//   If instead one would do: current_bitrate_ *= 1.08^(delta time),</span>
+<span class="w">      </span><span class="c1">//   it would take over one second since the lower packet loss to achieve</span>
+<span class="w">      </span><span class="c1">//   108kbps.</span>
+<span class="w">      </span><span class="n">DataRate</span><span class="w"> </span><span class="n">new_bitrate</span><span class="w"> </span><span class="o">=</span>
+<span class="w">          </span><span class="n">DataRate</span><span class="o">::</span><span class="n">bps</span><span class="p">(</span><span class="n">min_bitrate_history_</span><span class="p">.</span><span class="n">front</span><span class="p">().</span><span class="n">second</span><span class="p">.</span><span class="n">bps</span><span class="p">()</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">1.08</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">0.5</span><span class="p">);</span>
+<span class="w">      </span><span class="c1">// Add 1 kbps extra, just to make sure that we do not get stuck</span>
+<span class="w">      </span><span class="c1">// (gives a little extra increase at low rates, negligible at higher</span>
+<span class="w">      </span><span class="c1">// rates).</span>
+<span class="w">      </span><span class="n">new_bitrate</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">DataRate</span><span class="o">::</span><span class="n">bps</span><span class="p">(</span><span class="mi">1000</span><span class="p">);</span>
+<span class="w">      </span><span class="n">UpdateTargetBitrate</span><span class="p">(</span><span class="n">new_bitrate</span><span class="p">,</span><span class="w"> </span><span class="n">at_time</span><span class="p">);</span>
+<span class="w">      </span><span class="k">return</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">current_target_</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">bitrate_threshold_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">loss</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">high_loss_threshold_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Loss between 2% - 10%: Do nothing.</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Loss &gt; 10%: Limit the rate decreases to once a kBweDecreaseInterval</span>
+<span class="w">        </span><span class="c1">// + rtt.</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">has_decreased_since_last_fraction_loss_</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">            </span><span class="p">(</span><span class="n">at_time</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">time_last_decrease_</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;=</span>
+<span class="w">                </span><span class="p">(</span><span class="n">kBweDecreaseInterval</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">last_round_trip_time_</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="n">time_last_decrease_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">at_time</span><span class="p">;</span>
+<span class="w">          </span><span class="c1">// Reduce rate:</span>
+<span class="w">          </span><span class="c1">//   newRate = rate * (1 - 0.5*lossRate);</span>
+<span class="w">          </span><span class="c1">//   where packetLoss = 256*lossRate;</span>
+<span class="w">          </span><span class="n">DataRate</span><span class="w"> </span><span class="n">new_bitrate</span><span class="w"> </span><span class="o">=</span>
+<span class="w">              </span><span class="n">DataRate</span><span class="o">::</span><span class="n">bps</span><span class="p">((</span><span class="n">current_target_</span><span class="p">.</span><span class="n">bps</span><span class="p">()</span><span class="w"> </span><span class="o">*</span>
+<span class="w">                              </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">double</span><span class="o">&gt;</span><span class="p">(</span><span class="mi">512</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">last_fraction_loss_</span><span class="p">))</span><span class="w"> </span><span class="o">/</span>
+<span class="w">                            </span><span class="mf">512.0</span><span class="p">);</span>
+<span class="w">          </span><span class="n">has_decreased_since_last_fraction_loss_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">          </span><span class="n">UpdateTargetBitrate</span><span class="p">(</span><span class="n">new_bitrate</span><span class="p">,</span><span class="w"> </span><span class="n">at_time</span><span class="p">);</span>
+<span class="w">          </span><span class="k">return</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// TODO(srte): This is likely redundant in most cases.</span>
+<span class="w">  </span><span class="n">ApplyTargetLimits</span><span class="p">(</span><span class="n">at_time</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li><p>以上代码删除和TWCC延迟相关部分，保留和基于RR或SR丢包统计相关部分代码。</p>
+</li>
+<li><p>获取本次处理丢包统计和上次处理丢包统计的时间差<code>time_since_loss_packet_report = at_time - last_loss_packet_report_;</code></p>
+</li>
+<li><p>首先调用UpdateMinHistory以当前时间做为参数来更新<code>min_bitrate_history_</code>集合。</p>
+</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">SendSideBandwidthEstimation::UpdateMinHistory</span><span class="p">(</span><span class="n">Timestamp</span><span class="w"> </span><span class="n">at_time</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Remove old data points from history.</span>
+<span class="w">  </span><span class="c1">// Since history precision is in ms, add one so it is able to increase</span>
+<span class="w">  </span><span class="c1">// bitrate if it is off by as little as 0.5ms.</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">min_bitrate_history_</span><span class="p">.</span><span class="n">empty</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">          </span><span class="n">at_time</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">min_bitrate_history_</span><span class="p">.</span><span class="n">front</span><span class="p">().</span><span class="n">first</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">TimeDelta</span><span class="o">::</span><span class="n">ms</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;</span>
+<span class="w">              </span><span class="n">kBweIncreaseInterval</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">min_bitrate_history_</span><span class="p">.</span><span class="n">pop_front</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// Typical minimum sliding-window algorithm: Pop values higher than current</span>
+<span class="w">  </span><span class="c1">// bitrate before pushing it.</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">min_bitrate_history_</span><span class="p">.</span><span class="n">empty</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">          </span><span class="n">current_target_</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">min_bitrate_history_</span><span class="p">.</span><span class="n">back</span><span class="p">().</span><span class="n">second</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">min_bitrate_history_</span><span class="p">.</span><span class="n">pop_back</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">min_bitrate_history_</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">make_pair</span><span class="p">(</span><span class="n">at_time</span><span class="p">,</span><span class="w"> </span><span class="n">current_target_</span><span class="p">));</span>
+<span class="p">}</span>
+</code></pre></div>
+<div class="highlight"><pre><code><span></span><span class="n">std</span><span class="o">::</span><span class="n">deque</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">pair</span><span class="o">&lt;</span><span class="n">Timestamp</span><span class="p">,</span><span class="w"> </span><span class="n">DataRate</span><span class="o">&gt;</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">min_bitrate_history_</span><span class="p">;</span>
+</code></pre></div>
+<ul>
+<li><p><code>min_bitrate_history_</code>是一个以时间为key,码率为值得一个键值对的容器。</p>
+</li>
+<li><p>删除历史旧的数据。以当前时间和队列的第一个元素的时间差进行比较，删除1s以前保存的码率。</p>
+</li>
+<li><p>删除历史旧的数据。以码率为查询条件，如果当前的码率比历史数据中的码率还要小则删除。</p>
+</li>
+<li><p>以当前时间和当前码率构建<code>std::make_pair</code>，将其插入到容器尾部，现假设每次处理的时间间隔为100ms,那么从时间的角度来看，该队列能保存前10个码率。</p>
+</li>
+<li><p><code>bitrate_threshold_</code>默认情况下为0，可以通过“WebRTC-BweLossExperiment”进行配置，<code>low_loss_threshold_</code>的默认值为0.02f,<code>high_loss_threshold_</code>的默认值为0.1f。</p>
+</li>
+<li><p>首先判断<code>time_since_loss_packet_report</code>也就是两次评估处理的时间间隔小于1.2*5000等于6000ms的情况下，分成两种情况进行码率估计，一种是当前的丢包率小于等于2%的时候，那么会以历史最小码率以8%的幅度进行递增。额外再加上1kbps。</p>
+</li>
+<li><p>如果当前的丢包率介于2% - 10%之间则维持当前码率。</p>
+</li>
+<li><p>如果丢包率大于10%，说明网络比较差，需要降低码率，码率下降的公式为 新码率 = (当前码率 <em> (512 - 256 </em> 丢包率)) / 512，当然这个计算是有条件的，条件就是（当前时间 - 上一次开始递减的时间） &gt; 上一次的rtt时间 + 300ms ,也就是说得到递减的码率在一定的时间范围内有效。has_decreased_since_last_fraction_loss_的值在UpdatePacketsLost回调中被设置成false,在码率递减后设置成true,每次处理RR或者SR丢包统计时进行置false，在码率递减后设置成true。</p>
+</li>
+<li><p>最终码率新增或递减得到新码率，调用UpdateTargetBitrate对码率进行更新。从<code>GoogCcNetworkController</code>模块到<code>SendSideBandwidthEstimation</code>的大致流程如下：</p>
+</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210712-190000-2.png" alt=""></p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">SendSideBandwidthEstimation::UpdateTargetBitrate</span><span class="p">(</span><span class="n">DataRate</span><span class="w"> </span><span class="n">new_bitrate</span><span class="p">,</span>
+<span class="w">                                                      </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">at_time</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">new_bitrate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">new_bitrate</span><span class="p">,</span><span class="w"> </span><span class="n">GetUpperLimit</span><span class="p">());</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">new_bitrate</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">min_bitrate_configured_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">MaybeLogLowBitrateWarning</span><span class="p">(</span><span class="n">new_bitrate</span><span class="p">,</span><span class="w"> </span><span class="n">at_time</span><span class="p">);</span>
+<span class="w">    </span><span class="n">new_bitrate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">min_bitrate_configured_</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">current_target_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">new_bitrate</span><span class="p">;</span>
+<span class="w">  </span><span class="n">MaybeLogLossBasedEvent</span><span class="p">(</span><span class="n">at_time</span><span class="p">);</span>
+<span class="w">  </span><span class="n">link_capacity_</span><span class="p">.</span><span class="n">OnRateUpdate</span><span class="p">(</span><span class="n">acknowledged_rate_</span><span class="p">,</span><span class="w"> </span><span class="n">current_target_</span><span class="p">,</span><span class="w"> </span><span class="n">at_time</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>最终记录新码率为<code>current_target_</code>。</li>
+<li>调用LinkCapacityTracker::OnRateUpdate进行更新，后续进行分析，此文不进行分析。</li>
+</ul>
+<h2>7）RTT对GoogCcNetworkController模块的影响</h2>
+<ul>
+<li><code>GoogCcNetworkController</code>模块在收到rtt的回调后其处理逻辑如下图：</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210712-190000-3.png" alt=""></p>
+<ul>
+<li>一方面将RTT信息作用到<code>DelayBasedBwe</code>模块。</li>
+<li>另一方面讲RTT信息作用到<code>SendSideBandwidthEstimation</code>模块。</li>
+<li>本文主要分析<code>SendSideBandwidthEstimation</code>相关的信息。</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">SendSideBandwidthEstimation::UpdateRtt</span><span class="p">(</span><span class="n">TimeDelta</span><span class="w"> </span><span class="n">rtt</span><span class="p">,</span><span class="w"> </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">at_time</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Update RTT if we were able to compute an RTT based on this RTCP.</span>
+<span class="w">  </span><span class="c1">// FlexFEC doesn&#39;t send RTCP SR, which means we won&#39;t be able to compute RTT.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">rtt</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">TimeDelta</span><span class="o">::</span><span class="n">Zero</span><span class="p">())</span>
+<span class="w">    </span><span class="n">last_round_trip_time_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rtt</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">IsInStartPhase</span><span class="p">(</span><span class="n">at_time</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">uma_rtt_state_</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">kNoUpdate</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">uma_rtt_state_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kDone</span><span class="p">;</span>
+<span class="w">    </span><span class="n">RTC_HISTOGRAM_COUNTS</span><span class="p">(</span><span class="s">&quot;WebRTC.BWE.InitialRtt&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">rtt</span><span class="p">.</span><span class="n">ms</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(),</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">2000</span><span class="p">,</span><span class="w"> </span><span class="mi">50</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>UpdateRtt的核心作用就是更新<code>last_round_trip_time_</code>的值，该值在上面码率递减的分析过程中有用到，其来源就是基于此。</li>
+</ul>
+<h2>8）总结</h2>
+<ul>
+<li>本文意在分析webrtc基于丢包率的动态码率调控原理和其实现的业务逻辑，包含对应的函数调用栈，以及基于丢包率对码率控制（上调或者下降）的核心算法原理。</li>
+<li>根据上文的分析得出，当网络环境良好的情况下，webrtc给出的指标是丢包率小于2%10%之间，当丢包率小于2%的时候可以适当的增加码率，其增加的公式为以码率的8%进行递增同时附加1kbps，而当丢包率在2%10%之间的时候，保持码率平稳不增加也不减少。</li>
+<li>当丢包率超过10%的时候，对码率以 (当前码率 <em> (512 - 256 </em> 丢包率)) / 512的幅度进行递减，并且确保递减的新码率在一定的时间范围内有效。</li>
+</ul>
+<hr>
+
+<h4><p>原文出处：<a href='https://www.jianshu.com/p/5d6e802e86ac' target='blank'>WebRTC动态码率-基于transport wide cc的延迟码率估计原理</a></p></h4>
+<h2>1）前言</h2>
+<ul>
+<li>WebRtc基于transport wide cc 的延迟动态码率估计主要分成四大部分，如下：</li>
+<li>第一部分、在发送端，当rtp包扩展transport wide cc 协议在发送过程中，当包发送到网络环境过程中的处理和顺利发送到网络环境后的处理，最后作用到<code>GoogCcNetworkController</code>模块。</li>
+<li>第二部分、接收端接收到带transport wide cc 协议的rtp包后的处理，主要是生成基于transport wide cc 的RTCP报文，并定时将报文发送给发送端。</li>
+<li>第三部分、发送端收到接收端基于transport wide cc 协议的rtcp 反馈报文，并对其进行解析，解析完成后进行再封装将其作用到<code>GoogCcNetworkController</code>模块。</li>
+<li>第四部分、<code>GoogCcNetworkController</code>模块基于延迟模型根据transport wide cc feedback进行码率估计。</li>
+<li>本文重点分析第一部分，分析其工作流程并结合代码分析其代码数据传递链路，以及其最终对<code>GoogCcNetworkController</code>模块的影响。</li>
+</ul>
+<h2>2）工作流程一</h2>
+<ul>
+<li>如要使用transport-wide-cc-extensions就必须在sdp协议中扩展其协议，按照<a href="https://links.jianshu.com/go?to=https%3A%2F%2Ftools.ietf.org%2Fhtml%2Fdraft-holmer-rmcat-transport-wide-cc-extensions-01%23section-3">transport-wide-cc</a>协议可得知</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">a</span><span class="o">=</span><span class="n">extmap</span><span class="o">:</span><span class="mi">5</span><span class="w"> </span><span class="n">http</span><span class="o">:</span><span class="c1">//www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions</span>
+</code></pre></div>
+<ul>
+<li><p>必须在rtp包头部扩展如上协议。</p>
+</li>
+<li><p>其大致发送流程如下：</p>
+</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210712-200000-0.png" alt=""></p>
+<ul>
+<li>首先在<code>PacketRouter</code>模块的SendPacket函数中对跟进transport-wide-cc头扩展支持为rtp包添加TransportSequenceNumber,其实现如下：</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">PacketRouter::SendPacket</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">RtpPacketToSend</span><span class="o">&gt;</span><span class="w"> </span><span class="n">packet</span><span class="p">,</span>
+<span class="w">                              </span><span class="k">const</span><span class="w"> </span><span class="n">PacedPacketInfo</span><span class="o">&amp;</span><span class="w"> </span><span class="n">cluster_info</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">rtc</span><span class="o">::</span><span class="n">CritScope</span><span class="w"> </span><span class="n">cs</span><span class="p">(</span><span class="o">&amp;</span><span class="n">modules_crit_</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// With the new pacer code path, transport sequence numbers are only set here,</span>
+<span class="w">  </span><span class="c1">// on the pacer thread. Therefore we don&#39;t need atomics/synchronization.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">IsExtensionReserved</span><span class="o">&lt;</span><span class="n">TransportSequenceNumber</span><span class="o">&gt;</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">SetExtension</span><span class="o">&lt;</span><span class="n">TransportSequenceNumber</span><span class="o">&gt;</span><span class="p">(</span><span class="n">AllocateSequenceNumber</span><span class="p">());</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="p">......</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>其次在<code>RTPSender</code>模块的TrySendPacket函数中会对上述封装的TransportSequenceNumber进行解析，并通过AddPacketToTransportFeedback函数将其传递给<code>TransportFeedbackObserver</code>模块，其处理代码如下：</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">bool</span><span class="w"> </span><span class="nf">RTPSender::TrySendPacket</span><span class="p">(</span><span class="n">RtpPacketToSend</span><span class="o">*</span><span class="w"> </span><span class="n">packet</span><span class="p">,</span>
+<span class="w">                              </span><span class="k">const</span><span class="w"> </span><span class="n">PacedPacketInfo</span><span class="o">&amp;</span><span class="w"> </span><span class="n">pacing_info</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">packet</span><span class="p">);</span>
+<span class="w">  </span><span class="p">.....</span>
+<span class="w">  </span><span class="c1">// Downstream code actually uses this flag to distinguish between media and</span>
+<span class="w">  </span><span class="c1">// everything else.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="w"> </span><span class="n">packet_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">GetExtension</span><span class="o">&lt;</span><span class="n">TransportSequenceNumber</span><span class="o">&gt;</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">options</span><span class="p">.</span><span class="n">packet_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">packet_id</span><span class="p">;</span>
+<span class="w">    </span><span class="n">options</span><span class="p">.</span><span class="n">included_in_feedback</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">    </span><span class="n">options</span><span class="p">.</span><span class="n">included_in_allocation</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">    </span><span class="n">AddPacketToTransportFeedback</span><span class="p">(</span><span class="o">*</span><span class="n">packet_id</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">packet</span><span class="p">,</span><span class="w"> </span><span class="n">pacing_info</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="p">......</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">RTPSender::AddPacketToTransportFeedback</span><span class="p">(</span>
+<span class="w">    </span><span class="kt">uint16_t</span><span class="w"> </span><span class="n">packet_id</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">RtpPacketToSend</span><span class="o">&amp;</span><span class="w"> </span><span class="n">packet</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">PacedPacketInfo</span><span class="o">&amp;</span><span class="w"> </span><span class="n">pacing_info</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">transport_feedback_observer_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">size_t</span><span class="w"> </span><span class="n">packet_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">payload_size</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">padding_size</span><span class="p">();</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">send_side_bwe_with_overhead_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">packet_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">size</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">RtpPacketSendInfo</span><span class="w"> </span><span class="n">packet_info</span><span class="p">;</span>
+<span class="w">    </span><span class="n">packet_info</span><span class="p">.</span><span class="n">ssrc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">SSRC</span><span class="p">();</span>
+<span class="w">    </span><span class="n">packet_info</span><span class="p">.</span><span class="n">transport_sequence_number</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packet_id</span><span class="p">;</span>
+<span class="w">    </span><span class="n">packet_info</span><span class="p">.</span><span class="n">has_rtp_sequence_number</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">    </span><span class="n">packet_info</span><span class="p">.</span><span class="n">rtp_sequence_number</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">SequenceNumber</span><span class="p">();</span>
+<span class="w">    </span><span class="n">packet_info</span><span class="p">.</span><span class="n">length</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packet_size</span><span class="p">;</span>
+<span class="w">    </span><span class="n">packet_info</span><span class="p">.</span><span class="n">pacing_info</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pacing_info</span><span class="p">;</span>
+<span class="w">    </span><span class="n">transport_feedback_observer_</span><span class="o">-&gt;</span><span class="n">OnAddPacket</span><span class="p">(</span><span class="n">packet_info</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>生成RtpPacketSendInfo结构，记录当前要发送的rtp包的信息，如SequenceNumber、TransportSequenceNumber、包大小等。</li>
+<li><code>TransportFeedbackObserver</code>模块的派生及其依赖关系如下：  </li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210712-200000-1.png" alt=""></p>
+<ul>
+<li><code>RtpTransportControllerSend</code>模块的OnAddPacket函数实现如下</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">RtpTransportControllerSend::OnAddPacket</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">RtpPacketSendInfo</span><span class="o">&amp;</span><span class="w"> </span><span class="n">packet_info</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">transport_feedback_adapter_</span><span class="p">.</span><span class="n">AddPacket</span><span class="p">(</span>
+<span class="w">      </span><span class="n">packet_info</span><span class="p">,</span>
+<span class="w">      </span><span class="n">send_side_bwe_with_overhead_</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">transport_overhead_bytes_per_packet_</span><span class="p">.</span><span class="n">load</span><span class="p">()</span>
+<span class="w">                                    </span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">      </span><span class="n">Timestamp</span><span class="o">::</span><span class="n">ms</span><span class="p">(</span><span class="n">clock_</span><span class="o">-&gt;</span><span class="n">TimeInMilliseconds</span><span class="p">()));</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>该函数把任务交给<code>TransportFeedbackAdapter</code>模块，它的实现如下：</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="k">const</span><span class="w"> </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">kNoTimestamp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">-1</span><span class="p">;</span>
+<span class="k">const</span><span class="w"> </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">kSendTimeHistoryWindowMs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">60000</span><span class="p">;</span>
+</code></pre></div>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">TransportFeedbackAdapter::AddPacket</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">RtpPacketSendInfo</span><span class="o">&amp;</span><span class="w"> </span><span class="n">packet_info</span><span class="p">,</span>
+<span class="w">                                          </span><span class="kt">size_t</span><span class="w"> </span><span class="n">overhead_bytes</span><span class="p">,</span>
+<span class="w">                                          </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">creation_time</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">rtc</span><span class="o">::</span><span class="n">CritScope</span><span class="w"> </span><span class="n">cs</span><span class="p">(</span><span class="o">&amp;</span><span class="n">lock_</span><span class="p">);</span>
+<span class="w">    </span><span class="n">PacketFeedback</span><span class="w"> </span><span class="n">packet</span><span class="p">(</span><span class="n">creation_time</span><span class="p">.</span><span class="n">ms</span><span class="p">(),</span>
+<span class="w">                          </span><span class="n">packet_info</span><span class="p">.</span><span class="n">transport_sequence_number</span><span class="p">,</span>
+<span class="w">                          </span><span class="n">packet_info</span><span class="p">.</span><span class="n">length</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">overhead_bytes</span><span class="p">,</span><span class="w"> </span><span class="n">local_net_id_</span><span class="p">,</span>
+<span class="w">                          </span><span class="n">remote_net_id_</span><span class="p">,</span><span class="w"> </span><span class="n">packet_info</span><span class="p">.</span><span class="n">pacing_info</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">packet_info</span><span class="p">.</span><span class="n">has_rtp_sequence_number</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">packet</span><span class="p">.</span><span class="n">ssrc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packet_info</span><span class="p">.</span><span class="n">ssrc</span><span class="p">;</span>
+<span class="w">      </span><span class="n">packet</span><span class="p">.</span><span class="n">rtp_sequence_number</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packet_info</span><span class="p">.</span><span class="n">rtp_sequence_number</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">packet</span><span class="p">.</span><span class="n">long_sequence_number</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">seq_num_unwrapper_</span><span class="p">.</span><span class="n">Unwrap</span><span class="p">(</span><span class="n">packet</span><span class="p">.</span><span class="n">sequence_number</span><span class="p">);</span>
+<span class="w">    </span><span class="cm">/*历史记录的生命周期是当前时间和PacketFeedback包创建的时间的差值小于60000的窗口，</span>
+<span class="cm">      也就是，历史记录可以保留6秒以内的待发送包信息？，超过该时间窗口的历史记录将被清除*/</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">history_</span><span class="p">.</span><span class="n">empty</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">            </span><span class="n">creation_time</span><span class="p">.</span><span class="n">ms</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">history_</span><span class="p">.</span><span class="n">begin</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">.</span><span class="n">creation_time_ms</span><span class="w"> </span><span class="o">&gt;</span>
+<span class="w">                </span><span class="n">packet_age_limit_ms_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="c1">//默认值为kSendTimeHistoryWindowMs,6s的时间窗口</span>
+<span class="w">      </span><span class="c1">// TODO(sprang): Warn if erasing (too many) old items?</span>
+<span class="w">      </span><span class="n">RemoveInFlightPacketBytes</span><span class="p">(</span><span class="n">history_</span><span class="p">.</span><span class="n">begin</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">);</span>
+<span class="w">      </span><span class="n">history_</span><span class="p">.</span><span class="n">erase</span><span class="p">(</span><span class="n">history_</span><span class="p">.</span><span class="n">begin</span><span class="p">());</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">history_</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">make_pair</span><span class="p">(</span><span class="n">packet</span><span class="p">.</span><span class="n">long_sequence_number</span><span class="p">,</span><span class="w"> </span><span class="n">packet</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="p">....</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>该函数的核心作用是，利用RtpPacketSendInfo（包含，<code>seq,transport_seq</code>,发送包的大小等）信息创建PacketFeedback实例。</li>
+<li>将PacketFeedback实例以rtp transport seq 为key,以PacketFeedback为value插入到`history_容器当中。</li>
+<li>此时PacketFeedback记录的信息是创建时间、transport seq、ssrc、本次待发送的rtp包大小等信息。</li>
+<li>其中<code>history_</code>是一个map集合，它和TransportFeedbackAdapter的关系如下：</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210712-200000-2.png" alt=""></p>
+<ul>
+<li>那么这个历史记录有什么作用？接着看下文分析。</li>
+<li>以上分析了，RTP包扩展transport seq的发送到网络层前的处理流程，接下来分析当数据发送到网络层socket后的回调流程。</li>
+</ul>
+<h4>3）工作流程二</h4>
+<ul>
+<li>首先介绍RTP数据流发送反馈原理，如下图：</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210712-200000-3.png" alt=""></p>
+<ul>
+<li><p>首先，从信号注册说起，PeerConnection在用户添加音频、视频、数据轨的时候在其内部会调用对应的CreatexxChannel函数，在该函数中会为其对应的Media通道注册对应的信号函数。</p>
+</li>
+<li><p>其次、当RTP包发送到网络层后会通过信号机制将发送信息经过信号将其反馈到BaseChnnel,同时BaseChnnel同样会经过信号将信息通过SignalSentPacket触发<code>PeerConnection</code>模块的OnSentPacket_w函数。</p>
+</li>
+<li><p>最终经过函数回调，消息经Call模块，到达worker线程，最终反馈到<code>RtpTransportControllerSend</code>模块。本文从上图的第五步说起，其实现如下:</p>
+</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">RtpTransportControllerSend::OnSentPacket</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">SentPacket</span><span class="o">&amp;</span><span class="w"> </span><span class="n">sent_packet</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="n">SentPacket</span><span class="o">&gt;</span><span class="w"> </span><span class="n">packet_msg</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">transport_feedback_adapter_</span><span class="p">.</span><span class="n">ProcessSentPacket</span><span class="p">(</span><span class="n">sent_packet</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">packet_msg</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">task_queue_</span><span class="p">.</span><span class="n">PostTask</span><span class="p">([</span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="n">packet_msg</span><span class="p">]()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">RTC_DCHECK_RUN_ON</span><span class="p">(</span><span class="o">&amp;</span><span class="n">task_queue_</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">controller_</span><span class="p">)</span>
+<span class="w">        </span><span class="n">PostUpdates</span><span class="p">(</span><span class="n">controller_</span><span class="o">-&gt;</span><span class="n">OnSentPacket</span><span class="p">(</span><span class="o">*</span><span class="n">packet_msg</span><span class="p">));</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">pacer</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">UpdateOutstandingData</span><span class="p">(</span>
+<span class="w">      </span><span class="n">transport_feedback_adapter_</span><span class="p">.</span><span class="n">GetOutstandingData</span><span class="p">());</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>该函数的核心业务分成三大成分。</li>
+<li>其一是调用<code>TransportFeedbackAdapter</code>模块的ProcessSentPacket打包SentPacket消息。</li>
+<li>其二是将生成的SentPacket结构消息作用到GoogCcNetworkController模块,同时调用PostUpdates()进行码率更新（如果符合条件的话）。</li>
+<li>其三是将当前发送的字节数更新到<code>pacer</code>模块，这样pacer模块就知道当前网络中有多少数据正在发送，从而进行拥塞控制。</li>
+</ul>
+<h3>3.1）发送反馈SentPacket包的封装</h3>
+<div class="highlight"><pre><code><span></span><span class="n">absl</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="n">SentPacket</span><span class="o">&gt;</span><span class="w"> </span><span class="n">TransportFeedbackAdapter</span><span class="o">::</span><span class="n">ProcessSentPacket</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">SentPacket</span><span class="o">&amp;</span><span class="w"> </span><span class="n">sent_packet</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">rtc</span><span class="o">::</span><span class="n">CritScope</span><span class="w"> </span><span class="nf">cs</span><span class="p">(</span><span class="o">&amp;</span><span class="n">lock_</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// TODO(srte): Only use one way to indicate that packet feedback is used.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">sent_packet</span><span class="p">.</span><span class="n">info</span><span class="p">.</span><span class="n">included_in_feedback</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">sent_packet</span><span class="p">.</span><span class="n">packet_id</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">unwrapped_seq_num</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">seq_num_unwrapper_</span><span class="p">.</span><span class="n">Unwrap</span><span class="p">(</span><span class="n">sent_packet</span><span class="p">.</span><span class="n">packet_id</span><span class="p">);</span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">it</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">history_</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">unwrapped_seq_num</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">it</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">history_</span><span class="p">.</span><span class="n">end</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kt">bool</span><span class="w"> </span><span class="n">packet_retransmit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">it</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">.</span><span class="n">send_time_ms</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">      </span><span class="n">it</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">.</span><span class="n">send_time_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sent_packet</span><span class="p">.</span><span class="n">send_time_ms</span><span class="p">;</span>
+<span class="w">      </span><span class="n">last_send_time_ms_</span><span class="w"> </span><span class="o">=</span>
+<span class="w">          </span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">(</span><span class="n">last_send_time_ms_</span><span class="p">,</span><span class="w"> </span><span class="n">sent_packet</span><span class="p">.</span><span class="n">send_time_ms</span><span class="p">);</span>
+<span class="w">      </span><span class="c1">// TODO(srte): Don&#39;t do this on retransmit.</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">pending_untracked_size_</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">sent_packet</span><span class="p">.</span><span class="n">send_time_ms</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">last_untracked_send_time_ms_</span><span class="p">)</span>
+<span class="w">          </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_WARNING</span><span class="p">)</span>
+<span class="w">              </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;appending acknowledged data for out of order packet. (Diff: &quot;</span>
+<span class="w">              </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">last_untracked_send_time_ms_</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">sent_packet</span><span class="p">.</span><span class="n">send_time_ms</span>
+<span class="w">              </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot; ms.)&quot;</span><span class="p">;</span>
+<span class="w">        </span><span class="n">it</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">.</span><span class="n">unacknowledged_data</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">pending_untracked_size_</span><span class="p">;</span>
+<span class="w">        </span><span class="n">pending_untracked_size_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">packet_retransmit</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">AddInFlightPacketBytes</span><span class="p">(</span><span class="n">it</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">);</span>
+<span class="w">        </span><span class="k">auto</span><span class="w"> </span><span class="n">packet</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">it</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">;</span>
+<span class="w">        </span><span class="n">SentPacket</span><span class="w"> </span><span class="n">msg</span><span class="p">;</span>
+<span class="w">        </span><span class="n">msg</span><span class="p">.</span><span class="n">size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">DataSize</span><span class="o">::</span><span class="n">bytes</span><span class="p">(</span><span class="n">packet</span><span class="p">.</span><span class="n">payload_size</span><span class="p">);</span>
+<span class="w">        </span><span class="n">msg</span><span class="p">.</span><span class="n">send_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Timestamp</span><span class="o">::</span><span class="n">ms</span><span class="p">(</span><span class="n">packet</span><span class="p">.</span><span class="n">send_time_ms</span><span class="p">);</span>
+<span class="w">        </span><span class="n">msg</span><span class="p">.</span><span class="n">sequence_number</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">long_sequence_number</span><span class="p">;</span>
+<span class="w">        </span><span class="n">msg</span><span class="p">.</span><span class="n">prior_unacked_data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">DataSize</span><span class="o">::</span><span class="n">bytes</span><span class="p">(</span><span class="n">packet</span><span class="p">.</span><span class="n">unacknowledged_data</span><span class="p">);</span>
+<span class="w">        </span><span class="n">msg</span><span class="p">.</span><span class="n">data_in_flight</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">GetOutstandingData</span><span class="p">();</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">msg</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">sent_packet</span><span class="p">.</span><span class="n">info</span><span class="p">.</span><span class="n">included_in_allocation</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">sent_packet</span><span class="p">.</span><span class="n">send_time_ms</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">last_send_time_ms_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_WARNING</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;ignoring untracked data for out of order packet.&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">pending_untracked_size_</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">sent_packet</span><span class="p">.</span><span class="n">info</span><span class="p">.</span><span class="n">packet_size_bytes</span><span class="p">;</span>
+<span class="w">    </span><span class="n">last_untracked_send_time_ms_</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">(</span><span class="n">last_untracked_send_time_ms_</span><span class="p">,</span><span class="w"> </span><span class="n">sent_packet</span><span class="p">.</span><span class="n">send_time_ms</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">absl</span><span class="o">::</span><span class="n">nullopt</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>承接上面工作流程一中的分析，有涉及到<code>history_</code>容器，此处，根据已发送的包的信息，从该容器中根据seq number进行查询，查询到后，对立面的数据进行更新，主要是更新其发送时间。</li>
+<li>同时通过AddInFlightPacketBytes函数将已发送的RTP包中的实际palyload大小，记录到<code>in_flight_bytes_</code>容器当中。</li>
+<li>生成SentPacket并为其进行初始化，主要包含（实际发送数据的大小、发送时间、transport seq number、以及<code>data_in_flight</code>），其中<code>data_in_flight</code>表示一共已经发送了多少字节的数据到网络层了（以时间6s为窗口）。</li>
+<li><code>in_flight_bytes_</code>容器定义在<code>TransportFeedbackAdapter</code>模块中，其定义如下：</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="k">using</span><span class="w"> </span><span class="n">RemoteAndLocalNetworkId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">pair</span><span class="o">&lt;</span><span class="kt">uint16_t</span><span class="p">,</span><span class="w"> </span><span class="kt">uint16_t</span><span class="o">&gt;</span><span class="p">;</span>
+<span class="n">std</span><span class="o">::</span><span class="n">map</span><span class="o">&lt;</span><span class="n">RemoteAndLocalNetworkId</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">in_flight_bytes_</span><span class="p">;</span>
+</code></pre></div>
+<ul>
+<li>通过AddInFlightPacketBytes函数将每次发送了多少字节的数据填入该容器，进行发送字节统计，最终会作用到<code>pacer</code>模块。</li>
+<li>通过RemoveInFlightPacketBytes函数在每次接收到接收端发送回来的twcc feedback报告后根据收到的seq number 将对应seq number的包的大小计数从<code>in_flight_bytes_</code>中进行移除，同时在发送数据包的时候在<code>TransportFeedbackAdapter</code>模块AddPacket函数中会判断发送包的生命周期，如果超时（大于6s）进行移除。</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">TransportFeedbackAdapter::AddInFlightPacketBytes</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">PacketFeedback</span><span class="o">&amp;</span><span class="w"> </span><span class="n">packet</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="p">....</span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">it</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">in_flight_bytes_</span><span class="p">.</span><span class="n">find</span><span class="p">({</span><span class="n">packet</span><span class="p">.</span><span class="n">local_net_id</span><span class="p">,</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">remote_net_id</span><span class="p">});</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">it</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">in_flight_bytes_</span><span class="p">.</span><span class="n">end</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">it</span><span class="o">-&gt;</span><span class="n">second</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">payload_size</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">in_flight_bytes_</span><span class="p">[{</span><span class="n">packet</span><span class="p">.</span><span class="n">local_net_id</span><span class="p">,</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">remote_net_id</span><span class="p">}]</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">packet</span><span class="p">.</span><span class="n">payload_size</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>每次发送进行累加。</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">TransportFeedbackAdapter::RemoveInFlightPacketBytes</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">PacketFeedback</span><span class="o">&amp;</span><span class="w"> </span><span class="n">packet</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="p">....</span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">it</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">in_flight_bytes_</span><span class="p">.</span><span class="n">find</span><span class="p">({</span><span class="n">packet</span><span class="p">.</span><span class="n">local_net_id</span><span class="p">,</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">remote_net_id</span><span class="p">});</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">it</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">in_flight_bytes_</span><span class="p">.</span><span class="n">end</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">it</span><span class="o">-&gt;</span><span class="n">second</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">payload_size</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">it</span><span class="o">-&gt;</span><span class="n">second</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">      </span><span class="n">in_flight_bytes_</span><span class="p">.</span><span class="n">erase</span><span class="p">(</span><span class="n">it</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>超时或者对应的seq 包已经收到接收端发回来的twcc报告进行移除操作。</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">DataSize</span><span class="w"> </span><span class="nf">TransportFeedbackAdapter::GetOutstandingData</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">rtc</span><span class="o">::</span><span class="n">CritScope</span><span class="w"> </span><span class="n">cs</span><span class="p">(</span><span class="o">&amp;</span><span class="n">lock_</span><span class="p">);</span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">it</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">in_flight_bytes_</span><span class="p">.</span><span class="n">find</span><span class="p">({</span><span class="n">local_net_id_</span><span class="p">,</span><span class="w"> </span><span class="n">remote_net_id_</span><span class="p">});</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">it</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">in_flight_bytes_</span><span class="p">.</span><span class="n">end</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">DataSize</span><span class="o">::</span><span class="n">bytes</span><span class="p">(</span><span class="n">it</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">DataSize</span><span class="o">::</span><span class="n">Zero</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>综上所述：<strong><code>in_flight_bytes_</code>容器描述的应当是以6s为最大时间窗口，描述当前总共有多少字节的数据正处于网络发送当中</strong></li>
+<li>返回已发送的总字节数，最终对<code>pacer</code>模块有用。</li>
+<li>到此为止SentPacket封装完成，主要包含（本次发送了多少字节的数据、本包的seq、本次发送时间、一共有多少字节的数据在发送[最多6s]）</li>
+</ul>
+<h3>3.2）发送反馈SentPacket包作用到GoogCcNetworkController模块</h3>
+<div class="highlight"><pre><code><span></span><span class="n">NetworkControlUpdate</span><span class="w"> </span><span class="nf">GoogCcNetworkController::OnSentPacket</span><span class="p">(</span>
+<span class="w">    </span><span class="n">SentPacket</span><span class="w"> </span><span class="n">sent_packet</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">alr_detector_</span><span class="o">-&gt;</span><span class="n">OnBytesSent</span><span class="p">(</span><span class="n">sent_packet</span><span class="p">.</span><span class="n">size</span><span class="p">.</span><span class="n">bytes</span><span class="p">(),</span>
+<span class="w">                              </span><span class="n">sent_packet</span><span class="p">.</span><span class="n">send_time</span><span class="p">.</span><span class="n">ms</span><span class="p">());</span>
+<span class="w">  </span><span class="n">acknowledged_bitrate_estimator_</span><span class="o">-&gt;</span><span class="n">SetAlr</span><span class="p">(</span>
+<span class="w">      </span><span class="n">alr_detector_</span><span class="o">-&gt;</span><span class="n">GetApplicationLimitedRegionStartTime</span><span class="p">().</span><span class="n">has_value</span><span class="p">());</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">first_packet_sent_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">first_packet_sent_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// Initialize feedback time to send time to allow estimation of RTT until</span>
+<span class="w">    </span><span class="c1">// first feedback is received.</span>
+<span class="w">    </span><span class="n">bandwidth_estimation_</span><span class="o">-&gt;</span><span class="n">UpdatePropagationRtt</span><span class="p">(</span><span class="n">sent_packet</span><span class="p">.</span><span class="n">send_time</span><span class="p">,</span>
+<span class="w">                                                </span><span class="n">TimeDelta</span><span class="o">::</span><span class="n">Zero</span><span class="p">());</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">bandwidth_estimation_</span><span class="o">-&gt;</span><span class="n">OnSentPacket</span><span class="p">(</span><span class="n">sent_packet</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">congestion_window_pushback_controller_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">congestion_window_pushback_controller_</span><span class="o">-&gt;</span><span class="n">UpdateOutstandingData</span><span class="p">(</span>
+<span class="w">        </span><span class="n">sent_packet</span><span class="p">.</span><span class="n">data_in_flight</span><span class="p">.</span><span class="n">bytes</span><span class="p">());</span>
+<span class="w">    </span><span class="n">NetworkControlUpdate</span><span class="w"> </span><span class="n">update</span><span class="p">;</span>
+<span class="w">    </span><span class="n">MaybeTriggerOnNetworkChanged</span><span class="p">(</span><span class="o">&amp;</span><span class="n">update</span><span class="p">,</span><span class="w"> </span><span class="n">sent_packet</span><span class="p">.</span><span class="n">send_time</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">update</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">NetworkControlUpdate</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li><p>该函数会调用<code>AlrDetector</code>模块进行带宽受限区域探测，如果网络受限会导致<code>AlrDetector</code>模块中的<code>alr_started_time_ms_</code>成员被赋值，也就是受限的起使时间，其原理就是通过理论预设的码率，和预设的带宽利用率，以及每次发送数据的时间间隔，然后配合本次实际发送的字节数，进行比较，比较预算应该发送多少字节的数据和实际发送了多少字节的数据的比例，来判断当前发送到底有没有充分利用好网络带宽。其详细的原理可以参考<a href="https://www.jianshu.com/p/55e5246f12b9">WebRTC动态码率-AlrDetector原理</a>。</p>
+</li>
+<li><p>经<code>AlrDetector</code>模块受限探测后，将探测结果通过调用<code>AcknowledgedBitrateEstimator</code>模块的SetAlr函数设置到该模块，探测结果可能会没有值，假设带宽利用率不错的话。</p>
+</li>
+<li><p>调用<code>SendSideBandwidthEstimation</code>模块的OnSentPacket函数记录本次发送的包信息，为基于丢包的动态码率估计提供入参信息，基于丢包率的动态码率估计可以参考<a href="https://www.jianshu.com/p/a3310e5d3768">WebRTC动态码率-基于丢包的码率估计原理</a></p>
+</li>
+<li><p>最后通过<code>CongestionWindowPushbackController</code>模块来触发码率估计，然而截止m79版本CongestionWindowPushbackController模块默认并未开启，用户可以通过配置"WebRTC-CongestionWindow/QueueSize:100,MinBitrate:100000/" FieldTrials来启用，该模块放到后续分析。</p>
+</li>
+<li><p>在<code>CongestionWindowPushbackController</code>模块未开启的情况下，该函数默认返回了一个NetworkControlUpdate实例。</p>
+</li>
+</ul>
+<h3>3.3）当前发送总字节数作用到pacer模块</h3>
+<ul>
+<li>回到上图中的步骤8，transport wide cc 发送反馈的最后环节就是将当前统计到的正在网络环境下处于正在发送的总字节数，告诉<code>pacer</code>模块。</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">PacedSender::UpdateOutstandingData</span><span class="p">(</span><span class="n">DataSize</span><span class="w"> </span><span class="n">outstanding_data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">rtc</span><span class="o">::</span><span class="n">CritScope</span><span class="w"> </span><span class="n">cs</span><span class="p">(</span><span class="o">&amp;</span><span class="n">critsect_</span><span class="p">);</span>
+<span class="w">  </span><span class="n">pacing_controller_</span><span class="p">.</span><span class="n">UpdateOutstandingData</span><span class="p">(</span><span class="n">outstanding_data</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">PacingController::UpdateOutstandingData</span><span class="p">(</span><span class="n">DataSize</span><span class="w"> </span><span class="n">outstanding_data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">outstanding_data_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">outstanding_data</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>更新当前网络中时间有多少值在发送。</li>
+<li>如何使用该值？</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">bool</span><span class="w"> </span><span class="nf">PacingController::Congested</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">congestion_window_size_</span><span class="p">.</span><span class="n">IsFinite</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="cm">/*congestion_window_size_为经过GoogCcNetworkController模块动态码率估计后得出的网络拥塞窗口上限，</span>
+<span class="cm">      经RtpTransportControllerSend::PostUpdates()函数将拥塞窗口上限配置到pacer模块。</span>
+<span class="cm">    */</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">outstanding_data_</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">congestion_window_size_</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>通过判断当前网络中实际在发送的字节总数大小和拥塞窗口上限做比较，来得出当前网络是否拥塞。</li>
+<li>如果网络拥塞则发送数据的时候会取消本次发送。</li>
+<li>逻辑如下：</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210712-200000-4.png" alt=""></p>
+<ul>
+<li>本文到此分析结束</li>
+</ul>
+<h2>4）总结</h2>
+<ul>
+<li>本文主要介绍基于transport wide cc的rtp数据发送在发送端的预处理逻辑和原理，主要分析了在发送过程中的回调机制。</li>
+<li>同时分析在RTP数据发送过程中的消息回调对其他如<code>AlrDetector</code>模块和<code>GoogCcNetworkController</code>模块和<code>pacer</code>模块的影响。</li>
+<li>通过本文的分析可以清晰的看出基于transport wide cc的rtp数据发送在发送过程中为后续基于延迟的码率估计和基于丢包的码率估计提供入参，从而可以看出webrtc 动态码率估计得复杂性，同时通过本文的分析对后续分析基于延迟的码率估计奠定基础。</li>
+</ul>
+<hr>
+
+<h4><p>原文出处：<a href='https://www.jianshu.com/p/117e306fce0b' target='blank'>WebRTC动态码率-IntervalBudget发送间隔预算原理</a></p></h4>
+<ul>
+<li>作为webrtc pacer发送的重要预算模块被定义为IntervalBudget</li>
+<li>该模块分成如下四个步骤来完成每此应该发送多少数据量的计算</li>
+<li>pacer模块将连续的时间分成不同时间间隔的时间块，发送一段数据后休息一会，然后再发送一段数据，然后再休息一会</li>
+<li>假设上次休息的时间到本次发送的时间间隔为<code>delta_time_ms</code></li>
+<li>那么本次要发送多少数据呢？这里则使用当前的发送速率，配合流逝的<code>delta_time_ms</code>进行计算。</li>
+<li>本文理解每次循环发送表示至少发送<code>delta_time_ms</code>的数据量，而每发送成功一包表示本次循环发送中的一次。</li>
+</ul>
+<h2>1）设置目标发送码率</h2>
+<div class="highlight"><pre><code><span></span><span class="k">namespace</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">constexpr</span><span class="w"> </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">kWindowMs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">500</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="n">IntervalBudget</span><span class="o">::</span><span class="n">set_target_rate_kbps</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">target_rate_kbps</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">target_rate_kbps_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">target_rate_kbps</span><span class="p">;</span>
+<span class="w">  </span><span class="n">max_bytes_in_budget_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">kWindowMs</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">target_rate_kbps_</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">8</span><span class="p">;</span>
+<span class="w">  </span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">(</span><span class="o">-</span><span class="n">max_bytes_in_budget_</span><span class="p">,</span><span class="w"> </span><span class="n">bytes_remaining_</span><span class="p">),</span>
+<span class="w">                              </span><span class="n">max_bytes_in_budget_</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>在<code>IntervalBudget</code>中根据目标码率配合时间窗口进行每相隔指定的时间范围内应该发送预算多少字节。</li>
+<li>按照上面的假设经计算得出<code>max_bytes_in_budget_</code>按照500ms最大时间窗口进行最大预算,假设目标发送码率为240kbps则得出本次预算最大发送为15000字节。</li>
+<li>计算剩余预算，<code>bytes_remaining_</code>首次默认情况下为0，那么经过赋值后本次剩余的预算为0（初始值）。</li>
+<li>此函数计算得出当前目标码率下以500ms为时间窗口得出最大的发送预算，也就是500ms内按照该目标发送码率最大可以发送1500字节的数据。</li>
+</ul>
+<h2>2）增加发送预算</h2>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">IntervalBudget::IncreaseBudget</span><span class="p">(</span><span class="kt">int64_t</span><span class="w"> </span><span class="n">delta_time_ms</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">bytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">target_rate_kbps_</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">delta_time_ms</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">8</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">can_build_up_underuse_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// We overused last interval, compensate this interval.</span>
+<span class="w">    </span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">bytes</span><span class="p">,</span><span class="w"> </span><span class="n">max_bytes_in_budget_</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// If we underused last interval we can&#39;t use it this interval.</span>
+<span class="w">    </span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">bytes</span><span class="p">,</span><span class="w"> </span><span class="n">max_bytes_in_budget_</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>以delta时间为单位，假设以30ms的时间进行预算增加。</li>
+<li>首先delta时间内根据目标发送码率得出<code>240kbps * 30 / 1000 / 8</code>等于<code>900</code>字节。</li>
+<li>计算<code>bytes_remaining_</code>，初始值为0，和最大值进行比较取最小值。</li>
+<li>如果已经发送了一些数据，此时<code>bytes_remaining_</code>大于0，此时剩余量为上一次的剩余量加上delta时间内要发送的字节数据。</li>
+<li>首次调用该函数计算得到<code>bytes_remaining_</code>应该为900字节。</li>
+</ul>
+<h2>3）调整剩余预算</h2>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">IntervalBudget::UseBudget</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">bytes</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">(</span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">bytes</span><span class="p">),</span>
+<span class="w">                              </span><span class="o">-</span><span class="n">max_bytes_in_budget_</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>每成功发送一包数据后需要调用该函数对使用预算进行更新。</li>
+<li>这里假设在发送数据前调用了<code>set_target_rate_kbps(240)</code>,<code>IncreaseBudget(30)</code>,也就是目标发送码率240kbps,发送时间为30ms。经上述的计算得出，预算该30ms内可以发送900字节的数据。</li>
+<li>假设第一次发送数据发送了200字节，那么发送成功后调用该函数，算出剩余的预算还有900-200=700字节。</li>
+</ul>
+<h2>4）获取剩余预算</h2>
+<div class="highlight"><pre><code><span></span><span class="kt">size_t</span><span class="w"> </span><span class="nf">IntervalBudget::bytes_remaining</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">saturated_cast</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="o">&lt;</span><span class="kt">int64_t</span><span class="o">&gt;</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">bytes_remaining_</span><span class="p">));</span>
+<span class="p">}</span>
+</code></pre></div>
+<h2>5）使用案例</h2>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">PacingController::ProcessPackets</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">now</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">CurrentTime</span><span class="p">();</span>
+<span class="w">  </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">previous_process_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">last_process_time_</span><span class="p">;</span>
+<span class="w">  </span><span class="n">TimeDelta</span><span class="w"> </span><span class="n">elapsed_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">UpdateTimeAndGetElapsed</span><span class="p">(</span><span class="n">now</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">elapsed_time</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">TimeDelta</span><span class="o">::</span><span class="n">Zero</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">mode_</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">ProcessMode</span><span class="o">::</span><span class="n">kPeriodic</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// In periodic processing mode, the IntevalBudget allows positive budget</span>
+<span class="w">      </span><span class="c1">// up to (process interval duration) * (target rate), so we only need to</span>
+<span class="w">      </span><span class="c1">// update it once before the packet sending loop.</span>
+<span class="w">      </span><span class="c1">// 设置当前实时发送速率  </span>
+<span class="w">      </span><span class="n">media_budget_</span><span class="p">.</span><span class="n">set_target_rate_kbps</span><span class="p">(</span><span class="n">target_rate</span><span class="p">.</span><span class="n">kbps</span><span class="p">());</span>
+<span class="w">      </span><span class="c1">// 调用IncreaseBudget进行预算计算，假设 elapsed_time为30ms, taeget rate 为240kbps</span>
+<span class="w">      </span><span class="n">UpdateBudgetWithElapsedTime</span><span class="p">(</span><span class="n">elapsed_time</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">media_rate_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">target_rate</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="p">...</span>
+<span class="w">  </span><span class="n">DataSize</span><span class="w"> </span><span class="n">data_sent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">DataSize</span><span class="o">::</span><span class="n">Zero</span><span class="p">();</span>
+<span class="w">  </span><span class="c1">// The paused state is checked in the loop since it leaves the critical</span>
+<span class="w">  </span><span class="c1">// section allowing the paused state to be changed from other code.</span>
+<span class="w">  </span><span class="c1">// 循环发送数据  </span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">paused_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Fetch the next packet, so long as queue is not empty or budget is not</span>
+<span class="w">    </span><span class="c1">// exhausted.</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">RtpPacketToSend</span><span class="o">&gt;</span><span class="w"> </span><span class="n">rtp_packet</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">GetPendingPacket</span><span class="p">(</span><span class="n">pacing_info</span><span class="p">,</span><span class="w"> </span><span class="n">target_send_time</span><span class="p">,</span><span class="w"> </span><span class="n">now</span><span class="p">);</span>
+<span class="w">    </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">rtp_packet</span><span class="p">);</span>
+<span class="w">    </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">rtp_packet</span><span class="o">-&gt;</span><span class="n">packet_type</span><span class="p">().</span><span class="n">has_value</span><span class="p">());</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">RtpPacketMediaType</span><span class="w"> </span><span class="n">packet_type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">rtp_packet</span><span class="o">-&gt;</span><span class="n">packet_type</span><span class="p">();</span>
+<span class="w">    </span><span class="n">DataSize</span><span class="w"> </span><span class="n">packet_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">DataSize</span><span class="o">::</span><span class="n">Bytes</span><span class="p">(</span><span class="n">rtp_packet</span><span class="o">-&gt;</span><span class="n">payload_size</span><span class="p">()</span><span class="w"> </span><span class="o">+</span>
+<span class="w">                                            </span><span class="n">rtp_packet</span><span class="o">-&gt;</span><span class="n">padding_size</span><span class="p">());</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="w">    </span><span class="n">packet_sender_</span><span class="o">-&gt;</span><span class="n">SendPacket</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">rtp_packet</span><span class="p">),</span><span class="w"> </span><span class="n">pacing_info</span><span class="p">);</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">packet</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">packet_sender_</span><span class="o">-&gt;</span><span class="n">FetchFec</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">EnqueuePacket</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">packet</span><span class="p">));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">data_sent</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">packet_size</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// Send done, update send/process time to the target send time.</span>
+<span class="w">    </span><span class="c1">// 每成功发送一包数据后需要将当前发送的数据量调用UseBudget来更新本次循环预算的剩余  </span>
+<span class="w">    </span><span class="n">OnPacketSent</span><span class="p">(</span><span class="n">packet_type</span><span class="p">,</span><span class="w"> </span><span class="n">packet_size</span><span class="p">,</span><span class="w"> </span><span class="n">target_send_time</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// If we are currently probing, we need to stop the send loop when we have</span>
+<span class="w">    </span><span class="c1">// reached the send target.</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_probing</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">data_sent</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">recommended_probe_size</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">last_process_time_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">(</span><span class="n">last_process_time_</span><span class="p">,</span><span class="w"> </span><span class="n">previous_process_time</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "WebRTC动态码率.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

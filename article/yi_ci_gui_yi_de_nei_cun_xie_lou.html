@@ -1,0 +1,391 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>一次诡异的内存泄漏 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="一次诡异的内存泄漏,C/C++,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="一次诡异的内存泄漏" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>一次诡异的内存泄漏</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2023-12-30 23:10
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://mp.weixin.qq.com/s/pwrxwlsDjbtCKGfWwPo5ig' target='blank'>一次诡异的内存泄漏</a></p></h4>
+<h2>缘起</h2>
+<p>最近在补一些基础知识，恰好涉及到了智能指针<strong>std::weak_ptr</strong>在解决<strong>std::shared_ptr时候循环引用</strong>的问题，如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">A</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="k">public</span><span class="o">:</span><span class="w">  </span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">weak_ptr</span><span class="o">&lt;</span><span class="n">B</span><span class="o">&gt;</span><span class="w"> </span><span class="n">b_ptr</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span><span class="w">  </span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">B</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="k">public</span><span class="o">:</span><span class="w">  </span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">weak_ptr</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="w"> </span><span class="n">a_ptr</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span><span class="w">  </span>
+
+<span class="k">auto</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">make_shared</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">();</span><span class="w">  </span>
+<span class="k">auto</span><span class="w"> </span><span class="n">b</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">make_shared</span><span class="o">&lt;</span><span class="n">B</span><span class="o">&gt;</span><span class="p">();</span><span class="w">  </span>
+
+<span class="n">a</span><span class="o">-&gt;</span><span class="n">b_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">b</span><span class="p">;</span><span class="w">  </span>
+<span class="n">b</span><span class="o">-&gt;</span><span class="n">a_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">a</span><span class="p">;</span>
+</code></pre></div>
+<p>就问了下，通常的用法是将A或者B中间的某一个变量声明为<strong>std::weak_ptr</strong>，如果两者都声明为<code>std::weak_ptr</code>会有什么问题？</p>
+<p>咱们先不论这个问题本身，在随后的讨论中，风神突然贴了段代码：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;chrono&gt;</span><span class="c1">  </span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;memory&gt;</span><span class="c1">  </span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;thread&gt;</span><span class="c1">  </span>
+<span class="k">using</span><span class="w"> </span><span class="k">namespace</span><span class="w"> </span><span class="nn">std</span><span class="p">;</span><span class="w">  </span>
+
+<span class="k">struct</span><span class="w"> </span><span class="nc">A</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="n">buffer</span><span class="p">[</span><span class="mi">1024</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="p">];</span><span class="w"> </span><span class="c1">// 1GB  </span>
+<span class="w">    </span><span class="n">weak_ptr</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="w"> </span><span class="n">next</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span><span class="w">  </span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="nb">true</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="k">auto</span><span class="w"> </span><span class="n">a0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">make_shared</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">();</span><span class="w">  </span>
+<span class="w">        </span><span class="k">auto</span><span class="w"> </span><span class="n">a1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">make_shared</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">();</span><span class="w">  </span>
+<span class="w">        </span><span class="k">auto</span><span class="w"> </span><span class="n">a2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">make_shared</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">();</span><span class="w">  </span>
+
+<span class="w">        </span><span class="n">a0</span><span class="o">-&gt;</span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">a1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="n">a1</span><span class="o">-&gt;</span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">a2</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="n">a2</span><span class="o">-&gt;</span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">a0</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">        </span><span class="c1">// this weak_ptr leak:  </span>
+<span class="w">        </span><span class="k">new</span><span class="w"> </span><span class="n">weak_ptr</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">{</span><span class="n">a0</span><span class="p">};</span><span class="w">  </span>
+
+<span class="w">        </span><span class="n">this_thread</span><span class="o">::</span><span class="n">sleep_for</span><span class="p">(</span><span class="n">chrono</span><span class="o">::</span><span class="n">seconds</span><span class="p">(</span><span class="mi">3</span><span class="p">));</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>说实话，当初看了这个代码第一眼，是存在内存泄漏的(<strong>new</strong>一个weak_ptr没有释放)，而没有理解风神这段代码真正的含义，于是在本地把这段代码编译运行了下，我的乖乖，内存占用如图：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231230-2310-1.png" alt=""></p>
+<p>emm，虽然存在内存泄漏，但也不至于这么大，于是网上进行了搜索，直至我看到了下面这段话：</p>
+<blockquote><p><code>make_shared</code> 只分配一次内存, 这看起来很好. 减少了内存分配的开销. 问题来了, <code>weak_ptr</code> 会保持控制块(强引用,以及弱引用的信息)的生命周期, 而因此连带着保持了对象分配的内存, 只有最后一个 <code>weak_ptr</code> 离开作用域时, 内存才会被释放. 原本强引用减为 0 时就可以释放的内存, 现在变为了强引用, 若引用都减为 0 时才能释放, 意外的延迟了内存释放的时间. 这对于内存要求高的场景来说, 是一个需要注意的问题.</p>
+</blockquote>
+<p>如果介意上面new那点泄漏的话，不妨修改代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;chrono&gt;</span><span class="c1">  </span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;memory&gt;</span><span class="c1">  </span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;thread&gt;</span><span class="c1">  </span>
+<span class="k">using</span><span class="w"> </span><span class="k">namespace</span><span class="w"> </span><span class="nn">std</span><span class="p">;</span><span class="w">  </span>
+
+<span class="k">struct</span><span class="w"> </span><span class="nc">A</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="n">buffer</span><span class="p">[</span><span class="mi">1024</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="p">];</span><span class="w"> </span><span class="c1">// 1GB  </span>
+<span class="w">    </span><span class="n">weak_ptr</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="w"> </span><span class="n">next</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span><span class="w">  </span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">weak_ptr</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="w"> </span><span class="n">wptr</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="k">auto</span><span class="w"> </span><span class="n">sptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">make_shared</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">();</span><span class="w">  </span>
+<span class="w">        </span><span class="n">wptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sptr</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">    </span><span class="n">this_thread</span><span class="o">::</span><span class="n">sleep_for</span><span class="p">(</span><span class="n">chrono</span><span class="o">::</span><span class="n">seconds</span><span class="p">(</span><span class="mi">30</span><span class="p">));</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>也就是说，对于<code>std::shared_ptr ptr(new Obj)</code>，形如下图：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231230-2310-2.png" alt=""></p>
+<p>而对于<code>std::make_shared</code>，形如下图：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20231230-2310-3.png" alt=""></p>
+<p>好了，理由上面已经说明白了，不再赘述了，如果你想继续分析的话，请看下文，否则~~</p>
+<h2>原因</h2>
+<p>虽然上节给出了原因，不过还是好奇心驱使，想从源码角度去了解下，于是打开了好久没看的gcc源码。</p>
+<h3>std::make_shared</h3>
+<p>首先看下它的定义：</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">_Tp</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="p">...</span><span class="w"> </span><span class="n">_Args</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="kr">inline</span><span class="w"> </span><span class="n">shared_ptr</span><span class="o">&lt;</span><span class="n">_Tp</span><span class="o">&gt;</span><span class="w"> </span><span class="n">make_shared</span><span class="p">(</span><span class="n">_Args</span><span class="o">&amp;&amp;</span><span class="p">...</span><span class="w"> </span><span class="n">__args</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">typedef</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">std</span><span class="o">::</span><span class="n">remove_cv</span><span class="o">&lt;</span><span class="n">_Tp</span><span class="o">&gt;::</span><span class="n">type</span><span class="w"> </span><span class="n">_Tp_nc</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">allocate_shared</span><span class="o">&lt;</span><span class="n">_Tp</span><span class="o">&gt;</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">allocator</span><span class="o">&lt;</span><span class="n">_Tp_nc</span><span class="o">&gt;</span><span class="p">(),</span><span class="w">  </span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">forward</span><span class="o">&lt;</span><span class="n">_Args</span><span class="o">&gt;</span><span class="p">(</span><span class="n">__args</span><span class="p">)...);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这个函数函数体只有一个<code>std::std::allocate_shared</code>，接着看它的定义：</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">_Tp</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">_Alloc</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="p">...</span><span class="w"> </span><span class="n">_Args</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="kr">inline</span><span class="w"> </span><span class="n">shared_ptr</span><span class="o">&lt;</span><span class="n">_Tp</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="n">allocate_shared</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">_Alloc</span><span class="o">&amp;</span><span class="w"> </span><span class="n">__a</span><span class="p">,</span><span class="w"> </span><span class="n">_Args</span><span class="o">&amp;&amp;</span><span class="p">...</span><span class="w"> </span><span class="n">__args</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">shared_ptr</span><span class="o">&lt;</span><span class="n">_Tp</span><span class="o">&gt;</span><span class="p">(</span><span class="n">_Sp_alloc_shared_tag</span><span class="o">&lt;</span><span class="n">_Alloc</span><span class="o">&gt;</span><span class="p">{</span><span class="n">__a</span><span class="p">},</span><span class="w">  </span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">forward</span><span class="o">&lt;</span><span class="n">_Args</span><span class="o">&gt;</span><span class="p">(</span><span class="n">__args</span><span class="p">)...);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>创建了一个<code>shared_ptr</code>对象，看下其对应的构造函数：</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">_Alloc</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="p">...</span><span class="w"> </span><span class="n">_Args</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="n">shared_ptr</span><span class="p">(</span><span class="n">_Sp_alloc_shared_tag</span><span class="o">&lt;</span><span class="n">_Alloc</span><span class="o">&gt;</span><span class="w"> </span><span class="n">__tag</span><span class="p">,</span><span class="w"> </span><span class="n">_Args</span><span class="o">&amp;&amp;</span><span class="p">...</span><span class="w"> </span><span class="n">__args</span><span class="p">)</span><span class="w">  </span>
+<span class="w">  </span><span class="o">:</span><span class="w"> </span><span class="n">__shared_ptr</span><span class="o">&lt;</span><span class="n">_Tp</span><span class="o">&gt;</span><span class="p">(</span><span class="n">__tag</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">forward</span><span class="o">&lt;</span><span class="n">_Args</span><span class="o">&gt;</span><span class="p">(</span><span class="n">__args</span><span class="p">)...)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p>接着看<code>__shared_ptr</code>这个类对应的构造函数：</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">_Alloc</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="p">...</span><span class="w"> </span><span class="n">_Args</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="n">__shared_ptr</span><span class="p">(</span><span class="n">_Sp_alloc_shared_tag</span><span class="o">&lt;</span><span class="n">_Alloc</span><span class="o">&gt;</span><span class="w"> </span><span class="n">__tag</span><span class="p">,</span><span class="w"> </span><span class="n">_Args</span><span class="o">&amp;&amp;</span><span class="p">...</span><span class="w"> </span><span class="n">__args</span><span class="p">)</span><span class="w">  </span>
+<span class="w">  </span><span class="o">:</span><span class="w"> </span><span class="n">_M_ptr</span><span class="p">(),</span><span class="w"> </span><span class="n">_M_refcount</span><span class="p">(</span><span class="n">_M_ptr</span><span class="p">,</span><span class="w"> </span><span class="n">__tag</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">forward</span><span class="o">&lt;</span><span class="n">_Args</span><span class="o">&gt;</span><span class="p">(</span><span class="n">__args</span><span class="p">)...)</span><span class="w">  </span>
+<span class="p">{</span><span class="w"> </span><span class="n">_M_enable_shared_from_this_with</span><span class="p">(</span><span class="n">_M_ptr</span><span class="p">);</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p>其中，<code>_M_refcount</code>的类型为<code>__shared_count</code>，也就是说我们通常所说的引用计数就是由其来管理。</p>
+<p>因为调用<code>make_shared</code>函数，所以这里的<code>_M_ptr</code>指针也就是相当于一个空指针，然后继续看下<code>_M_refcount</code>（请注意<code>_M_ptr</code>作为参数传入）定
+义：</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">_Tp</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">_Alloc</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="p">...</span><span class="w"> </span><span class="n">_Args</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="n">__shared_count</span><span class="p">(</span><span class="n">_Tp</span><span class="o">*&amp;</span><span class="w"> </span><span class="n">__p</span><span class="p">,</span><span class="w"> </span><span class="n">_Sp_alloc_shared_tag</span><span class="o">&lt;</span><span class="n">_Alloc</span><span class="o">&gt;</span><span class="w"> </span><span class="n">__a</span><span class="p">,</span><span class="w"> </span><span class="n">_Args</span><span class="o">&amp;&amp;</span><span class="p">...</span><span class="w"> </span><span class="n">__args</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">typedef</span><span class="w"> </span><span class="n">_Sp_counted_ptr_inplace</span><span class="o">&lt;</span><span class="n">_Tp</span><span class="p">,</span><span class="w"> </span><span class="n">_Alloc</span><span class="p">,</span><span class="w"> </span><span class="n">_Lp</span><span class="o">&gt;</span><span class="w"> </span><span class="n">_Sp_cp_type</span><span class="p">;</span><span class="w"> </span><span class="c1">// L1  </span>
+<span class="w">  </span><span class="k">typename</span><span class="w"> </span><span class="nc">_Sp_cp_type</span><span class="o">::</span><span class="n">__allocator_type</span><span class="w"> </span><span class="nf">__a2</span><span class="p">(</span><span class="n">__a</span><span class="p">.</span><span class="n">_M_a</span><span class="p">);</span><span class="w"> </span><span class="c1">// L2  </span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">__guard</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">__allocate_guarded</span><span class="p">(</span><span class="n">__a2</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="n">_Sp_cp_type</span><span class="o">*</span><span class="w"> </span><span class="n">__mem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__guard</span><span class="p">.</span><span class="n">get</span><span class="p">();</span><span class="w"> </span><span class="c1">// L3  </span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">__pi</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">::</span><span class="k">new</span><span class="w"> </span><span class="p">(</span><span class="n">__mem</span><span class="p">)</span><span class="n">_Sp_cp_type</span><span class="p">(</span><span class="n">__a</span><span class="p">.</span><span class="n">_M_a</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">forward</span><span class="o">&lt;</span><span class="n">_Args</span><span class="o">&gt;</span><span class="p">(</span><span class="n">__args</span><span class="p">)...);</span><span class="w"> </span><span class="c1">// L4  </span>
+<span class="w">  </span><span class="n">__guard</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">_M_pi</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__pi</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">__p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__pi</span><span class="o">-&gt;</span><span class="n">_M_ptr</span><span class="p">();</span><span class="w"> </span><span class="c1">// L5  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这块代码当时看了很多遍，一直不明白在没有显示分配对象内存的情况下，是如何使用<code>placement new</code>的，直至今天上午，灵光一闪，突然明白了，且听慢慢道来。</p>
+<p>首先看下L1行，其声明了模板类<code>_Sp_counted_ptr_inplace</code>的别名为<code>_Sp_cp_type</code>，其定义如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">_Tp</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">_Alloc</span><span class="p">,</span><span class="w"> </span><span class="n">_Lock_policy</span><span class="w"> </span><span class="n">_Lp</span><span class="o">&gt;</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">_Sp_counted_ptr_inplace</span><span class="w"> </span><span class="k">final</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">_Sp_counted_base</span><span class="o">&lt;</span><span class="n">_Lp</span><span class="o">&gt;</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="k">class</span><span class="w"> </span><span class="nc">_Impl</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">_Sp_ebo_helper</span><span class="o">&lt;</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">_Alloc</span><span class="o">&gt;</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">typedef</span><span class="w"> </span><span class="n">_Sp_ebo_helper</span><span class="o">&lt;</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">_Alloc</span><span class="o">&gt;</span><span class="w">    </span><span class="n">_A_base</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">public</span><span class="o">:</span>
+<span class="w">    </span><span class="k">explicit</span><span class="w"> </span><span class="n">_Impl</span><span class="p">(</span><span class="n">_Alloc</span><span class="w"> </span><span class="n">__a</span><span class="p">)</span><span class="w"> </span><span class="k">noexcept</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">_A_base</span><span class="p">(</span><span class="n">__a</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">}</span>
+
+<span class="w">    </span><span class="n">_Alloc</span><span class="o">&amp;</span><span class="w"> </span><span class="n">_M_alloc</span><span class="p">()</span><span class="w"> </span><span class="k">noexcept</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">_A_base</span><span class="o">::</span><span class="n">_S_get</span><span class="p">(</span><span class="o">*</span><span class="k">this</span><span class="p">);</span><span class="w"> </span><span class="p">}</span>
+
+<span class="w">    </span><span class="n">__gnu_cxx</span><span class="o">::</span><span class="n">__aligned_buffer</span><span class="o">&lt;</span><span class="n">_Tp</span><span class="o">&gt;</span><span class="w"> </span><span class="n">_M_storage</span><span class="p">;</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="k">public</span><span class="o">:</span>
+<span class="w">  </span><span class="k">using</span><span class="w"> </span><span class="n">__allocator_type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__alloc_rebind</span><span class="o">&lt;</span><span class="n">_Alloc</span><span class="p">,</span><span class="w"> </span><span class="n">_Sp_counted_ptr_inplace</span><span class="o">&gt;</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Alloc parameter is not a reference so doesn&#39;t alias anything in __args</span>
+<span class="w">  </span><span class="k">template</span><span class="o">&lt;</span><span class="k">typename</span><span class="p">...</span><span class="w"> </span><span class="n">_Args</span><span class="o">&gt;</span>
+<span class="w">  </span><span class="n">_Sp_counted_ptr_inplace</span><span class="p">(</span><span class="n">_Alloc</span><span class="w"> </span><span class="n">__a</span><span class="p">,</span><span class="w"> </span><span class="n">_Args</span><span class="o">&amp;&amp;</span><span class="p">...</span><span class="w"> </span><span class="n">__args</span><span class="p">)</span>
+<span class="w">  </span><span class="o">:</span><span class="w"> </span><span class="n">_M_impl</span><span class="p">(</span><span class="n">__a</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// _GLIBCXX_RESOLVE_LIB_DEFECTS</span>
+<span class="w">    </span><span class="c1">// 2070.  allocate_shared should use allocator_traits&lt;A&gt;::construct</span>
+<span class="w">    </span><span class="n">allocator_traits</span><span class="o">&lt;</span><span class="n">_Alloc</span><span class="o">&gt;::</span><span class="n">construct</span><span class="p">(</span><span class="n">__a</span><span class="p">,</span><span class="w"> </span><span class="n">_M_ptr</span><span class="p">(),</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">forward</span><span class="o">&lt;</span><span class="n">_Args</span><span class="o">&gt;</span><span class="p">(</span><span class="n">__args</span><span class="p">)...);</span><span class="w"> </span><span class="c1">// might throw</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="o">~</span><span class="n">_Sp_counted_ptr_inplace</span><span class="p">()</span><span class="w"> </span><span class="k">noexcept</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">virtual</span><span class="w"> </span><span class="kt">void</span>
+<span class="w">  </span><span class="n">_M_dispose</span><span class="p">()</span><span class="w"> </span><span class="k">noexcept</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">allocator_traits</span><span class="o">&lt;</span><span class="n">_Alloc</span><span class="o">&gt;::</span><span class="n">destroy</span><span class="p">(</span><span class="n">_M_impl</span><span class="p">.</span><span class="n">_M_alloc</span><span class="p">(),</span><span class="w"> </span><span class="n">_M_ptr</span><span class="p">());</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Override because the allocator needs to know the dynamic type</span>
+<span class="w">  </span><span class="k">virtual</span><span class="w"> </span><span class="kt">void</span>
+<span class="w">  </span><span class="n">_M_destroy</span><span class="p">()</span><span class="w"> </span><span class="k">noexcept</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">__allocator_type</span><span class="w"> </span><span class="nf">__a</span><span class="p">(</span><span class="n">_M_impl</span><span class="p">.</span><span class="n">_M_alloc</span><span class="p">());</span>
+<span class="w">    </span><span class="n">__allocated_ptr</span><span class="o">&lt;</span><span class="n">__allocator_type</span><span class="o">&gt;</span><span class="w"> </span><span class="n">__guard_ptr</span><span class="p">{</span><span class="w"> </span><span class="n">__a</span><span class="p">,</span><span class="w"> </span><span class="k">this</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="k">this</span><span class="o">-&gt;~</span><span class="n">_Sp_counted_ptr_inplace</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="k">private</span><span class="o">:</span>
+<span class="w">  </span><span class="k">friend</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">__shared_count</span><span class="o">&lt;</span><span class="n">_Lp</span><span class="o">&gt;</span><span class="p">;</span><span class="w"> </span><span class="c1">// To be able to call _M_ptr().</span>
+
+<span class="w">  </span><span class="n">_Tp</span><span class="o">*</span><span class="w"> </span><span class="nf">_M_ptr</span><span class="p">()</span><span class="w"> </span><span class="k">noexcept</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">_M_impl</span><span class="p">.</span><span class="n">_M_storage</span><span class="p">.</span><span class="n">_M_ptr</span><span class="p">();</span><span class="w"> </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">_Impl</span><span class="w"> </span><span class="n">_M_impl</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>这个类继承于<code>_Sp_counted_base</code>，这个类定义不再次列出，需要注意的是其中有两个变量：</p>
+<div class="highlight"><pre><code><span></span><span class="n">_Atomic_word</span><span class="w">  </span><span class="n">_M_use_count</span><span class="p">;</span><span class="w">     </span><span class="c1">// #shared  </span>
+<span class="n">_Atomic_word</span><span class="w">  </span><span class="n">_M_weak_count</span><span class="p">;</span><span class="w">    </span><span class="c1">// #weak + (#shared != 0)</span>
+</code></pre></div>
+<p>第一个为强引用技术，也就是shared对象引用计数，另外一个为弱因为计数。</p>
+<p>继续看这个类，里面定义了一个<code>class_Impl</code>，其中我们创建的对象类型就在这个类里面定义，即<strong><code>__gnu_cxx::__aligned_buffer&lt;_Tp&gt; _M_storage;</code></strong></p>
+<p>接着看L2，这行定义了一个对象<code>__a2</code>，其对象类型为<code>using __allocator_type = __alloc_rebind&lt;_Alloc, _Sp_counted_ptr_inplace&gt;;</code>，这行的意思是<strong>重新封装<code>rebind_alloc&lt;_Sp_counted_ptr_inplace&gt;</code></strong></p>
+<p>继续看L3，在这一行中会创建一块内存，这块内存中按照顺序为创建对象、强引用计数、弱引用计数等(<strong>也就是说分配一大块内存，这块内存中包含对象、强、弱引用计数所需内存等</strong>)，在创建这块内存的时候，强、弱引用计数已经被初始化</p>
+<p>最后是L3，这块调用了<code>placement new</code>来创建，其中调用了对象的构造函数：</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="k">typename</span><span class="p">...</span><span class="w"> </span><span class="n">_Args</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">_Sp_counted_ptr_inplace</span><span class="p">(</span><span class="n">_Alloc</span><span class="w"> </span><span class="n">__a</span><span class="p">,</span><span class="w"> </span><span class="n">_Args</span><span class="o">&amp;&amp;</span><span class="p">...</span><span class="w"> </span><span class="n">__args</span><span class="p">)</span><span class="w">  </span>
+<span class="w">  </span><span class="o">:</span><span class="w"> </span><span class="n">_M_impl</span><span class="p">(</span><span class="n">__a</span><span class="p">)</span><span class="w">  </span>
+<span class="w">  </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// _GLIBCXX_RESOLVE_LIB_DEFECTS  </span>
+<span class="w">    </span><span class="c1">// 2070.  allocate_shared should use allocator_traits&lt;A&gt;::construct  </span>
+<span class="w">    </span><span class="n">allocator_traits</span><span class="o">&lt;</span><span class="n">_Alloc</span><span class="o">&gt;::</span><span class="n">construct</span><span class="p">(</span><span class="n">__a</span><span class="p">,</span><span class="w"> </span><span class="n">_M_ptr</span><span class="p">(),</span><span class="w">  </span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">forward</span><span class="o">&lt;</span><span class="n">_Args</span><span class="o">&gt;</span><span class="p">(</span><span class="n">__args</span><span class="p">)...);</span><span class="w"> </span><span class="c1">// might throw  </span>
+<span class="w">  </span><span class="p">}</span>
+</code></pre></div>
+<p>至此，整个<code>std::make_shared</code>流量已经完整的梳理完毕，最后返回一个<code>shared_ptr</code>对象。</p>
+<p>好了，下面继续看下令人迷惑的，存在大内存不分配的这行代码：</p>
+<div class="highlight"><pre><code><span></span><span class="k">new</span><span class="w"> </span><span class="n">weak_ptr</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">{</span><span class="n">a0</span><span class="p">};</span>
+</code></pre></div>
+<p>其对应的构造函数如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">_Yp</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_Compatible</span><span class="o">&lt;</span><span class="n">_Yp</span><span class="o">&gt;&gt;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">__weak_ptr</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">__shared_ptr</span><span class="o">&lt;</span><span class="n">_Yp</span><span class="p">,</span><span class="w"> </span><span class="n">_Lp</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">__r</span><span class="p">)</span><span class="w"> </span><span class="k">noexcept</span><span class="w">  </span>
+<span class="w">    </span><span class="o">:</span><span class="w"> </span><span class="n">_M_ptr</span><span class="p">(</span><span class="n">__r</span><span class="p">.</span><span class="n">_M_ptr</span><span class="p">),</span><span class="w"> </span><span class="n">_M_refcount</span><span class="p">(</span><span class="n">__r</span><span class="p">.</span><span class="n">_M_refcount</span><span class="p">)</span><span class="w">  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p>其中<code>_M_refcount</code>的类型为<code>__weak_count</code>，而<code>__r._M_refcount</code>即常说的强引用计数类型为<code>__shared_count</code>，其继承于接着往下看：</p>
+<div class="highlight"><pre><code><span></span><span class="n">__weak_count</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">__shared_count</span><span class="o">&lt;</span><span class="n">_Lp</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">__r</span><span class="p">)</span><span class="w"> </span><span class="k">noexcept</span><span class="w">  </span>
+<span class="o">:</span><span class="w"> </span><span class="n">_M_pi</span><span class="p">(</span><span class="n">__r</span><span class="p">.</span><span class="n">_M_pi</span><span class="p">)</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">_M_pi</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">)</span><span class="w">  </span>
+<span class="w">  </span><span class="n">_M_pi</span><span class="o">-&gt;</span><span class="n">_M_weak_add_ref</span><span class="p">();</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>emm，弱引用计数加1，也就是说此时<code>_M_weak_count</code>为1。</p>
+<p>接着，退出作用域，此时有<code>std::make_shared</code>创建的对象开始释放，因此其内部的成员变量<code>r._M_refcount</code>也跟着释放：</p>
+<div class="highlight"><pre><code><span></span><span class="o">~</span><span class="n">__shared_count</span><span class="p">()</span><span class="w"> </span><span class="k">noexcept</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">_M_pi</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">)</span><span class="w">  </span>
+<span class="w">    </span><span class="n">_M_pi</span><span class="o">-&gt;</span><span class="n">_M_release</span><span class="p">();</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>接着往下看<code>_M_release()</code>实现：</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;&gt;</span><span class="w">  </span>
+<span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="w">  </span>
+<span class="n">_Sp_counted_base</span><span class="o">&lt;</span><span class="n">_S_single</span><span class="o">&gt;::</span><span class="n">_M_release</span><span class="p">()</span><span class="w"> </span><span class="k">noexcept</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">--</span><span class="n">_M_use_count</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w">  </span>
+<span class="w">    </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="n">_M_dispose</span><span class="p">();</span><span class="w">  </span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">--</span><span class="n">_M_weak_count</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w">  </span>
+<span class="w">        </span><span class="n">_M_destroy</span><span class="p">();</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>此时，因为<code>shared_ptr</code>对象的引用计数本来就为1(没有其他地方使用)，所以if语句成立，执行<code>_M_dispose()</code>函数，在分析这个函数之前，先看下前面提到的代码：</p>
+<div class="highlight"><pre><code><span></span><span class="n">__shared_ptr</span><span class="p">(</span><span class="n">_Sp_alloc_shared_tag</span><span class="o">&lt;</span><span class="n">_Alloc</span><span class="o">&gt;</span><span class="w"> </span><span class="n">__tag</span><span class="p">,</span><span class="w"> </span><span class="n">_Args</span><span class="o">&amp;&amp;</span><span class="p">...</span><span class="w"> </span><span class="n">__args</span><span class="p">)</span><span class="w">  </span>
+<span class="w">    </span><span class="o">:</span><span class="w"> </span><span class="n">_M_ptr</span><span class="p">(),</span><span class="w"> </span><span class="n">_M_refcount</span><span class="p">(</span><span class="n">_M_ptr</span><span class="p">,</span><span class="w"> </span><span class="n">__tag</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">forward</span><span class="o">&lt;</span><span class="n">_Args</span><span class="o">&gt;</span><span class="p">(</span><span class="n">__args</span><span class="p">)...)</span><span class="w">  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="n">_M_enable_shared_from_this_with</span><span class="p">(</span><span class="n">_M_ptr</span><span class="p">);</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p>因为是使用<code>std::make_shared()</code>进行创建的，所以<code>_M_ptr</code>为空，此时传入<code>_M_refcount</code>的第一个参数也为空。接着看<code>_M_dispose()</code>定义：</p>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;&gt;</span><span class="w">  </span>
+<span class="w">  </span><span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="w">  </span>
+<span class="w">  </span><span class="n">_Sp_counted_ptr</span><span class="o">&lt;</span><span class="n">nullptr_t</span><span class="p">,</span><span class="w"> </span><span class="n">_S_single</span><span class="o">&gt;::</span><span class="n">_M_dispose</span><span class="p">()</span><span class="w"> </span><span class="k">noexcept</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">}</span><span class="w">  </span>
+<span class="k">template</span><span class="o">&lt;&gt;</span><span class="w">  </span>
+<span class="w">  </span><span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="w">  </span>
+<span class="w">  </span><span class="n">_Sp_counted_ptr</span><span class="o">&lt;</span><span class="n">nullptr_t</span><span class="p">,</span><span class="w"> </span><span class="n">_S_mutex</span><span class="o">&gt;::</span><span class="n">_M_dispose</span><span class="p">()</span><span class="w"> </span><span class="k">noexcept</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">}</span><span class="w">  </span>
+<span class="k">template</span><span class="o">&lt;&gt;</span><span class="w">  </span>
+<span class="w">  </span><span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="w">  </span>
+<span class="w">  </span><span class="n">_Sp_counted_ptr</span><span class="o">&lt;</span><span class="n">nullptr_t</span><span class="p">,</span><span class="w"> </span><span class="n">_S_atomic</span><span class="o">&gt;::</span><span class="n">_M_dispose</span><span class="p">()</span><span class="w"> </span><span class="k">noexcept</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p>因为传入的指针为<code>nullptr</code>，因此调用了<code>_Sp_counted_ptr</code>的特化版本，因此<code>_M_dispose()</code>这个函数什么都没做。因为<code>_M_pi-&gt;_M_weak_add_ref();</code>这个操作，此时这个计数经过减1之后不为0，因此没有没有执行<code>_M_destroy()</code>操作，因此之前申请的大块内存没有被释放，下面是<code>_M_destroy()</code>实现：</p>
+<div class="highlight"><pre><code><span></span><span class="k">virtual</span><span class="w"> </span><span class="kt">void</span><span class="w">  </span>
+<span class="nf">_M_destroy</span><span class="p">()</span><span class="w"> </span><span class="k">noexcept</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">__allocator_type</span><span class="w"> </span><span class="n">__a</span><span class="p">(</span><span class="n">_M_impl</span><span class="p">.</span><span class="n">_M_alloc</span><span class="p">());</span><span class="w">  </span>
+<span class="w">  </span><span class="n">__allocated_ptr</span><span class="o">&lt;</span><span class="n">__allocator_type</span><span class="o">&gt;</span><span class="w"> </span><span class="n">__guard_ptr</span><span class="p">{</span><span class="w"> </span><span class="n">__a</span><span class="p">,</span><span class="w"> </span><span class="k">this</span><span class="w"> </span><span class="p">};</span><span class="w">  </span>
+<span class="w">  </span><span class="k">this</span><span class="o">-&gt;~</span><span class="n">_Sp_counted_ptr_inplace</span><span class="p">();</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>也就是说真正调用了这个函数，内存才会被分配，示例代码中，显然不会，这就是造成内存一直不被释放的原因。</p>
+<h2>总结</h2>
+<p>下面解释下我当时阅读这块代码最难理解的部分，下面是<code>make_shared</code>执行过程：</p>
+<ul>
+<li><code>_Sp_counted_base</code>有两个成员变量，分别为<code>_M_use_count</code>用于表示强引用计数和<code>_M_weak_count</code>用于表示弱引用计数</li>
+<li><code>__shared_count</code>继承于<code>_Sp_counted_base</code>，其内部有一个变量<code>_M_ptr</code>指向对象指针</li>
+<li><code>__shared_ptr</code>中存在成员变量<code>__shared_count</code></li>
+<li>使用<code>make_shared()</code>函数创建<code>shared_ptr</code>时候，会创建<code>__shared_count</code>对象</li>
+<li>在创建<code>__shared_count</code>对象时候，存在变量<code>_Sp_counted_ptr_inplace</code></li>
+<li><code>_Sp_counted_ptr_inplace</code>继承于<code>_Sp_counted_base</code></li>
+<li><code>_Sp_counted_ptr_inplace</code>会存在一个class Impl，其中包含对象Obj</li>
+<li>在创建其内部会使用rebind重新封装<code>rebind_alloc&lt;_Sp_counted_ptr_inplace&gt;</code></li>
+<li><code>_Sp_counted_ptr_inplace</code>获取其分配器，然后进程get()操作，此时会创建一块大小为<code>_Sp_counted_ptr_inplace</code>的对象(这个大小为Obj大小 + 其本身继承的<code>_Sp_counted_base</code>大小等)，且顺序为对象、强引用计数、弱引用计数等</li>
+<li>使用<code>placement new</code>对上述分配的内存块进行初始化(只初始化Obj大小不符，引用计数等已经初始化完成)</li>
+<li>创建<code>shared_ptr</code>，因为使用的<code>make_shared</code>初始化，所以传入的指针为空，相应的<code>_Sp_counted_base</code>中的<code>_M_ptr</code>也为空</li>
+</ul>
+<p>下面是析构过程：</p>
+<ul>
+<li>析构<code>shared_ptr</code>对象的同时，释放其内部成员变量<code>_M_use_count</code></li>
+<li><code>_M_use_count</code>调用Release()函数，在这个函数中，如果强引用计数为1，则调用<code>_M_dispose()</code>函数</li>
+<li>在<code>_M_dispose()</code>中，会调用<code>_Sp_counted_ptr</code>的特化版本，即不进行任何操作</li>
+<li>判断弱因为计数是否为1，如果是则调用<code>_M_destroy()</code>，此时才会真正的释放内存块</li>
+</ul>
+<p>整体看下来，比较重要的一个类就是<code>_Sp_counted_base</code>不仅充当引用计数功能，还充当内存管理功能。从上面的分析可以看到，<code>_Sp_counted_base</code>负责释放用户申请的申请的内存，即</p>
+<ul>
+<li><strong>当 <code>_M_use_count</code> 递减为 0 时，调用 <code>_M_dispose()</code> 释放 *this 管理的资源</strong></li>
+<li><strong>当 <code>_M_weak_count</code> 递减为 0 时，调用 <code>_M_destroy()</code> 释放 *this 对象</strong></li>
+</ul>
+<p>最后，借助群里经常说的一句话<strong>cpp？ 狗都不学</strong>结束本文。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "一次诡异的内存泄漏.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

@@ -1,0 +1,568 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>WebRTC SDP详解和剖析 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="WebRTC SDP详解和剖析,C/C++,WebRTC,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="WebRTC SDP详解和剖析" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>WebRTC SDP详解和剖析</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2020-12-11 19:30
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+<a href='../article/tag_webrtc.html' class='article_tag'>WebRTC</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://zhuanlan.zhihu.com/p/296960792' target='blank'>WebRTC SDP详解和剖析</a></p></h4>
+<p>WebRTC 是 Web Real-Time Communication，即网页实时通信的缩写，是 RTC 协议的一种Web实现，项目由 Google开源，并和 IETF 和 W3C 制定了行业标准。在国内 WebRTC已经获得了越来越多厂商的支持，应用前景变得更加广阔，所以我们也开设专栏，分享阿里云内部的 WebRTC 研究工作。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20201211-193030-1.jpg" alt=""></p>
+<h3>Overview：</h3>
+<ol>
+<li>Signaling 信令服务器，也就是交换房间和会议的媒体信息，以及会议期间的消息，媒体描述使用的是 SDP 协议，也就是本文剖析的重点。  </li>
+<li>ICE 服务器，可以分为帮助两个客户端打洞建立 P2P 连接的 STUN 服务器，还有如果连不通就直接转发的 TURN 服务器。ICE 的信息叫 Candidate，可以通过 SDP 交换，或者通过 Trickle。  </li>
+<li>SFU 或 MCU 服务器，如果多个人开会，每个端都向其他参会的端直接发送数据叫 MESH，但是 MESH 明显有局限性，SFU 就是转发可以让客户端只上行一路流转给其他客户端，而 MCU 更强大，可以上下行都只有一路流。  </li>
+</ol>
+<blockquote><p><em><strong>Note: WebRTC 除了传输，还有一个重要特性就是安全性，也就是 DTLS，而 DTLS 有些信息就是通过 SDP 传递的，后面会有相关的技术文章来介绍 DTLS。</strong></em></p>
+</blockquote>
+<p>下面，我们正式介绍 SDP 协议。</p>
+<h3>What's SDP</h3>
+<p>本文开篇的 SDP 关键属性图，已经帮助我们以全局的视角一窥 SDP 的模样。SDP 描述了媒体会话，网络信息、安全特性、传输策略等，图中的每一个 SDP属性都在不同的应用场景下发挥着不同的作用，不可小觑。</p>
+<p>接下来，我们进一步给出 SDP 的官方定义：SDP(Session Description Protocol)是一种会话描述协议，基于文本，其本身并不属于传输协议，需要依赖其它的传输协议（比如 SIP 和 HTTP）来交换必要的媒体信息，用于两个会话实体之间的媒体协商。</p>
+<p>WebRTC 的 Offer 和 Answer 包含了 SDP。相关的 RFC 包括：</p>
+<ol>
+<li><a href="https://tools.ietf.org/html/rfc2327%23section-6">1998, RFC2327</a>  </li>
+<li><a href="https://tools.ietf.org/html/rfc4566%23section-5">2006, RFC4566</a></li>
+</ol>
+<p><a href="https://webrtchacks.com/sdp-anatomy/">一个不错的 WebRTC 的 SDP例子分析</a></p>
+<h3><strong>Offer and Answer</strong></h3>
+<p>WebRTC 使用 Offer-Answer 模型交换 SDP，Offer 中有 SDP，Answer 中也有。例如 Alice 和 Bob 通过WebRTC 通信：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// Alice Offer</span>
+<span class="n">v</span><span class="o">=</span><span class="mi">0</span>
+<span class="n">o</span><span class="o">=-</span><span class="w"> </span><span class="mi">2397106153131073818</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="n">IN</span><span class="w"> </span><span class="n">IP4</span><span class="w"> </span><span class="mf">127.0.0.1</span>
+<span class="n">s</span><span class="o">=-</span>
+<span class="n">t</span><span class="o">=</span><span class="mi">0</span><span class="w"> </span><span class="mi">0</span>
+<span class="n">a</span><span class="o">=</span><span class="n">group</span><span class="o">:</span><span class="n">BUNDLE</span><span class="w"> </span><span class="n">video</span>
+<span class="n">a</span><span class="o">=</span><span class="n">msid</span><span class="o">-</span><span class="n">semantic</span><span class="o">:</span><span class="w"> </span><span class="n">WMS</span><span class="w"> </span><span class="n">gLzQPGuagv3xXolwPiiGAULOwOLNItvl8LyS</span>
+<span class="n">m</span><span class="o">=</span><span class="n">video</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">96</span><span class="w"> </span><span class="mi">97</span>
+<span class="n">c</span><span class="o">=</span><span class="n">IN</span><span class="w"> </span><span class="n">IP4</span><span class="w"> </span><span class="mf">0.0.0.0</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">:</span><span class="mi">9</span><span class="w"> </span><span class="n">IN</span><span class="w"> </span><span class="n">IP4</span><span class="w"> </span><span class="mf">0.0.0.0</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ice</span><span class="o">-</span><span class="n">ufrag</span><span class="o">:</span><span class="n">l5KU</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ice</span><span class="o">-</span><span class="n">pwd</span><span class="o">:+</span><span class="n">Sxmm3PoJUERpeHYL0HW4</span><span class="o">/</span><span class="n">T9</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ice</span><span class="o">-</span><span class="n">options</span><span class="o">:</span><span class="n">trickle</span>
+<span class="n">a</span><span class="o">=</span><span class="n">fingerprint</span><span class="o">:</span><span class="n">sha</span><span class="mi">-256</span><span class="w"> </span><span class="mi">7</span><span class="n">C</span><span class="o">:</span><span class="mi">93</span><span class="o">:</span><span class="mi">85</span><span class="o">:</span><span class="mi">40</span><span class="o">:</span><span class="mo">01</span><span class="o">:</span><span class="mo">07</span><span class="o">:</span><span class="mi">91</span><span class="o">:</span><span class="n">BE</span><span class="o">:</span><span class="n">DA</span><span class="o">:</span><span class="mi">64</span><span class="o">:</span><span class="n">A0</span><span class="o">:</span><span class="mi">37</span><span class="o">:</span><span class="mi">7</span><span class="n">E</span><span class="o">:</span><span class="mi">61</span><span class="o">:</span><span class="n">CB</span><span class="o">:</span><span class="mi">9</span><span class="n">D</span><span class="o">:</span><span class="mi">91</span><span class="o">:</span><span class="mi">9</span><span class="n">B</span><span class="o">:</span><span class="mi">44</span><span class="o">:</span><span class="n">F6</span><span class="o">:</span><span class="n">C9</span><span class="o">:</span><span class="n">AC</span><span class="o">:</span><span class="mi">3</span><span class="n">B</span><span class="o">:</span><span class="mi">37</span><span class="o">:</span><span class="mi">1</span><span class="n">C</span><span class="o">:</span><span class="mo">00</span><span class="o">:</span><span class="mi">15</span><span class="o">:</span><span class="mi">4</span><span class="n">C</span><span class="o">:</span><span class="mi">5</span><span class="n">A</span><span class="o">:</span><span class="n">B5</span><span class="o">:</span><span class="mi">67</span><span class="o">:</span><span class="mi">74</span>
+<span class="n">a</span><span class="o">=</span><span class="n">setup</span><span class="o">:</span><span class="n">actpass</span>
+<span class="n">a</span><span class="o">=</span><span class="n">mid</span><span class="o">:</span><span class="n">video</span>
+<span class="n">a</span><span class="o">=</span><span class="n">sendrecv</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">mux</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">rsize</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">VP8</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">goog</span><span class="o">-</span><span class="n">remb</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">transport</span><span class="o">-</span><span class="n">cc</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">ccm</span><span class="w"> </span><span class="n">fir</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">nack</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">nack</span><span class="w"> </span><span class="n">pli</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">97</span><span class="w"> </span><span class="n">rtx</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">fmtp</span><span class="o">:</span><span class="mi">97</span><span class="w"> </span><span class="n">apt</span><span class="o">=</span><span class="mi">96</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">-</span><span class="n">group</span><span class="o">:</span><span class="n">FID</span><span class="w"> </span><span class="mi">2527104241</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">2527104241</span><span class="w"> </span><span class="n">cname</span><span class="o">:</span><span class="n">JPmKBgFHH5YVFyaJ</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">2527104241</span><span class="w"> </span><span class="n">msid</span><span class="o">:</span><span class="n">gLzQPGuagv3xXolwPiiGAULOwOLNItvl8LyS</span><span class="w"> </span><span class="n">c7072509</span><span class="o">-</span><span class="n">df47</span><span class="mi">-4828</span><span class="o">-</span><span class="n">ad03</span><span class="mi">-7</span><span class="n">d0274585a56</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">2527104241</span><span class="w"> </span><span class="n">mslabel</span><span class="o">:</span><span class="n">gLzQPGuagv3xXolwPiiGAULOwOLNItvl8LyS</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">2527104241</span><span class="w"> </span><span class="n">label</span><span class="o">:</span><span class="n">c7072509</span><span class="o">-</span><span class="n">df47</span><span class="mi">-4828</span><span class="o">-</span><span class="n">ad03</span><span class="mi">-7</span><span class="n">d0274585a56</span>
+<span class="c1">// Bob Answer</span>
+<span class="n">v</span><span class="o">=</span><span class="mi">0</span>
+<span class="n">o</span><span class="o">=-</span><span class="w"> </span><span class="mi">5443219974135798586</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="n">IN</span><span class="w"> </span><span class="n">IP4</span><span class="w"> </span><span class="mf">127.0.0.1</span>
+<span class="n">s</span><span class="o">=-</span>
+<span class="n">t</span><span class="o">=</span><span class="mi">0</span><span class="w"> </span><span class="mi">0</span>
+<span class="n">a</span><span class="o">=</span><span class="n">group</span><span class="o">:</span><span class="n">BUNDLE</span><span class="w"> </span><span class="n">video</span>
+<span class="n">a</span><span class="o">=</span><span class="n">msid</span><span class="o">-</span><span class="n">semantic</span><span class="o">:</span><span class="w"> </span><span class="n">WMS</span><span class="w"> </span><span class="n">uiZ7cB0hsFDRGgTIMNp6TajUK9dOoHi43HVs</span>
+<span class="n">m</span><span class="o">=</span><span class="n">video</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">96</span><span class="w"> </span><span class="mi">97</span>
+<span class="n">c</span><span class="o">=</span><span class="n">IN</span><span class="w"> </span><span class="n">IP4</span><span class="w"> </span><span class="mf">0.0.0.0</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">:</span><span class="mi">9</span><span class="w"> </span><span class="n">IN</span><span class="w"> </span><span class="n">IP4</span><span class="w"> </span><span class="mf">0.0.0.0</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ice</span><span class="o">-</span><span class="n">ufrag</span><span class="o">:</span><span class="n">MUZf</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ice</span><span class="o">-</span><span class="n">pwd</span><span class="o">:</span><span class="mi">4</span><span class="n">QhikLcmGXnCfAzHDB</span><span class="o">++</span><span class="n">ZjM5</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ice</span><span class="o">-</span><span class="n">options</span><span class="o">:</span><span class="n">trickle</span>
+<span class="n">a</span><span class="o">=</span><span class="n">fingerprint</span><span class="o">:</span><span class="n">sha</span><span class="mi">-256</span><span class="w"> </span><span class="mi">2</span><span class="n">A</span><span class="o">:</span><span class="mi">5</span><span class="n">A</span><span class="o">:</span><span class="n">B8</span><span class="o">:</span><span class="mi">43</span><span class="o">:</span><span class="mi">66</span><span class="o">:</span><span class="mo">05</span><span class="o">:</span><span class="n">B3</span><span class="o">:</span><span class="mi">6</span><span class="n">A</span><span class="o">:</span><span class="n">E9</span><span class="o">:</span><span class="mi">46</span><span class="o">:</span><span class="mi">36</span><span class="o">:</span><span class="n">DF</span><span class="o">:</span><span class="n">DF</span><span class="o">:</span><span class="mi">20</span><span class="o">:</span><span class="mi">11</span><span class="o">:</span><span class="mi">6</span><span class="n">A</span><span class="o">:</span><span class="n">F6</span><span class="o">:</span><span class="mi">11</span><span class="o">:</span><span class="n">EA</span><span class="o">:</span><span class="n">D9</span><span class="o">:</span><span class="mi">4</span><span class="n">E</span><span class="o">:</span><span class="mi">26</span><span class="o">:</span><span class="n">E3</span><span class="o">:</span><span class="n">CE</span><span class="o">:</span><span class="mi">5</span><span class="n">A</span><span class="o">:</span><span class="mi">3</span><span class="n">A</span><span class="o">:</span><span class="n">C6</span><span class="o">:</span><span class="mi">8</span><span class="n">D</span><span class="o">:</span><span class="mo">03</span><span class="o">:</span><span class="mi">49</span><span class="o">:</span><span class="mi">7</span><span class="n">B</span><span class="o">:</span><span class="n">DE</span>
+<span class="n">a</span><span class="o">=</span><span class="n">setup</span><span class="o">:</span><span class="n">active</span>
+<span class="n">a</span><span class="o">=</span><span class="n">mid</span><span class="o">:</span><span class="n">video</span>
+<span class="n">a</span><span class="o">=</span><span class="n">sendrecv</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">mux</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">rsize</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">VP8</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">goog</span><span class="o">-</span><span class="n">remb</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">transport</span><span class="o">-</span><span class="n">cc</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">ccm</span><span class="w"> </span><span class="n">fir</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">nack</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">nack</span><span class="w"> </span><span class="n">pli</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">97</span><span class="w"> </span><span class="n">rtx</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">fmtp</span><span class="o">:</span><span class="mi">97</span><span class="w"> </span><span class="n">apt</span><span class="o">=</span><span class="mi">96</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">-</span><span class="n">group</span><span class="o">:</span><span class="n">FID</span><span class="w"> </span><span class="mi">3587783331</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">3587783331</span><span class="w"> </span><span class="n">cname</span><span class="o">:</span><span class="n">INxZnBV2Sty1zlmN</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">3587783331</span><span class="w"> </span><span class="n">msid</span><span class="o">:</span><span class="n">uiZ7cB0hsFDRGgTIMNp6TajUK9dOoHi43HVs</span><span class="w"> </span><span class="n">a3b297e7</span><span class="o">-</span><span class="n">cdbe</span><span class="mi">-464</span><span class="n">e</span><span class="o">-</span><span class="n">a32c</span><span class="mi">-347465</span><span class="n">ace055</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">3587783331</span><span class="w"> </span><span class="n">mslabel</span><span class="o">:</span><span class="n">uiZ7cB0hsFDRGgTIMNp6TajUK9dOoHi43HVs</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">3587783331</span><span class="w"> </span><span class="n">label</span><span class="o">:</span><span class="n">a3b297e7</span><span class="o">-</span><span class="n">cdbe</span><span class="mi">-464</span><span class="n">e</span><span class="o">-</span><span class="n">a32c</span><span class="mi">-347465</span><span class="n">ace055</span>
+</code></pre></div>
+<blockquote><p><strong><em>Remark: 用 Chrome 浏览器，先打开 webrtc-internals(chrome://webrtc-internals)，然后打开<a href="https://ossrs.net/webrtc-web/p2p.initiator.html">Alice</a> 页面点 Share 按钮，接着打开<a href="https://ossrs.net/webrtc-web/p2p.responder.html">Bob</a> 页面点 Share，看到上面的 Offer 和 Answer。</em></strong></p>
+</blockquote>
+<p>交换完 SDP 后，会交换 Candidate：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// Alice Candidate</span>
+<span class="nl">candidate</span><span class="p">:</span><span class="w"> </span><span class="n">candidate</span><span class="o">:</span><span class="mi">1912876010</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="n">udp</span><span class="w"> </span><span class="mi">2122260223</span><span class="w"> </span><span class="mf">30.2.220.94</span><span class="w"> </span><span class="mi">52832</span><span class="w"> </span><span class="n">typ</span><span class="w"> </span><span class="n">host</span><span class="w"> </span><span class="n">generation</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="n">ufrag</span><span class="w"> </span><span class="n">l5KU</span><span class="w"> </span><span class="n">network</span><span class="o">-</span><span class="n">id</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="n">network</span><span class="o">-</span><span class="n">cost</span><span class="w"> </span><span class="mi">10</span>
+<span class="nl">candidate</span><span class="p">:</span><span class="w"> </span><span class="n">candidate</span><span class="o">:</span><span class="mi">1015535386</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="n">tcp</span><span class="w"> </span><span class="mi">1518280447</span><span class="w"> </span><span class="mf">30.2.220.94</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">typ</span><span class="w"> </span><span class="n">host</span><span class="w"> </span><span class="n">tcptype</span><span class="w"> </span><span class="n">active</span><span class="w"> </span><span class="n">generation</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="n">ufrag</span><span class="w"> </span><span class="n">l5KU</span><span class="w"> </span><span class="n">network</span><span class="o">-</span><span class="n">id</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="n">network</span><span class="o">-</span><span class="n">cost</span><span class="w"> </span><span class="mi">10</span>
+
+<span class="c1">// Bob Candidate</span>
+<span class="nl">candidate</span><span class="p">:</span><span class="mi">1912876010</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="n">udp</span><span class="w"> </span><span class="mi">2122260223</span><span class="w"> </span><span class="mf">30.2.220.94</span><span class="w"> </span><span class="mi">51551</span><span class="w"> </span><span class="n">typ</span><span class="w"> </span><span class="n">host</span><span class="w"> </span><span class="n">generation</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="n">ufrag</span><span class="w"> </span><span class="n">MUZf</span><span class="w"> </span><span class="n">network</span><span class="o">-</span><span class="n">id</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="n">network</span><span class="o">-</span><span class="n">cost</span><span class="w"> </span><span class="mi">10</span>
+</code></pre></div>
+<p>最后 Alice 和 Bob 通信的 Candidate pair，选择的是 UDP 通道：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20201211-193030-3.jpg" alt=""></p>
+<p>Alice 发送的 Video 的信息：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20201211-193030-5.jpg" alt=""></p>
+<p>Alice 收到的 (Bob 的) Video信息：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20201211-193030-7.jpg" alt=""></p>
+<p>一般来说，推流方先发起 Offer，接收方给 Answer。比如客户端推流到 SFU，客户端发起 Offer 推流，SFU 给客户端 Answer，客户端将流推到 SFU，SFU 再转发给其他客户端。Licode 和 Janus 都是这种做法，这种方式下，如果客户端需要拉取其他的客户端的流，一般需要使用另外的 PeerConnection，接收 SFU 的 Offer，生成Answer 后回应给 SFU。</p>
+<p>不过，推流方发起 Offer 不是必须的，接收方也可以给 Offer，推流方Answer。比如 MediaSoup 这种 SFU，客户端先给一个 Offer给 SFU，SFU 只是检查这个 Offer 中的媒体特性，然后 SFU 会生成 Offer（包含会议中的其他客户端的流，如果没有人则没有SSRC）给客户端，客户端发送 Answer 给 SFU。这种方式的好处是其他客户端加入，以及流的变更（比如关闭视频打开视频时），都可以使用Reoffer，也就是统一由 SFU 发起新的 Offer，客户端响应，SFU 和客户端的交互模式只有一种。</p>
+<h3>SDP Structure</h3>
+<p>SDP 描述分为两部分，分别是会话级别的描述（session level）和媒体级别的描述（media level），其具体的组成可参考 <a href="https://tools.ietf.org/html/rfc4566%23section-5">RFC4566</a>，带星号 (*) 的是可选的。常见的内容如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">Session</span><span class="w"> </span><span class="n">description</span><span class="err">（</span><span class="n">会话级别描述</span><span class="err">）</span>
+<span class="w">            </span><span class="n">v</span><span class="o">=</span><span class="w">  </span><span class="p">(</span><span class="n">protocol</span><span class="w"> </span><span class="n">version</span><span class="p">)</span>
+<span class="w">            </span><span class="n">o</span><span class="o">=</span><span class="w">  </span><span class="p">(</span><span class="n">originator</span><span class="w"> </span><span class="n">and</span><span class="w"> </span><span class="n">session</span><span class="w"> </span><span class="n">identifier</span><span class="p">)</span>
+<span class="w">            </span><span class="n">s</span><span class="o">=</span><span class="w">  </span><span class="p">(</span><span class="n">session</span><span class="w"> </span><span class="n">name</span><span class="p">)</span>
+<span class="w">            </span><span class="n">c</span><span class="o">=*</span><span class="w"> </span><span class="p">(</span><span class="n">connection</span><span class="w"> </span><span class="n">information</span><span class="w"> </span><span class="o">--</span><span class="w"> </span><span class="n">not</span><span class="w"> </span><span class="n">required</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">included</span><span class="w"> </span><span class="n">in</span><span class="w"> </span><span class="n">all</span><span class="w"> </span><span class="n">media</span><span class="p">)</span>
+<span class="w">            </span><span class="n">One</span><span class="w"> </span><span class="n">or</span><span class="w"> </span><span class="n">more</span><span class="w"> </span><span class="n">Time</span><span class="w"> </span><span class="n">descriptions</span><span class="w"> </span><span class="p">(</span><span class="s">&quot;t=&quot;</span><span class="w"> </span><span class="n">and</span><span class="w"> </span><span class="s">&quot;r=&quot;</span><span class="w"> </span><span class="n">lines</span><span class="p">;</span><span class="w"> </span><span class="n">see</span><span class="w"> </span><span class="n">below</span><span class="p">)</span>
+<span class="w">            </span><span class="n">a</span><span class="o">=*</span><span class="w"> </span><span class="p">(</span><span class="n">zero</span><span class="w"> </span><span class="n">or</span><span class="w"> </span><span class="n">more</span><span class="w"> </span><span class="n">session</span><span class="w"> </span><span class="n">attribute</span><span class="w"> </span><span class="n">lines</span><span class="p">)</span>
+<span class="w">            </span><span class="n">Zero</span><span class="w"> </span><span class="n">or</span><span class="w"> </span><span class="n">more</span><span class="w"> </span><span class="n">Media</span><span class="w"> </span><span class="n">descriptions</span>
+
+<span class="n">Time</span><span class="w"> </span><span class="n">description</span>
+<span class="w">            </span><span class="n">t</span><span class="o">=</span><span class="w">  </span><span class="p">(</span><span class="n">time</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">session</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">active</span><span class="p">)</span>
+
+<span class="n">Media</span><span class="w"> </span><span class="n">description</span><span class="err">（</span><span class="n">媒体级别描述</span><span class="err">）</span><span class="p">,</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">present</span>
+<span class="w">            </span><span class="n">m</span><span class="o">=</span><span class="w">  </span><span class="p">(</span><span class="n">media</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="n">and</span><span class="w"> </span><span class="n">transport</span><span class="w"> </span><span class="n">address</span><span class="p">)</span>
+<span class="w">            </span><span class="n">c</span><span class="o">=*</span><span class="w"> </span><span class="p">(</span><span class="n">connection</span><span class="w"> </span><span class="n">information</span><span class="w"> </span><span class="o">--</span><span class="w"> </span><span class="n">optional</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">included</span><span class="w"> </span><span class="n">at</span><span class="w"> </span><span class="n">session</span><span class="w"> </span><span class="n">level</span><span class="p">)</span>
+<span class="w">            </span><span class="n">a</span><span class="o">=*</span><span class="w"> </span><span class="p">(</span><span class="n">zero</span><span class="w"> </span><span class="n">or</span><span class="w"> </span><span class="n">more</span><span class="w"> </span><span class="n">media</span><span class="w"> </span><span class="n">attribute</span><span class="w"> </span><span class="n">lines</span><span class="p">)</span>
+</code></pre></div>
+<p>对照 Alice 的 Offer（只包含了视频没有开启音频）：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// Session description</span>
+<span class="n">v</span><span class="o">=</span><span class="mi">0</span>
+<span class="n">o</span><span class="o">=-</span><span class="w"> </span><span class="mi">2397106153131073818</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="n">IN</span><span class="w"> </span><span class="n">IP4</span><span class="w"> </span><span class="mf">127.0.0.1</span>
+<span class="n">s</span><span class="o">=-</span>
+<span class="n">c</span><span class="o">=</span><span class="n">IN</span><span class="w"> </span><span class="n">IP4</span><span class="w"> </span><span class="mf">0.0.0.0</span>
+
+<span class="c1">// Time description</span>
+<span class="n">t</span><span class="o">=</span><span class="mi">0</span><span class="w"> </span><span class="mi">0</span>
+
+<span class="c1">// Session Attributes</span>
+<span class="n">a</span><span class="o">=</span><span class="n">group</span><span class="o">:</span><span class="n">BUNDLE</span><span class="w"> </span><span class="n">video</span>
+<span class="n">a</span><span class="o">=</span><span class="n">msid</span><span class="o">-</span><span class="n">semantic</span><span class="o">:</span><span class="w"> </span><span class="n">WMS</span><span class="w"> </span><span class="n">gLzQPGuagv3xXolwPiiGAULOwOLNItvl8LyS</span>
+
+<span class="c1">// Media description</span>
+<span class="n">m</span><span class="o">=</span><span class="n">video</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">96</span><span class="w"> </span><span class="mi">97</span>
+<span class="n">c</span><span class="o">=</span><span class="n">IN</span><span class="w"> </span><span class="n">IP4</span><span class="w"> </span><span class="mf">0.0.0.0</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">:</span><span class="mi">9</span><span class="w"> </span><span class="n">IN</span><span class="w"> </span><span class="n">IP4</span><span class="w"> </span><span class="mf">0.0.0.0</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ice</span><span class="o">-</span><span class="n">ufrag</span><span class="o">:</span><span class="n">l5KU</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ice</span><span class="o">-</span><span class="n">pwd</span><span class="o">:+</span><span class="n">Sxmm3PoJUERpeHYL0HW4</span><span class="o">/</span><span class="n">T9</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ice</span><span class="o">-</span><span class="n">options</span><span class="o">:</span><span class="n">trickle</span>
+<span class="n">a</span><span class="o">=</span><span class="n">fingerprint</span><span class="o">:</span><span class="n">sha</span><span class="mi">-256</span><span class="w"> </span><span class="mi">7</span><span class="n">C</span><span class="o">:</span><span class="mi">93</span><span class="o">:</span><span class="mi">85</span><span class="o">:</span><span class="mi">40</span><span class="o">:</span><span class="mo">01</span><span class="o">:</span><span class="mo">07</span><span class="o">:</span><span class="mi">91</span><span class="o">:</span><span class="n">BE</span><span class="o">:</span><span class="n">DA</span><span class="o">:</span><span class="mi">64</span><span class="o">:</span><span class="n">A0</span><span class="o">:</span><span class="mi">37</span><span class="o">:</span><span class="mi">7</span><span class="n">E</span><span class="o">:</span><span class="mi">61</span><span class="o">:</span><span class="n">CB</span><span class="o">:</span><span class="mi">9</span><span class="n">D</span><span class="o">:</span><span class="mi">91</span><span class="o">:</span><span class="mi">9</span><span class="n">B</span><span class="o">:</span><span class="mi">44</span><span class="o">:</span><span class="n">F6</span><span class="o">:</span><span class="n">C9</span><span class="o">:</span><span class="n">AC</span><span class="o">:</span><span class="mi">3</span><span class="n">B</span><span class="o">:</span><span class="mi">37</span><span class="o">:</span><span class="mi">1</span><span class="n">C</span><span class="o">:</span><span class="mo">00</span><span class="o">:</span><span class="mi">15</span><span class="o">:</span><span class="mi">4</span><span class="n">C</span><span class="o">:</span><span class="mi">5</span><span class="n">A</span><span class="o">:</span><span class="n">B5</span><span class="o">:</span><span class="mi">67</span><span class="o">:</span><span class="mi">74</span>
+<span class="n">a</span><span class="o">=</span><span class="n">setup</span><span class="o">:</span><span class="n">actpass</span>
+<span class="n">a</span><span class="o">=</span><span class="n">mid</span><span class="o">:</span><span class="n">video</span>
+<span class="n">a</span><span class="o">=</span><span class="n">sendrecv</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">mux</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">rsize</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">VP8</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">goog</span><span class="o">-</span><span class="n">remb</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">transport</span><span class="o">-</span><span class="n">cc</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">ccm</span><span class="w"> </span><span class="n">fir</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">nack</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">nack</span><span class="w"> </span><span class="n">pli</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">97</span><span class="w"> </span><span class="n">rtx</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">fmtp</span><span class="o">:</span><span class="mi">97</span><span class="w"> </span><span class="n">apt</span><span class="o">=</span><span class="mi">96</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">-</span><span class="n">group</span><span class="o">:</span><span class="n">FID</span><span class="w"> </span><span class="mi">2527104241</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">2527104241</span><span class="w"> </span><span class="n">cname</span><span class="o">:</span><span class="n">JPmKBgFHH5YVFyaJ</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">2527104241</span><span class="w"> </span><span class="n">msid</span><span class="o">:</span><span class="n">gLzQPGuagv3xXolwPiiGAULOwOLNItvl8LyS</span><span class="w"> </span><span class="n">c7072509</span><span class="o">-</span><span class="n">df47</span><span class="mi">-4828</span><span class="o">-</span><span class="n">ad03</span><span class="mi">-7</span><span class="n">d0274585a56</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">2527104241</span><span class="w"> </span><span class="n">mslabel</span><span class="o">:</span><span class="n">gLzQPGuagv3xXolwPiiGAULOwOLNItvl8LyS</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">2527104241</span><span class="w"> </span><span class="n">label</span><span class="o">:</span><span class="n">c7072509</span><span class="o">-</span><span class="n">df47</span><span class="mi">-4828</span><span class="o">-</span><span class="n">ad03</span><span class="mi">-7</span><span class="n">d0274585a56</span>
+</code></pre></div>
+<p>SDP Line 是顺序相关的，比如 <code>a=rtpmap:96</code> 后面的都是它相关的设置，直到下一行是 <code>a=rtpmap</code>或者其他属性。</p>
+<p>SDP Line 没有统一的 Schema 描述，也就是没有一个固定的规则能解析所有 Line，<a href="https://tools.ietf.org/html/rfc4566%23section-9">SDP Grammer</a> 只是描述了 SDP 相关的属性，具体每个属性的表达需要根据属性定义。</p>
+<p>定义在 <a href="https://tools.ietf.org/html/rfc4566%23section-6">RFC 4566</a> 例如：</p>
+<div class="highlight"><pre><code><span></span><span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:&lt;</span><span class="n">payload</span><span class="w"> </span><span class="n">type</span><span class="o">&gt;</span><span class="w"> </span><span class="o">&lt;</span><span class="n">encoding</span><span class="w"> </span><span class="n">name</span><span class="o">&gt;/&lt;</span><span class="n">clock</span><span class="w"> </span><span class="n">rate</span><span class="o">&gt;</span><span class="w"> </span><span class="p">[</span><span class="o">/&lt;</span><span class="n">encoding</span><span class="w"> </span><span class="n">parameters</span><span class="o">&gt;</span><span class="p">]</span>
+</code></pre></div>
+<p>SDP 解析时，每个 SDP Line 都是以<code>key=...</code> 形式，解析出 key 是 a 后，可能有两种方式。</p>
+<p>可参考 <a href="https://tools.ietf.org/html/rfc4566%23section-5.13">RFC4566</a> ：</p>
+<div class="highlight"><pre><code><span></span><span class="n">a</span><span class="o">=&lt;</span><span class="n">attribute</span><span class="o">&gt;</span>
+<span class="n">a</span><span class="o">=&lt;</span><span class="n">attribute</span><span class="o">&gt;:&lt;</span><span class="n">value</span><span class="o">&gt;</span>
+</code></pre></div>
+<p>比如 c=IN IP4 0.0.0.0，key 为 c。</p>
+<p>比如 a=rtcp-mux，key 为 a，attribute 为 rtcp-mux，没有 value。</p>
+<p>比如 a=rtpmap:96 VP8/90000，key 为 a，attribute 为 rtpmap，value=96 VP8/90000。</p>
+<p>有时候并非冒号 (:) 就一定是 <code>&lt;attribute&gt;:&lt;value&gt;</code>:，实际上 value 里面也会有冒号，比如：</p>
+<div class="highlight"><pre><code><span></span><span class="n">a</span><span class="o">=</span><span class="n">fingerprint</span><span class="o">:</span><span class="n">sha</span><span class="mi">-256</span><span class="w"> </span><span class="mi">7</span><span class="n">C</span><span class="o">:</span><span class="mi">93</span><span class="o">:</span><span class="mi">85</span><span class="o">:</span><span class="mi">40</span><span class="o">:</span><span class="mo">01</span><span class="o">:</span><span class="mo">07</span><span class="o">:</span><span class="mi">91</span><span class="o">:</span><span class="n">BE</span>
+<span class="n">a</span><span class="o">=</span><span class="n">extmap</span><span class="o">:</span><span class="mi">2</span><span class="w"> </span><span class="n">urn</span><span class="o">:</span><span class="n">ietf</span><span class="o">:</span><span class="n">params</span><span class="o">:</span><span class="n">rtp</span><span class="o">-</span><span class="n">hdrext</span><span class="o">:</span><span class="n">toffset</span>
+<span class="n">a</span><span class="o">=</span><span class="n">extmap</span><span class="o">:</span><span class="mi">3</span><span class="w"> </span><span class="n">http</span><span class="o">:</span><span class="c1">//www.webrtc.org/experiments/rtp-hdrext/abs-send-time</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">2527104241</span><span class="w"> </span><span class="n">msid</span><span class="o">:</span><span class="n">gLzQPGuagv3xXolwPiiGAULOwOLNItvl8LyS</span>
+</code></pre></div>
+<h3><strong>Session Level Field</strong></h3>
+<p>会话级别的 SDP 描述字段包括：v、o、s、c、b、t。</p>
+<ul>
+<li>v(version) </li>
+</ul>
+<p>SDP 协议版本，值固定为 0。</p>
+<ul>
+<li>o(origin) </li>
+</ul>
+<p>代表会话的发起者。</p>
+<ul>
+<li>s(session name)  </li>
+</ul>
+<p>会话的名称，每个 SDP 中有且仅能有一个 s 描述，其值不能为空。</p>
+<ul>
+<li>c(connection data)  </li>
+</ul>
+<p>携带了会话的连接信息，其实就是 IP 地址。<br>
+SDP 的会话级别描述可以包含该字段，每一个媒体级别的描述也可以包含该字段，如果会话级别和媒体级别都有 c line，那么以媒体级别的 c line为准。因为 WebRTC 使用 ICE candidate 交换地址信息，所以不会用到 c line，不过这并不代表 c line 没有用，在 SIP视频会议场景中，c line 就必不可少了，文末会再次介绍该字段。</p>
+<ul>
+<li>b (bandwidth)  </li>
+</ul>
+<p>表示会话或媒体使用的建议带宽。</p>
+<ul>
+<li>t(timing)  </li>
+</ul>
+<p>指定了会话的开始和结束时间，如果开始和结束时间都为 0，那么意味着这次会话是永久的。</p>
+<p>关于会话级别字段的更详细的描述，请参考 <a href="https://tools.ietf.org/html/rfc4566%23section-5.1">RFC 4566</a>。</p>
+<h3><strong>Media Codecs</strong></h3>
+<p>会话级别描述完成后，后面就是零到多个媒体级别描述，比如：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// Session Description</span>
+<span class="n">v</span><span class="o">=</span><span class="mi">0</span>
+<span class="p">......</span>
+
+<span class="c1">// Audio Media Description</span>
+<span class="n">m</span><span class="o">=</span><span class="n">audio</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">111</span>
+<span class="p">......</span>
+
+<span class="c1">// Video Media Description</span>
+<span class="n">m</span><span class="o">=</span><span class="n">video</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">96</span><span class="w"> </span><span class="mi">97</span>
+<span class="p">......</span>
+</code></pre></div>
+<p>这个 SDP 描述了一个音频和一个视频，它的格式参考 <a href="https://tools.ietf.org/html/rfc4566%23section-5.14">RFC4566</a>:</p>
+<div class="highlight"><pre><code><span></span><span class="n">m</span><span class="o">=&lt;</span><span class="n">media</span><span class="o">&gt;</span><span class="w"> </span><span class="o">&lt;</span><span class="n">port</span><span class="o">&gt;</span><span class="w"> </span><span class="o">&lt;</span><span class="n">proto</span><span class="o">&gt;</span><span class="w"> </span><span class="o">&lt;</span><span class="n">fmt</span><span class="o">&gt;</span><span class="w"> </span><span class="p">...</span>
+</code></pre></div>
+<p>其中，后面的一串数字<code>111</code> 和<code>96 97</code> 就是 fmt，分别代表音频和视频的 Media Codec，后面会跟着 rtpmap、rtcp-fb、fmtp 这些属性来做进一步的详细的描述。</p>
+<div class="highlight"><pre><code><span></span><span class="n">m</span><span class="o">=</span><span class="n">audio</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">111</span>
+<span class="n">a</span><span class="o">=</span><span class="n">mid</span><span class="o">:</span><span class="n">audio</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">111</span><span class="w"> </span><span class="n">opus</span><span class="o">/</span><span class="mi">48000</span><span class="o">/</span><span class="mi">2</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">111</span><span class="w"> </span><span class="n">transport</span><span class="o">-</span><span class="n">cc</span>
+<span class="n">a</span><span class="o">=</span><span class="n">fmtp</span><span class="o">:</span><span class="mi">111</span><span class="w"> </span><span class="n">minptime</span><span class="o">=</span><span class="mi">10</span><span class="p">;</span><span class="n">useinbandfec</span><span class="o">=</span><span class="mi">1</span>
+
+<span class="n">m</span><span class="o">=</span><span class="n">video</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">96</span><span class="w"> </span><span class="mi">97</span>
+<span class="n">a</span><span class="o">=</span><span class="n">mid</span><span class="o">:</span><span class="n">video</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">VP8</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">goog</span><span class="o">-</span><span class="n">remb</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">transport</span><span class="o">-</span><span class="n">cc</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">ccm</span><span class="w"> </span><span class="n">fir</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">nack</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">nack</span><span class="w"> </span><span class="n">pli</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">97</span><span class="w"> </span><span class="n">rtx</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">fmtp</span><span class="o">:</span><span class="mi">97</span><span class="w"> </span><span class="n">apt</span><span class="o">=</span><span class="mi">96</span>
+</code></pre></div>
+<blockquote><p><em><strong>Remark: 当然，M line 的类型不是只有 audio 和 video，还有 application(bfcp)、text等媒体类型。</strong></em><br>
+<em><strong>Remark: a=mid 属性可以认为是每个 M 描述的唯一 ID。比如 a=mid:audio，那么 <code>audio</code> 这个字符串就是这个 M 描述的 ID。有的时候 mid 属性值也可以用数字表示，比如 a=mid:0，那么 0 也是这个 M 描述的 ID。mid 值一般和 grouping 传输属性的 BUNDLE 策略结合来用，比如 a=group:BUNDLE audio video，代表本次会话将对 mid 为 <code>audio</code> 和 <code>video</code> 的 M 描述进行复用传输。</strong></em><br>
+<em><strong>Remark: M line 的数字 9 代表该媒体类型的传输端口，在 RTC 场景中都是使用 ICE candidate 的地址信息进行数据传输，所以 M line 的 port 并没有用到。不过，在 SIP 的场景下，M line 的 port 就十分重要了，此时，port 代表 RTP 端口，而且必须是偶数。结合SDP 会话级别描述中的 C line 中的 IP 地址，我们就可以知道 SIP 的这路媒体流的传输地址。</strong></em><br>
+<em><strong>Remark: RTX 表示是重传，比如 video 的 97，就是 apt=96 的重传。也就是说如果用的是 97 这个编码格式，它是在96(VP8) 基础上加了重传功能。</strong></em></p>
+</blockquote>
+<p>而一共有多少媒体流，则是通过 SSRC 指定的：</p>
+<div class="highlight"><pre><code><span></span><span class="n">m</span><span class="o">=</span><span class="n">audio</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">111</span><span class="w"> </span><span class="mi">103</span><span class="w"> </span><span class="mi">104</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">106</span><span class="w"> </span><span class="mi">105</span><span class="w"> </span><span class="mi">13</span><span class="w"> </span><span class="mi">110</span><span class="w"> </span><span class="mi">112</span><span class="w"> </span><span class="mi">113</span><span class="w"> </span><span class="mi">126</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">2582129002</span><span class="w"> </span><span class="n">cname</span><span class="o">:</span><span class="mi">8</span><span class="n">Y1pmIKBijmWeALu</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">2582129002</span><span class="w"> </span><span class="n">msid</span><span class="o">:</span><span class="mf">34f</span><span class="n">D1qguf2v79436S1khLkth8Nb6LbedcF9H</span><span class="w"> </span><span class="n">bab38910</span><span class="mi">-40</span><span class="n">cd</span><span class="mi">-4581-9</span><span class="n">a20</span><span class="o">-</span><span class="n">e3f558abb397</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">2582129002</span><span class="w"> </span><span class="n">mslabel</span><span class="o">:</span><span class="mf">34f</span><span class="n">D1qguf2v79436S1khLkth8Nb6LbedcF9H</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">2582129002</span><span class="w"> </span><span class="n">label</span><span class="o">:</span><span class="n">bab38910</span><span class="mi">-40</span><span class="n">cd</span><span class="mi">-4581-9</span><span class="n">a20</span><span class="o">-</span><span class="n">e3f558abb397</span>
+
+<span class="n">m</span><span class="o">=</span><span class="n">video</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">96</span><span class="w"> </span><span class="mi">97</span><span class="w"> </span><span class="mi">98</span><span class="w"> </span><span class="mi">99</span><span class="w"> </span><span class="mi">100</span><span class="w"> </span><span class="mi">101</span><span class="w"> </span><span class="mi">102</span><span class="w"> </span><span class="mi">123</span><span class="w"> </span><span class="mi">127</span><span class="w"> </span><span class="mi">122</span><span class="w"> </span><span class="mi">125</span><span class="w"> </span><span class="mi">107</span><span class="w"> </span><span class="mi">108</span><span class="w"> </span><span class="mi">109</span><span class="w"> </span><span class="mi">124</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">565530905</span><span class="w"> </span><span class="n">cname</span><span class="o">:</span><span class="mi">8</span><span class="n">Y1pmIKBijmWeALu</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">565530905</span><span class="w"> </span><span class="n">msid</span><span class="o">:</span><span class="mf">34f</span><span class="n">D1qguf2v79436S1khLkth8Nb6LbedcF9H</span><span class="w"> </span><span class="mi">2</span><span class="n">c533cfe</span><span class="o">-</span><span class="n">b6bf</span><span class="mi">-41</span><span class="n">a8</span><span class="mi">-93</span><span class="n">f0</span><span class="mi">-1</span><span class="n">ca031436702</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">565530905</span><span class="w"> </span><span class="n">mslabel</span><span class="o">:</span><span class="mf">34f</span><span class="n">D1qguf2v79436S1khLkth8Nb6LbedcF9H</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ssrc</span><span class="o">:</span><span class="mi">565530905</span><span class="w"> </span><span class="n">label</span><span class="o">:</span><span class="mi">2</span><span class="n">c533cfe</span><span class="o">-</span><span class="n">b6bf</span><span class="mi">-41</span><span class="n">a8</span><span class="mi">-93</span><span class="n">f0</span><span class="mi">-1</span><span class="n">ca031436702</span>
+</code></pre></div>
+<blockquote><p><strong><em>Remark: SSRC 就包含了需要发送的媒体流，另外 Offer 和 Answer 中都可以包含 SSRC。比如客户端和 MediaSoup通信时，MediaSoup 总是给客户端发 Offer，MediaSoup 的 Offer 包含了 MediaSoup 要发送（转发其他客户端的流给客户端）的媒体流 SSRC，同时客户端的 Answer 中也包含了自己要推送的 SSRC 流，他们的类型都是sendrecv。</em></strong> 
+<strong><em>Remark: msid 对应了 <a href="https://developer.mozilla.org/en-US/docs/Web/API/MediaStream/id">NetStream.id</a>，也就是代表了不同的媒体源，这些 SSRC 可以是不同的媒体源。</em></strong></p>
+</blockquote>
+<p>如何确定最后的编码？对方会在 Answer 中给出，比如上面 Offer 给出了多个编码，在 Answer 中会选择一个：</p>
+<div class="highlight"><pre><code><span></span><span class="n">m</span><span class="o">=</span><span class="n">audio</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">111</span>
+<span class="n">m</span><span class="o">=</span><span class="n">video</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">100</span><span class="w"> </span><span class="mi">102</span><span class="w"> </span><span class="mi">127</span><span class="w"> </span><span class="mi">125</span><span class="w"> </span><span class="mi">108</span><span class="w"> </span><span class="mi">124</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">100</span><span class="w"> </span><span class="n">H264</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">102</span><span class="w"> </span><span class="n">H264</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">127</span><span class="w"> </span><span class="n">H264</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">125</span><span class="w"> </span><span class="n">H264</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">108</span><span class="w"> </span><span class="n">red</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">124</span><span class="w"> </span><span class="n">ulpfec</span><span class="o">/</span><span class="mi">90000</span>
+</code></pre></div>
+<p>虽然 Video 编码有 100 到 125，但是他们都是 H.264，而 108 和 124 则是 FEC，基于 H.264。</p>
+<h3>PlanB and UnifiedPlan</h3>
+<p>上面的 MediaCodecs 中，没有规定如何指定多条流。实际上 Audio 和 Video 都有多个 SSRC，每个 SSRC的编码可能相同但也可能不同。比如互联网视频会议，用移动端接入时，编码可能都是 H.264，但是和其他终端接入时可能会有其他编码。</p>
+<p>如果 SSRC 的编码不相同，那么将这些 SSRC 放在同一个 M 描述就会有问题，这就是 PlanB 和 UnifiedPlan 的关键所在。对于PlanB 只有一个 M(audio) 和 M(video)，他们的编码要相同，当有多路媒体流时，则根据 SSRC 去区分。UnifiedPlan则可以有多个 M(audio) 和 M(video)，每路流都有自己的 M 描述，这样就可以支持不同的编码。</p>
+<p>PlanB 和 UnifiedPlan 其实就是 WebRTC 在多路媒体源（multi media source）场景下的两种不同的 SDP协商方式。如果引入 Stream 和 Track 的概念，那么一个 Stream 可能包含 AudioTrack 和 VideoTrack，当有多路Stream 时，就会有更多的 Track，如果每一个 Track 唯一对应一个自己的 M 描述，那么这就是 UnifiedPlan，如果每一个 M line 描述了多个 Track(track id)，那么这就是 Plan B。</p>
+<blockquote><p><em><strong>Note: 当只有一路音频流和一路视频流时，Plan B 和 UnifiedPlan 的格式是相互兼容的。</strong></em> 
+<em><strong>Remark: Chrome 早期支持的是 PlanB，目前最新版本也支持了 UnifiedPlan，参考 <a href="https://bugs.chromium.org/p/chromium/issues/detail%3Fid%3D465349">Need to implement WebRTC "Unified Plan" for multistream</a>。</strong></em></p>
+</blockquote>
+<p>PlanB 参考下图：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20201211-193030-9.jpg" alt=""></p>
+<p>UnifiedPlan 参考下图：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20201211-193030-11.jpg" alt=""></p>
+<h3>Candidate</h3>
+<p>Candidate 就是传输的候选人，客户端会生成多个 Candidate，比如有 host 类型的、有 relay 类型的、有 UDP 和 TCP
+的，如下图所示：</p>
+<div class="highlight"><pre><code><span></span><span class="nl">sdpMid</span><span class="p">:</span><span class="w"> </span><span class="n">audio</span><span class="p">,</span><span class="w"> </span><span class="n">sdpMLineIndex</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">candidate</span><span class="o">:</span><span class="mi">2213672593</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="n">udp</span><span class="w"> </span><span class="mi">2122260223</span><span class="w"> </span><span class="mf">30.2.228.19</span><span class="w"> </span><span class="mi">51068</span><span class="w"> </span><span class="n">typ</span><span class="w"> </span><span class="n">host</span>
+<span class="nl">sdpMid</span><span class="p">:</span><span class="w"> </span><span class="n">video</span><span class="p">,</span><span class="w"> </span><span class="n">sdpMLineIndex</span><span class="o">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">candidate</span><span class="o">:</span><span class="mi">2213672593</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="n">udp</span><span class="w"> </span><span class="mi">2122260223</span><span class="w"> </span><span class="mf">30.2.228.19</span><span class="w"> </span><span class="mi">55061</span><span class="w"> </span><span class="n">typ</span><span class="w"> </span><span class="n">host</span>
+
+<span class="nl">sdpMid</span><span class="p">:</span><span class="w"> </span><span class="n">audio</span><span class="p">,</span><span class="w"> </span><span class="n">sdpMLineIndex</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">candidate</span><span class="o">:</span><span class="mi">3446803041</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="n">tcp</span><span class="w"> </span><span class="mi">1518280447</span><span class="w"> </span><span class="mf">30.2.228.19</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">typ</span><span class="w"> </span><span class="n">host</span>
+<span class="nl">sdpMid</span><span class="p">:</span><span class="w"> </span><span class="n">video</span><span class="p">,</span><span class="w"> </span><span class="n">sdpMLineIndex</span><span class="o">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">candidate</span><span class="o">:</span><span class="mi">3446803041</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="n">tcp</span><span class="w"> </span><span class="mi">1518280447</span><span class="w"> </span><span class="mf">30.2.228.19</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">typ</span><span class="w"> </span><span class="n">host</span>
+
+<span class="nl">sdpMid</span><span class="p">:</span><span class="w"> </span><span class="n">video</span><span class="p">,</span><span class="w"> </span><span class="n">sdpMLineIndex</span><span class="o">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">candidate</span><span class="o">:</span><span class="mi">150963819</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="n">udp</span><span class="w"> </span><span class="mi">41885439</span><span class="w"> </span><span class="mf">182.92.80.26</span><span class="w"> </span><span class="mi">54400</span><span class="w"> </span><span class="n">typ</span><span class="w"> </span><span class="n">relay</span><span class="w"> </span><span class="n">raddr</span><span class="w"> </span><span class="mf">42.120.74.91</span><span class="w"> </span><span class="n">rport</span><span class="w"> </span><span class="mi">37714</span>
+<span class="nl">sdpMid</span><span class="p">:</span><span class="w"> </span><span class="n">audio</span><span class="p">,</span><span class="w"> </span><span class="n">sdpMLineIndex</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">candidate</span><span class="o">:</span><span class="mi">150963819</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="n">udp</span><span class="w"> </span><span class="mi">41885439</span><span class="w"> </span><span class="mf">182.92.80.26</span><span class="w"> </span><span class="mi">59241</span><span class="w"> </span><span class="n">typ</span><span class="w"> </span><span class="n">relay</span><span class="w"> </span><span class="n">raddr</span><span class="w"> </span><span class="mf">42.120.74.91</span><span class="w"> </span><span class="n">rport</span><span class="w"> </span><span class="mi">49618</span>
+</code></pre></div>
+<blockquote><p><strong><em>​Remark：我们去掉了后面的属性，比如 generation 0 ufrag kce9 network-id 1 network-cost 10，这些属于 Candidate 的描述，和连通性检查等相关。</em></strong></p>
+</blockquote>
+<p>客户端自己生成了 6 个 Candidates，3 个 Audio 和 3 个 Video，2 个 TCP 和 4 个 UDP，4 个 host 和 2 个 relay。当然对方也会有很多 Candidate，接下来就是自己的 Candidates 和对方的 Candidates 匹配连通（ICE Connectivity Checks），形成 CandidatePair 也就是传输通道。Candidate 还附带了网络属性，比如network-cost 会在 ICE Connectivity Checks 时用到。</p>
+<blockquote><p><em><strong>Remark: 关于 Candidate 的类型，还有 srflx 以及 prflx，关于这两种 Candidate 类型的定义以及区分，后面会在 ICE 相关的技术文章中介绍。</strong></em> 
+<em><strong>Remark: 关于 ICE Connectivity Checks 我们会在后面给出详细的分析，涉及到了STUN协议。下面会总结出 ICE 相关的 SDP 信息。</strong></em></p>
+</blockquote>
+<p>SDP 和 Candidate 都是通过信令交换的。如果对方只给了 relay 的 Candidate，例如：</p>
+<div class="highlight"><pre><code><span></span><span class="nl">sdpMid</span><span class="p">:</span><span class="w"> </span><span class="n">audio</span><span class="p">,</span><span class="w"> </span><span class="n">sdpMLineIndex</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">candidate</span><span class="o">:</span><span class="mi">150963819</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="n">udp</span><span class="w"> </span><span class="mi">41885439</span><span class="w"> </span><span class="mf">182.92.80.26</span><span class="w"> </span><span class="mi">51542</span><span class="w"> </span><span class="n">typ</span><span class="w"> </span><span class="n">relay</span><span class="w"> </span><span class="n">raddr</span><span class="w"> </span><span class="mf">42.120.74.91</span><span class="w"> </span><span class="n">rport</span><span class="w"> </span><span class="mi">56380</span>
+</code></pre></div>
+<p>这种情况下，肯定最后连通的 CandidatePair 是 Relay 对 Relay，如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20201211-193030-13.jpg" alt=""></p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20201211-193030-15.jpg" alt=""></p>
+<p>从这个图中能看出来这个传输通道的发送和接收码率、包的个数、RTT 和丢包率等信息。</p>
+<p>实际上，由于我们这个客户端还有 host 类型的 Candidate，所以它会尝试直接用 host 的这个 Candidate 和对方的 relay
+直接连接：</p>
+<div class="highlight"><pre><code><span></span><span class="nl">sdpMid</span><span class="p">:</span><span class="w"> </span><span class="n">audio</span><span class="p">,</span><span class="w"> </span><span class="n">sdpMLineIndex</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">candidate</span><span class="o">:</span><span class="mi">2213672593</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="n">udp</span><span class="w"> </span><span class="mi">2122260223</span><span class="w"> </span><span class="mf">30.2.228.19</span><span class="w"> </span><span class="mi">51068</span><span class="w"> </span><span class="n">typ</span><span class="w"> </span><span class="n">host</span>
+
+<span class="n">Statistics</span><span class="w"> </span><span class="n">Conn</span><span class="o">-</span><span class="n">audio</span><span class="mi">-1-1</span>
+<span class="n">googActiveConnection</span><span class="w">  </span><span class="nb">false</span>
+</code></pre></div>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20201211-193030-17.jpg" alt=""></p>
+<p>当然，由于没有连通所以这个 CandidatePair 就不可用。</p>
+<blockquote><p><strong><em>Remark: WebRTC 是具备在多个 Candidate 之间切换的能力的，具体在 ICE Connectivity Checks中我们再分析。</em></strong></p>
+</blockquote>
+<p>上面的 Candidates 自己生成了 2 个 Relay 的 Candidates，一个是 audio 的一个是 video 的，为何只用到了audio的呢？这就是下面的 BUNDLE 涉及的了。</p>
+<h3><strong>Bundle and RTCP-MUX</strong></h3>
+<p>传输时，可以复用媒体通道，一种是音频和视频的复用，一种是 RTCP 和 RTP 的复用。</p>
+<p>RTCP 和 RTP 复用，表示 Sender 使用一个传输通道（单一端口）发送 RTP 和 RTCP：</p>
+<div class="highlight"><pre><code><span></span><span class="n">m</span><span class="o">=</span><span class="n">audio</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">111</span><span class="w"> </span><span class="mi">103</span><span class="w"> </span><span class="mi">104</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">106</span><span class="w"> </span><span class="mi">105</span><span class="w"> </span><span class="mi">13</span><span class="w"> </span><span class="mi">110</span><span class="w"> </span><span class="mi">112</span><span class="w"> </span><span class="mi">113</span><span class="w"> </span><span class="mi">126</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">mux</span>
+
+<span class="n">m</span><span class="o">=</span><span class="n">video</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">96</span><span class="w"> </span><span class="mi">97</span><span class="w"> </span><span class="mi">98</span><span class="w"> </span><span class="mi">99</span><span class="w"> </span><span class="mi">100</span><span class="w"> </span><span class="mi">101</span><span class="w"> </span><span class="mi">102</span><span class="w"> </span><span class="mi">123</span><span class="w"> </span><span class="mi">127</span><span class="w"> </span><span class="mi">122</span><span class="w"> </span><span class="mi">125</span><span class="w"> </span><span class="mi">107</span><span class="w"> </span><span class="mi">108</span><span class="w"> </span><span class="mi">109</span><span class="w"> </span><span class="mi">124</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">mux</span>
+</code></pre></div>
+<p>此时，Receiver 必须准备好在 RTP 端口上接收 RTCP 数据，并需要预留一些资源，比如 RTCP 带宽。</p>
+<p>音频和视频复用时，最后只会用一个 Candidate 传输，比如客户端自己的 SDP Offer，和两个 relay 的Candidates：</p>
+<div class="highlight"><pre><code><span></span><span class="n">a</span><span class="o">=</span><span class="n">group</span><span class="o">:</span><span class="n">BUNDLE</span><span class="w"> </span><span class="n">audio</span><span class="w"> </span><span class="n">video</span>
+
+<span class="n">m</span><span class="o">=</span><span class="n">audio</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">111</span><span class="w"> </span><span class="mi">103</span><span class="w"> </span><span class="mi">104</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">106</span><span class="w"> </span><span class="mi">105</span><span class="w"> </span><span class="mi">13</span><span class="w"> </span><span class="mi">110</span><span class="w"> </span><span class="mi">112</span><span class="w"> </span><span class="mi">113</span><span class="w"> </span><span class="mi">126</span>
+<span class="n">a</span><span class="o">=</span><span class="n">mid</span><span class="o">:</span><span class="n">audio</span>
+
+<span class="n">m</span><span class="o">=</span><span class="n">video</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">96</span><span class="w"> </span><span class="mi">97</span><span class="w"> </span><span class="mi">98</span><span class="w"> </span><span class="mi">99</span><span class="w"> </span><span class="mi">100</span><span class="w"> </span><span class="mi">101</span><span class="w"> </span><span class="mi">102</span><span class="w"> </span><span class="mi">123</span><span class="w"> </span><span class="mi">127</span><span class="w"> </span><span class="mi">122</span><span class="w"> </span><span class="mi">125</span><span class="w"> </span><span class="mi">107</span><span class="w"> </span><span class="mi">108</span><span class="w"> </span><span class="mi">109</span><span class="w"> </span><span class="mi">124</span>
+<span class="n">a</span><span class="o">=</span><span class="n">mid</span><span class="o">:</span><span class="n">video</span>
+</code></pre></div>
+<div class="highlight"><pre><code><span></span><span class="nl">sdpMid</span><span class="p">:</span><span class="w"> </span><span class="n">video</span><span class="p">,</span><span class="w"> </span><span class="n">sdpMLineIndex</span><span class="o">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">candidate</span><span class="o">:</span><span class="mi">150963819</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="n">udp</span><span class="w"> </span><span class="mi">41885439</span><span class="w"> </span><span class="mf">182.92.80.26</span><span class="w"> </span><span class="mi">54400</span><span class="w"> </span><span class="n">typ</span><span class="w"> </span><span class="n">relay</span><span class="w"> </span><span class="n">raddr</span><span class="w"> </span><span class="mf">42.120.74.91</span><span class="w"> </span><span class="n">rport</span><span class="w"> </span><span class="mi">37714</span>
+<span class="nl">sdpMid</span><span class="p">:</span><span class="w"> </span><span class="n">audio</span><span class="p">,</span><span class="w"> </span><span class="n">sdpMLineIndex</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">candidate</span><span class="o">:</span><span class="mi">150963819</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="n">udp</span><span class="w"> </span><span class="mi">41885439</span><span class="w"> </span><span class="mf">182.92.80.26</span><span class="w"> </span><span class="mi">59241</span><span class="w"> </span><span class="n">typ</span><span class="w"> </span><span class="n">relay</span><span class="w"> </span><span class="n">raddr</span><span class="w"> </span><span class="mf">42.120.74.91</span><span class="w"> </span><span class="n">rport</span><span class="w"> </span><span class="mi">49618</span>
+</code></pre></div>
+<p>这表示最终 audio 和 video 尽管可能有独立的 Candidate，但是如果对方也是 BUNDLE，那么最终只会用一个Candidate。例如，如果对方的 Answer 是：</p>
+<div class="highlight"><pre><code><span></span><span class="n">a</span><span class="o">=</span><span class="n">group</span><span class="o">:</span><span class="n">BUNDLE</span><span class="w"> </span><span class="n">audio</span><span class="w"> </span><span class="n">video</span>
+
+<span class="n">m</span><span class="o">=</span><span class="n">audio</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">111</span><span class="w"> </span><span class="mi">103</span><span class="w"> </span><span class="mi">104</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">106</span><span class="w"> </span><span class="mi">105</span><span class="w"> </span><span class="mi">13</span><span class="w"> </span><span class="mi">110</span><span class="w"> </span><span class="mi">112</span><span class="w"> </span><span class="mi">113</span><span class="w"> </span><span class="mi">126</span>
+<span class="n">a</span><span class="o">=</span><span class="n">mid</span><span class="o">:</span><span class="n">audio</span>
+
+<span class="n">m</span><span class="o">=</span><span class="n">video</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">96</span><span class="w"> </span><span class="mi">97</span><span class="w"> </span><span class="mi">98</span><span class="w"> </span><span class="mi">99</span><span class="w"> </span><span class="mi">100</span><span class="w"> </span><span class="mi">101</span><span class="w"> </span><span class="mi">102</span><span class="w"> </span><span class="mi">123</span><span class="w"> </span><span class="mi">127</span><span class="w"> </span><span class="mi">122</span><span class="w"> </span><span class="mi">125</span><span class="w"> </span><span class="mi">107</span><span class="w"> </span><span class="mi">108</span><span class="w"> </span><span class="mi">109</span><span class="w"> </span><span class="mi">124</span>
+<span class="n">a</span><span class="o">=</span><span class="n">mid</span><span class="o">:</span><span class="n">video</span>
+</code></pre></div>
+<div class="highlight"><pre><code><span></span><span class="nl">sdpMid</span><span class="p">:</span><span class="w"> </span><span class="n">audio</span><span class="p">,</span><span class="w"> </span><span class="n">sdpMLineIndex</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">candidate</span><span class="o">:</span><span class="mi">150963819</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="n">udp</span><span class="w"> </span><span class="mi">41885439</span><span class="w"> </span><span class="mf">182.92.80.26</span><span class="w"> </span><span class="mi">51542</span><span class="w"> </span><span class="n">typ</span><span class="w"> </span><span class="n">relay</span><span class="w"> </span><span class="n">raddr</span><span class="w"> </span><span class="mf">42.120.74.91</span><span class="w"> </span><span class="n">rport</span><span class="w"> </span><span class="mi">56380</span>
+</code></pre></div>
+<p>最后它们只会用一个Candidate 传输。如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20201211-193030-19.jpg" alt=""></p>
+<p>rtcp-mux 将 RTP 和 RTCP 复用到单一的端口进行传输，这简化了 NAT traversal，而 BUNDLE又将多路媒体流复用到同一端口进行传输，这不仅使 candidate harvesting 等 ICE 相关的 SDP 属性变得简单，而且又进一步简化了NAT traversal。</p>
+<p>rtcp-mux 是与 RTC 传输相关的重要的 SDP 属性，关于它的 SDP 协商的原则如下：</p>
+<ol>
+<li>如果 Offer 携带 rtcp-mux 属性，并且 Answer 方希望复用 RTP 和 RTCP 到单一端口，那么 Answer 必须也要携带该属性。  </li>
+<li>如果 Offer 没有携带 rtcp-mux 属性，那么 Answer 也一定不能携带 rtcp-mux 属性，而且 Answer 方禁止 RTP 和 RTCP 复用单一端口。  </li>
+<li>rtcp-mux 的协商和使用必须是双向的。</li>
+</ol>
+<p>举个例子。客户端去订阅服务器的流，客户端的 Offer 没有携带 rtcp-mux 属性，那么服务器会认为客户端不支持 rtcp-mux，也不会走 rtcp复用的流程。相反，服务器会分别创建 RTP 和 RTCP 两个传输通道，只有当两个通道的 ICE 和 DTLS都成功，才会认为本次订阅的传输通道建立成功，继而向客户端发流。</p>
+<p>试想，如果因为你的疏忽导致 Offer 漏掉了 rtcp-mux 属性，那么你将永远等不到服务器 Ready 的那一天。所以，SDP 看似只是一些文本，很简单，但是只有在项目的实战中，多遇到几个坑，才能更深切的体会到 SDP 属性的含义以及这些属性是如何在 RTC 场景中去发挥作用的。</p>
+<blockquote><p><strong><em>Remark: 关于 rtcp-mux 更详细的协商细节，请参考 <a href="https://tools.ietf.org/html/rfc8035">RFC 8035</a>。</em></strong><br>
+<strong><em>Remark: 关于 rtcp-mux 场景下如何通过头部字段区分 rtp 和 rtcp，请参考 <a href="https://tools.ietf.org/html/rfc5761%23section-4">RFC 5761</a>。</em></strong></p>
+</blockquote>
+<h3>ICE Connectivity</h3>
+<p>这里我们只说明 SDP 中和 ICE Connectivity Checks 相关的信息，具体的过程我们会在其他文章中单独分析。</p>
+<p>SDP 中和 ICE 相关的信息包括：</p>
+<div class="highlight"><pre><code><span></span><span class="n">m</span><span class="o">=</span><span class="n">audio</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">111</span><span class="w"> </span><span class="mi">103</span><span class="w"> </span><span class="mi">104</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">106</span><span class="w"> </span><span class="mi">105</span><span class="w"> </span><span class="mi">13</span><span class="w"> </span><span class="mi">110</span><span class="w"> </span><span class="mi">112</span><span class="w"> </span><span class="mi">113</span><span class="w"> </span><span class="mi">126</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ice</span><span class="o">-</span><span class="n">ufrag</span><span class="o">:</span><span class="n">kce9</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ice</span><span class="o">-</span><span class="n">pwd</span><span class="o">:</span><span class="n">M31WxfrwmrFvPws4</span><span class="o">+</span><span class="n">tPdbsCE</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ice</span><span class="o">-</span><span class="n">options</span><span class="o">:</span><span class="n">trickle</span>
+<span class="err">​</span>
+<span class="n">m</span><span class="o">=</span><span class="n">video</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">96</span><span class="w"> </span><span class="mi">97</span><span class="w"> </span><span class="mi">98</span><span class="w"> </span><span class="mi">99</span><span class="w"> </span><span class="mi">100</span><span class="w"> </span><span class="mi">101</span><span class="w"> </span><span class="mi">102</span><span class="w"> </span><span class="mi">123</span><span class="w"> </span><span class="mi">127</span><span class="w"> </span><span class="mi">122</span><span class="w"> </span><span class="mi">125</span><span class="w"> </span><span class="mi">107</span><span class="w"> </span><span class="mi">108</span><span class="w"> </span><span class="mi">109</span><span class="w"> </span><span class="mi">124</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ice</span><span class="o">-</span><span class="n">ufrag</span><span class="o">:</span><span class="n">kce9</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ice</span><span class="o">-</span><span class="n">pwd</span><span class="o">:</span><span class="n">M31WxfrwmrFvPws4</span><span class="o">+</span><span class="n">tPdbsCE</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ice</span><span class="o">-</span><span class="n">options</span><span class="o">:</span><span class="n">trickle</span>
+</code></pre></div>
+<p>ufrag 和 pwd 就是 ICE short-term 认证算法用到的用户名和密码。而 trickle 说明 SDP 中没有包含 candidate信息，Candidate 是通过信令单独交换的，这样可以做到 Connectivity checks 和 Candidate harvesting并行处理，提高会话建立的速度。</p>
+<h3>DTLS</h3>
+<p>这里我们只说明 SDP 中关于 DTLS 的信息，具体的 DTLS 握手过程会在 DTLS 相关的技术文章中单独分析。</p>
+<p>SDP 中和 DTLS 相关的信息包括：</p>
+<div class="highlight"><pre><code><span></span><span class="n">m</span><span class="o">=</span><span class="n">audio</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">111</span><span class="w"> </span><span class="mi">103</span><span class="w"> </span><span class="mi">104</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">106</span><span class="w"> </span><span class="mi">105</span><span class="w"> </span><span class="mi">13</span><span class="w"> </span><span class="mi">110</span><span class="w"> </span><span class="mi">112</span><span class="w"> </span><span class="mi">113</span><span class="w"> </span><span class="mi">126</span><span class="n">B0</span><span class="o">:</span><span class="n">A2</span><span class="o">:</span><span class="n">B3</span><span class="o">:</span><span class="n">AB</span><span class="o">:</span><span class="mi">0</span><span class="n">B</span><span class="o">:</span><span class="n">A3</span><span class="o">:</span><span class="mi">44</span><span class="o">:</span><span class="mi">22</span><span class="o">:</span><span class="n">B1</span><span class="o">:</span><span class="n">C8</span><span class="o">:</span><span class="mi">69</span><span class="o">:</span><span class="mi">52</span><span class="o">:</span><span class="n">ED</span><span class="o">:</span><span class="mo">04</span><span class="o">:</span><span class="n">E8</span><span class="o">:</span><span class="mi">5</span><span class="n">A</span><span class="o">:</span><span class="n">A4</span><span class="o">:</span><span class="n">C3</span><span class="o">:</span><span class="mi">7</span><span class="n">A</span><span class="o">:</span><span class="n">A6</span><span class="o">:</span><span class="mi">55</span><span class="o">:</span><span class="n">F3</span><span class="o">:</span><span class="n">BA</span><span class="o">:</span><span class="mi">76</span><span class="o">:</span><span class="mi">62</span><span class="o">:</span><span class="mi">26</span><span class="o">:</span><span class="mi">4</span><span class="n">B</span><span class="o">:</span><span class="n">F7</span><span class="o">:</span><span class="mf">9F</span><span class="o">:</span><span class="n">DD</span><span class="o">:</span><span class="n">F1</span><span class="o">:</span><span class="n">BD</span>
+<span class="n">a</span><span class="o">=</span><span class="n">setup</span><span class="o">:</span><span class="n">actpass</span>
+
+<span class="n">m</span><span class="o">=</span><span class="n">video</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">96</span><span class="w"> </span><span class="mi">97</span><span class="w"> </span><span class="mi">98</span><span class="w"> </span><span class="mi">99</span><span class="w"> </span><span class="mi">100</span><span class="w"> </span><span class="mi">101</span><span class="w"> </span><span class="mi">102</span><span class="w"> </span><span class="mi">123</span><span class="w"> </span><span class="mi">127</span><span class="w"> </span><span class="mi">122</span><span class="w"> </span><span class="mi">125</span><span class="w"> </span><span class="mi">107</span><span class="w"> </span><span class="mi">108</span><span class="w"> </span><span class="mi">109</span><span class="w"> </span><span class="mi">124</span>
+<span class="n">a</span><span class="o">=</span><span class="n">fingerprint</span><span class="o">:</span><span class="n">sha</span><span class="mi">-256</span><span class="w"> </span><span class="n">B0</span><span class="o">:</span><span class="n">A2</span><span class="o">:</span><span class="n">B3</span><span class="o">:</span><span class="n">AB</span><span class="o">:</span><span class="mi">0</span><span class="n">B</span><span class="o">:</span><span class="n">A3</span><span class="o">:</span><span class="mi">44</span><span class="o">:</span><span class="mi">22</span><span class="o">:</span><span class="n">B1</span><span class="o">:</span><span class="n">C8</span><span class="o">:</span><span class="mi">69</span><span class="o">:</span><span class="mi">52</span><span class="o">:</span><span class="n">ED</span><span class="o">:</span><span class="mo">04</span><span class="o">:</span><span class="n">E8</span><span class="o">:</span><span class="mi">5</span><span class="n">A</span><span class="o">:</span><span class="n">A4</span><span class="o">:</span><span class="n">C3</span><span class="o">:</span><span class="mi">7</span><span class="n">A</span><span class="o">:</span><span class="n">A6</span><span class="o">:</span><span class="mi">55</span><span class="o">:</span><span class="n">F3</span><span class="o">:</span><span class="n">BA</span><span class="o">:</span><span class="mi">76</span><span class="o">:</span><span class="mi">62</span><span class="o">:</span><span class="mi">26</span><span class="o">:</span><span class="mi">4</span><span class="n">B</span><span class="o">:</span><span class="n">F7</span><span class="o">:</span><span class="mf">9F</span><span class="o">:</span><span class="n">DD</span><span class="o">:</span><span class="n">F1</span><span class="o">:</span><span class="n">BD</span>
+<span class="n">a</span><span class="o">=</span><span class="n">setup</span><span class="o">:</span><span class="n">actpass</span>
+</code></pre></div>
+<p>其中 fingerprint 是 DTLS 过程中的 Certificate 证书的签名，防止客户端和服务器的证书被篡改。</p>
+<p>另外，setup 指的是 DTLS 的角色，也就是谁是 DTLS Client(active)，谁是 DTLS Server(passive)，如果自己两个都可以那就是 actpass。这里我们是 actpass，那么就要由对方在 Answer 中确定最终的 DTLS 角色：</p>
+<div class="highlight"><pre><code><span></span><span class="n">m</span><span class="o">=</span><span class="n">audio</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">111</span><span class="w"> </span><span class="mi">103</span><span class="w"> </span><span class="mi">104</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">106</span><span class="w"> </span><span class="mi">105</span><span class="w"> </span><span class="mi">13</span><span class="w"> </span><span class="mi">110</span><span class="w"> </span><span class="mi">112</span><span class="w"> </span><span class="mi">113</span><span class="w"> </span><span class="mi">126</span>
+<span class="n">a</span><span class="o">=</span><span class="n">fingerprint</span><span class="o">:</span><span class="n">sha</span><span class="mi">-256</span><span class="w"> </span><span class="n">B1</span><span class="o">:</span><span class="n">FD</span><span class="o">:</span><span class="n">D6</span><span class="o">:</span><span class="mi">2</span><span class="n">D</span><span class="o">:</span><span class="mi">94</span><span class="o">:</span><span class="mi">4</span><span class="n">E</span><span class="o">:</span><span class="mi">33</span><span class="o">:</span><span class="n">A1</span><span class="o">:</span><span class="mi">8</span><span class="n">C</span><span class="o">:</span><span class="mi">9</span><span class="n">D</span><span class="o">:</span><span class="n">EF</span><span class="o">:</span><span class="n">ED</span><span class="o">:</span><span class="n">EB</span><span class="o">:</span><span class="n">AC</span><span class="o">:</span><span class="n">CC</span><span class="o">:</span><span class="mi">2</span><span class="n">D</span><span class="o">:</span><span class="n">E2</span><span class="o">:</span><span class="mi">37</span><span class="o">:</span><span class="mi">15</span><span class="o">:</span><span class="mi">9</span><span class="n">B</span><span class="o">:</span><span class="mi">24</span><span class="o">:</span><span class="mi">8</span><span class="n">C</span><span class="o">:</span><span class="n">BF</span><span class="o">:</span><span class="n">F2</span><span class="o">:</span><span class="mi">7</span><span class="n">D</span><span class="o">:</span><span class="mi">6</span><span class="n">A</span><span class="o">:</span><span class="n">B3</span><span class="o">:</span><span class="mi">81</span><span class="o">:</span><span class="mi">23</span><span class="o">:</span><span class="n">AA</span><span class="o">:</span><span class="mi">13</span><span class="o">:</span><span class="mi">54</span>
+<span class="n">a</span><span class="o">=</span><span class="n">setup</span><span class="o">:</span><span class="n">active</span>
+</code></pre></div>
+<p>对方是 active，也就是 DTLS Client，那么自己就只能是 DTLS Server，会由对方发起 DTLS ClientHello 开始DTLS过程。</p>
+<h3>Stream Direction</h3>
+<p>媒体流的方向有四种，分别是sendonly、recvonly、sendrecv、inactive，它们既可以出现在会话级别描述中也可以出现在媒体级别的描述中。</p>
+<ul>
+<li>sendonly 表示只发送数据，比如客户端推流到 SFU，那么会在自己的 Offer(or Answer) 中携带 senonly 属性  </li>
+<li>revonly 表示只接收数据，比如客户端向 SFU 订阅流，那么会在自己的 Offer(or Answer) 中携带 recvonly 属性  </li>
+<li>sendrecv 表示可以双向传输，比如客户端加入到视频会议中，既要发布自己的流又要订阅别人的流，那么就需要在自己的 Offer(or Answer) 中携带 sendrecv 属性  </li>
+<li>inactive 表示禁止发送数据，比如在基于 RTP 的视频会议中，主持人暂时禁掉用户 A 的语音，那么用户 A 的关于音频的媒体级别描述应该携带 inactive 属性，表示不能再发送音频数据。</li>
+</ul>
+<blockquote><p><em><strong>NOTE: <a href="https://tools.ietf.org/html/rfc4566%23section-6">RFC 4566</a>:senonly 和 recvonly 属性仅应用于媒体，不用于媒体控制相关的协议。比如在基于 RTP 的媒体会话中，即使是 recvonly 模式，也仍然要发送 RTCP 包，即使是 senonly 模式，也依然会接收并正常处理 RTCP 包。</strong></em></p>
+</blockquote>
+<p>媒体流方向的四个属性很重要，在组装 SDP 时要仔细校验，保证流方向的正确性。</p>
+<p>举个例子，客户端去订阅服务器的流。如果此时客户端的 Offer 携带的属性并不是 recvonly 而是 sendonly，那么即使在信令层面的确是订阅的语义，但是由于某些服务器对 SDP各属性的校验是十分全面和严格的（本该如此），这种场景下，服务器将不会发送媒体流到客户端，而且服务器回复的 Answer 可能根本不会携带 SSRC。</p>
+<h3>RTCP Feedback</h3>
+<p>下面，我们聊一下 rtcp-fb 这个媒体级别的 SDP 属性，它能告诉我们媒体会话能够对哪些 RTCP 消息进行反馈，是一个和 QoS 相关的重要的SDP 属性。</p>
+<div class="highlight"><pre><code><span></span><span class="n">m</span><span class="o">=</span><span class="n">video</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">96</span>
+<span class="n">a</span><span class="o">=</span><span class="n">mid</span><span class="o">:</span><span class="n">video</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">VP8</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">transport</span><span class="o">-</span><span class="n">cc</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">ccm</span><span class="w"> </span><span class="n">fir</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">nack</span><span class="w"> </span><span class="n">pli</span>
+</code></pre></div>
+<p>如上 SDP 信息，这是一个视频的 M 描述，VP8 编码，payload type 是 96。最后的 3 个 rtcp-fb 属性则说明了对于 96 这个 media codec 来讲，在网络拥塞控制方面支持 twcc；在 ARQ 方面支持 nack 处理，能够重传丢失的 RTP 包；在关键帧方面支持 fir 和 pli 处理，有能力进行关键帧的发送。</p>
+<p>在做 SIP 的时候，遇到过一个坑：向某台型号的 SIP 设备发送 PLI 请求后，并没有收到关键帧，经过一番折腾，最后发现，这台设备的 rtcp-fb描述如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">m</span><span class="o">=</span><span class="n">video</span><span class="w"> </span><span class="mi">16402</span><span class="w"> </span><span class="n">RTP</span><span class="o">/</span><span class="n">AVP</span><span class="w">  </span><span class="mi">34</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">34</span><span class="w"> </span><span class="n">H263</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">fmtp</span><span class="o">:</span><span class="mi">34</span><span class="w"> </span><span class="n">CIF4</span><span class="o">=</span><span class="mi">1</span><span class="p">;</span><span class="n">CIF</span><span class="o">=</span><span class="mi">1</span><span class="p">;</span><span class="n">QCIF</span><span class="o">=</span><span class="mi">1</span><span class="p">;</span><span class="n">SQCIF</span><span class="o">=</span><span class="mi">1</span>
+<span class="n">a</span><span class="o">=</span><span class="n">sendrecv</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:*</span><span class="w"> </span><span class="n">ccm</span><span class="w"> </span><span class="n">tmmbr</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:*</span><span class="w"> </span><span class="n">ccm</span><span class="w"> </span><span class="n">fir</span>
+</code></pre></div>
+<p>也就是说这台设备只支持 FIR 请求，没有处理 PLI 请求的能力（PS: 为什么没能早一些检查 SDP 的 rtcp 反馈能力，泪目）。在此也想着重强调一下：对于一些很专业严谨的系统或者设备而言，SDP 完全体现了它们所拥有的能力，也可以让我们发现其不具备的能力。SDP 的每一个属性都是有其存在意义的，万万不可忽略。</p>
+<blockquote><p><strong><em>Note: rtcp-fb 不能用于会话级别的描述中，只能用于媒体级别的描述，而且其 M 描述的 proto 字段一定要指定 AVPF。</em></strong><br>
+<strong><em>Note: 存在这种格式，a=rtcp-fb:<em> ccm fir，</em> 是一个通配符，表示该 M 描述下的所有类型的 media codec 都支持 fir 的处理和关键帧的反馈。</em></strong></p>
+</blockquote>
+<h3>Compare with SIP SDP</h3>
+<p>RTC 场景与 SIP 场景下的 SDP 描述的不同表现在传输、媒体、信令三个层面。</p>
+<p><strong>Transmission Level</strong></p>
+<ol>
+<li>建连流程。RTC 场景下的音视频媒体流建连流程一般是 ICE + DTLS，而 SIP 场景下没有这套建连流程，所以也没有 ICE/DTLS 相关的 SDP 属性，比如 ufrag、pwd、setup、fingerprint 等。</li>
+<li>端口复用。RTC 场景下一般都是音视频流以及 RTP/RTCP 复用单一端口，通过 SSRC 区分每一路流，通过数据包的头部字段值来区分RTP/RTCP，而 SIP 场景下不会复用端口，因此没有 rtcp-mux 属性，也没有 grouping 相关的属性，比如 BUNDLE，且音视频的 RTP 和 RTCP 都是独立端口进行传输，共有四个，所以天然可以使用端口来区分流以及 RTP/RTCP，因此也没有 SSRC 属性。</li>
+<li>链路探测。RTC 场景下一般通过 ICE 的 STUN 探测环节来发现对端经过 NAT 映射之后的出口地址，称为 srflx，而 SIP 场景下需要自己实现对端地址发现的功能，以获取到 SIP 设备经过 NAT 映射之后的出口地址。</li>
+<li>地址信息。RTC 场景下通过 SDP 的 candidate 交换对端地址信息，SIP 场景下通过 C line 的 ip 以及 M line 的端口来交换对端地址信息。</li>
+</ol>
+<div class="highlight"><pre><code><span></span><span class="c1">// RTC 场景</span>
+<span class="n">a</span><span class="o">=</span><span class="n">candidate</span><span class="o">:</span><span class="mi">1</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="n">udp</span><span class="w"> </span><span class="mi">2013266431</span><span class="w"> </span><span class="mf">30.27.136.138</span><span class="w"> </span><span class="mi">14306</span><span class="w"> </span><span class="n">typ</span><span class="w"> </span><span class="n">host</span>
+
+<span class="c1">// SIP 场景</span>
+<span class="n">c</span><span class="o">=</span><span class="n">IN</span><span class="w"> </span><span class="n">IP4</span><span class="w"> </span><span class="mf">30.41.5.131</span>
+<span class="n">m</span><span class="o">=</span><span class="n">audio</span><span class="w"> </span><span class="mi">2352</span><span class="w"> </span><span class="n">RTP</span><span class="o">/</span><span class="n">AVP</span><span class="w"> </span><span class="mi">107</span><span class="w"> </span><span class="mi">108</span><span class="w"> </span><span class="mi">114</span><span class="w"> </span><span class="mi">104</span><span class="w"> </span><span class="mi">105</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">18</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">101</span><span class="w"> </span><span class="mi">123</span>
+<span class="n">m</span><span class="o">=</span><span class="n">video</span><span class="w"> </span><span class="mi">2374</span><span class="w"> </span><span class="n">RTP</span><span class="o">/</span><span class="n">AVP</span><span class="w"> </span><span class="mi">97</span><span class="w"> </span><span class="mi">126</span><span class="w"> </span><span class="mi">96</span><span class="w"> </span><span class="mi">34</span><span class="w"> </span><span class="mi">123</span>
+</code></pre></div>
+<p><strong>Media Level</strong></p>
+<ol>
+<li>屏幕共享。SIP 场景下通过 BFCP 协议来进行屏幕共享的协商，通过 a=content 属性来区分主流（main）和共享流 （slides），而RTC 场景下通过外部/业务信令来进行屏幕共享的协商，主流和共享流的 SDP 描述一致，不会区分。</li>
+<li>Media Codec。目前，RTC 场景下的音视频编码普遍是 Opus + H.264/VP8，SIP 场景下，对于音频编码，有很多 SIP 设备并不支持 Opus，而采用比较古老的音频编码，比如 G722、PCMA、PCMU，对于视频编码，普遍支持 H.264，一般不支持 VP8。</li>
+</ol>
+<p><strong>Signaling Level</strong></p>
+<ol>
+<li>SDP 交换。都是 Offer/Answer 模型，RTC 场景下主要通过 HTTP/TCP 协议交换 SDP，一般是在 HTTP body 中携带 SDP 信息。SIP 场景下可以通过 UDP/TCP/TLS 协议交换 SDP，在 INVITE 和 200 OK 中携带 SDP 信息。</li>
+</ol>
+<h3>Summary</h3>
+<p>其实，SDP 文本化的协议格式本身很简单，其难点在于不同的应用场景（比如传统 SIP 视频会议或者 RTC 场景）下扩展出的纷繁复杂的属性及其含义，这些SDP 属性散落在众多的 RFC 以及草案之中，不下一定的功夫是很难做到全面理解与掌握的（PS：每当说到此处，心里总是一万个马奔腾，WebRTC 的 RFC太多了而且互相关联互相引用，看完这些 RFC 要准备好视力下降 0.2 度）。</p>
+<p>下一篇，我们会重点讲一下 WebRTC ICE，包括连通性检测、状态切换、trickle 以及 nomination。感谢阅读。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "WebRTC SDP详解和剖析.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

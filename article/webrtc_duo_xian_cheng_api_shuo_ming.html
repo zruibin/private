@@ -1,0 +1,697 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>WebRTC多线程API说明 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="WebRTC多线程API说明,C/C++,WebRTC,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="WebRTC多线程API说明" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>WebRTC多线程API说明</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2021-01-05 21:32
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+<a href='../article/tag_webrtc.html' class='article_tag'>WebRTC</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://blog.csdn.net/kenny_zh' target='blank'>WebRTC源代码探索之旅——多线程篇</a></p></h4>
+<p>随着CPU频率接近物理极限，多芯片、多核几乎成为了加速软件运行速度的唯一选择。与之相应地，多线程、异步编程以及并发编程成为了软件开发人员的必修课。因此，各种各样的开发框架不断涌现。在C++领域，boost的thread库等优秀的多线程框架也是其中的代表。特别是针对socket网络编程的boost.asio库可以轻松帮助开发人员实现多线程大量并发的网络服软件。</p>
+<p>与这些框架相比，WebRTC的多线程模型还是比较特别的。它的核心是类似于WSAWaitForMultipleEvents的多路信号分离器。这是我最喜欢的多线程模型。它使每条线程既可以处理消息（post、send），同时也可以处理多个IO。并且在必要的情况下让一条线程独占（管理）一些资源，避免过多的使用锁造成线程死锁。个人认为这种模型可以帮助开发人员更容易地实现快速响应的界面程序。</p>
+<p>WebRTC的线程模块放在/trunk/talk/base目录下，namespace使用rtc::。主要涉及criticalsection、event、messagequeue、thread、messagehandler、physicalsocketserver等文件。顺便提一下，现在网上仅有的几篇关于WebRTC或是libjingle的文章多数从Sigslot开始讲解，但是我不打算现在对Sigslot进行展开，因为它还是很好理解的。不明白的朋友可以上网查询一下，或者姑且就把它当做函数回调（更精确地说它实现了C#的delegate）就可以了。在rtc的多路信号分离器中只有少数几个地方使用了Sigslot，即使忽略它也不影响对多路信号分离器的理解。</p>
+<h3>1 event</h3>
+<p>event.h/event.cc文件中只有rtc::Event类。</p>
+<h4>1.1 rtc::Event</h4>
+<p>该类主要实现了跨平台的Win32 Event功能（正如前言中所说，本文假定读者已经很熟悉Win32平台的各种组件，如有不明白的地方可以参考MSDN）。rtc::Event类的各个成员函数与Win32 Event所提供的API几乎一致，所以不再多做解释。</p>
+<p>在Linux系统中，WebRTC使用了mutex和条件变量来实现Event的功能。首先，我将对Win 32 API和pthread API做一下类比：</p>
+<h5>CreateEvent</h5>
+<p><code>pthread_mutex_init</code>、<code>pthread_cond_init</code>这两个函数用来创建pthread的mute和条件变量。</p>
+<h5>CloseHandle</h5>
+<p><code>pthread_mutex_destroy</code>、<code>pthread_cond_destroy</code>这两个函数用来销毁pthread的mute和条件变量。</p>
+<h5>SetEvent</h5>
+<p><code>pthread_mutex_lock</code>、<code>pthread_mutex_unlock</code>这两个函数加锁和解锁mutex，<code>pthread_cond_broadcast</code>函数用来解除所有等待在该条件变量上的线程的阻塞状态。</p>
+<h5>ResetEvent</h5>
+<p><code>pthrea_mutex_lock</code>、<code>pthread_mutex_unlock</code>（已解释）</p>
+<h5>WaitForSingleObject</h5>
+<p><code>pthrea_mutex_lock</code>、<code>pthread_mutex_unlock</code>（已解释）。<code>pthrea_cond_wait</code>函数用来使线程阻塞在条件变量上。</p>
+<p>下面我将大致解释一下rtc::Event类的实现原理：</p>
+<p><code>rtc::Event</code>的主要功能由条件变量实现，mutex只是辅助条件变量起到锁的作用。条件变量的<code>pthread_cond_wait</code>和<code>pthread_cond_broadcast</code>函数与Win32 Event的WaitForSingleObject和SetEvent基本类似。<code>rtc::Event</code>是否为signal状态由布尔类型的成员变量<code>event_status_</code>控制。是否为manual reset的Event由布尔类型的成员变量<code>is_manual_reset_</code>控制。与Win32 Event不同的状况主要体现在Event的manual reset控制上。</p>
+<p>Linux系统下所有调用<code>rtc::Event::Wait</code>函数的线程会阻塞在<code>pthread_cond_wait</code>函数上。当rtc::Event::Set函数被调用时，<code>pthread_cond_broadcast</code>函数会解除所有等待在<code>pthread_cond_wait</code>函数上的线程的阻塞状态。这对于manual reset的Win32 Event来说没什么问题，问题出在auto reset的Win32 Event上。Auto reset的Win32 Event每次只能解除一条等待在Event上的线程的阻塞状态，其他线程依然为阻塞状态。这就需要mutex来配合实现了。</p>
+<p>在这里要重点解释一下<code>pthread_cond_wait</code>函数的第二个参数<code>pthread_mutex_t *mutex</code>。当线程进入<code>pthread_cond_wait</code>函数时会解锁mutex，而在离开pthread_cond_wait时会重新加锁mutex。可以理解为：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">pthread_cond_wait</span><span class="p">(</span><span class="n">pthread_cond_t</span><span class="w"> </span><span class="o">*</span><span class="n">cond</span><span class="p">,</span><span class="n">pthread_mutex_t</span><span class="w"> </span><span class="o">*</span><span class="n">mutex</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">pthread_mutex_unlock</span><span class="p">(</span><span class="n">mutex</span><span class="p">);</span>
+<span class="w">  </span><span class="err">…</span>
+<span class="w">  </span><span class="err">…</span>
+<span class="w">  </span><span class="err">…</span>
+<span class="w">  </span><span class="n">pthread_mutex_lock</span><span class="p">(</span><span class="n">mutex</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这是Win32 没有的行为，需要特别注意。</p>
+<p>有了以上的机制后，模拟auto rest的Win32 Event就没问题了。当第一条线程获得mutex锁并离开<code>pthread_cond_wait</code>函数时，其他线程会依然被阻塞在<code>pthread_mutex_lock(mutex)</code>函数上，无法离开<code>pthread_cond_wait</code>函数。那条成功离开线程会马上检测当前的<code>rtc::Event</code>是否为manual reset的，如果不是就马上将<code>event_status_</code>成员变量设置为false，并解锁mutex。这时其他线程才能有机会离开<code>pthread_cond_wait</code>函数。不过当他们离开<code>pthread_cond_wait</code>后立即检测<code>event_status_</code>成员变量，如果为false就重新调用<code>pthread_cond_wait</code>函数。这就完美实现了Win32 Event的auto reset的语义。</p>
+<p>条件变量和mutex的配合是<code>rtc::Event</code>类的难点。如果读者还是不能完全理解，请仔细阅读以上3段的内容（也可以上网查找<code>pthread_cond_wait</code>函数），并结合event.cc的源代码反复揣摩，应该可以很快理解的（毕竟代码不多，而且也不是WebRTC中真正困难的部分），我就不再多做解释了（在后面的部分我会提供独立编译<code>\trunk\talk\base\</code>目录下的源代码的makefile脚本，读者可以编译后添加调试代码分析<code>rtc::Event</code>的原理）。</p>
+<p>在分析了<code>rtc::Event</code>的源代码之后有个疑问，那就是为什么不用<code>pthread_cond_signal</code>函数实现Win32 Event的auto reset语义？由于时间的原因暂且不做深入地研究。</p>
+<h3>2 crticalsection</h3>
+<p>criticalsection.h/criticalsection.cc文件中包含了3个类<code>rtc::CriticalSection</code>、<code>rtc::CritScope</code>和<code>rtc::TryCritScope</code>。这3个类对于有多线程编程经验的Windows开发人员来说都是非常容易理解的。基本上就是对Win32 CriticalSection的简单封装。</p>
+<h4>2.1 rtc::CriticalSection</h4>
+<p>rtc::CriticalSection主要实现了跨平台实现临界区的功能。在Linux平台上使用了pthread的mutex模拟Win32的Critical Section。以下对比一下API：</p>
+<h5>InitializeCriticalSection</h5>
+<p>pthread的mutex初始化略比Win32的CriticalSection复杂一些。<code>pthread_mutexattr_init</code>函数用来初始化一个mutex属性变量。<code>pthread_mutexattr_settype</code>函数用来设置mutex的各种属性。在rtc::CriticalSection中为mutex设置了<code>PTHREAD_MUTEX_RECURSIVE</code>。通过网上查询该属性被描述为：</p>
+<blockquote><p>“如果一个线程对这种类型的互斥锁重复上锁，不会引起死锁，一个线程对这类互斥锁的多次重复上锁必须由这个线程来重复相同数量的解锁，这样才能解开这个互斥锁，别的线程才能得到这个互斥锁。如果试图解锁一个由别的线程锁定的互斥锁将会返回一个错误代码。如果一个线程试图解锁已经被解锁的互斥锁也将会返回一个错误代码。这种类型的互斥锁只能是进程私有的（作用域属性为PTHREAD_PROCESS_PRIVATE）。”</p>
+</blockquote>
+<p>通过设置不同的属性pthread mutex可以实现很多不同的特性。如果读者有兴趣可以上网查询一下不同的属性的意义。不过需要注意到的是在rtc::Event类中没有mutex属性，直接使用默认值创建了mutex。接着使用rtc::CriticalSection使用<code>pthread_mutex_init</code>函数创建了mutex。最后请不要忘记调用<code>pthread_mutexattr_destroy</code>将mutex属性变量销毁掉。</p>
+<h5>DeleteCriticalSection</h5>
+<p><code>pthread_mutex_destroy</code>函数用以销毁mutex。</p>
+<h5>EnterCriticalSection</h5>
+<p><code>pthread_mutex_lock</code>函数用以对mutex加锁。</p>
+<h5>TryEnterCriticalSection</h5>
+<p><code>pthread_mutex_trylock</code>函数用以尝试对mutex加锁，如果加锁成功就返回true，失败就返回false。</p>
+<h5>LeaveCriticalSection</h5>
+<p><code>pthread_mutex_unlock</code>函数用以解锁mutex.</p>
+<p>在rtc::CriticalSection中有个调试宏<code>CS_TRACK_OWNER</code>。如果使用了这个宏，rtc::CriticalSection可以使用CurrentThreadIsOwner函数用来判断是否是在当前线程加锁。在的段落重点提到过rtc::CriticalSection使用<code>PTHREAD_MUTEX_RECURSIVE</code>属性来创建mutex，该属性导致在另一个线程线程(非加锁线程)解锁mutex会返回一个错误。</p>
+<h4>2.2 rtc::CritScope</h4>
+<p>利用构造函数加锁rtc::CriticalSection；并利用析构函数在退出代码块的时候解锁rtc::CriticalSection。该手法对于所有C++开发人员并不陌生。</p>
+<h4>2.3 rtc::TryCritScope</h4>
+<p>类似于rtc::CritScope，利用构造函数尝试加锁rtc::CriticalSection；并利用析构函数在退出代码块的时候解锁rtc::CriticalSection。</p>
+<h3>3 messagehandler</h3>
+<p>messagehandler.h/messagehandler.cc文件仅仅定义了rtc::MessageHandler类，和一个模板工具类rtc::FunctorMessageHandler类。</p>
+<h4>3.1 rtc::MessageHandler</h4>
+<p>rtc::MessageHandler类的主要功能是定义了消息处理器的基本数据结构，子类在继承了该类之后要重载OnMessage函数，并实现消息响应的逻辑。</p>
+<h4>3.2 rtc::FunctorMessageHandler</h4>
+<p>rtc::FunctorMessageHandler类的主要功能是将一个函数投递到目标线程执行。该类主要通过functor模板实现（熟悉C++的读者应该不会对它陌生，不熟悉的可以上网查找），而且定义了一个针对返回值类型为void的函数的特化版本（模板的特化和偏特也应该是一个C++程序员掌握的一个知识点，该语法有些难度）。用户不需要创建或者继承rtc::FunctorMessageHandler类，仅需调用rtc::Thread::Invoke函数就能使用它的功能。</p>
+<h3>4 messagequeue</h3>
+<p>messagequeue.h/messagequeue.cc文件是多路信号分离器的重要组成部分。它实现了消息一个完整地消息队列，该队列包括立即执行消息队列、延迟执行消息队列和具有优先级的消息队列。其中，rtc::MessageQueue类也是rtc::Thread类的基类。所以，所有的WebRTC的线程都是支持消息队列的。</p>
+<h4>4.1 rtc::MessageQueueManager</h4>
+<p>rtc::MessageQueueManager类是一个全局单例类。这个类看似比较复杂，但是功能其实非常简单——仅仅为了在所有的rtc::MessagerQueue中删除与指定的rtc::MessageHandler相关的消息。WebRTC的消息队列在发送消息的时候要指定消息处理器（rtc::MessageHandler）。如果某个消息处理器被析构，那么与之相关的所有消息都将无法处理。所以，创建了这个全局单例类来解决这个问题（见rtc::MessageHandler析构函数）。</p>
+<p>rtc::MessageQueueManager的代码没有涉及任何跨平台的API调用，而且本身功能也非常简单。所以我就不讨论它如何使用std::vector管理rtc::MessageQueue。唯一需要注意的就是rtc::MessageQueueManager如何保证自己在第一个rtc::Thread类实例化之前完成rtc::MessageQueueManager全局单例的实例化。这当中有个有趣的状况，rtc::MessageQueueManager在保证了自己必然在第一条子线程被创建之前自己被实例化，rtc::MessageQueueManager:: Instance函数内部没有使用任何锁来保护rtc::MessageQueueManager::instance_实例的创建。</p>
+<p>如前面所说，rtc::MessagerQueue是rtc::Thread的基类。在创建rtc::Thread时必然会调用rtc::MessagerQueue的构造函数。在rtc::MessagerQueue的构造函数中调用了rtc::MessageQueueManager::Add函数，而该函数会使用rtc::MessageQueueManager::Instance函数创建rtc::MessagerQueueManager的实例。由于rtc::ThreadManager保证了在创建第一个子线程之前，主线程会被包装成rtc::Thread对象，所以rtc::MessageQueueManager必然可以将主线程作为第一个rtc::MessageQueue对象纳入管理。</p>
+<p>以上的描述可能比较晦涩难懂，这是因为整个流程涉及到了rtc::Thread和rtc::ThreadManager等类。而这些都是尚未讲解过他们的代码。不过即使看不明白也没关系，我会在讲解完所有相关类之后演示2段范例代码，并将范例代码的调用栈完全展开。看过范例代码后绝大多数读者都应该能够明白rtc::MessageQueueManager的原理。</p>
+<p>rtc::MessageQueueManager还有最后一个问题，那就是它什么时候被析构。rtc::MessageQueue的析构函数会调用rtc::MessageQueueManager::Remove函数，并且“理论上来说”在最后一个rtc::MessageQueue从队列中移除之后会析构rtc::MessageQueueManager。既然，所有的线程都被移除，那就意味着rtc::MessageQueueManager实例在被delete时重新回到了单线程的环境，所以也没有任何锁的保护。</p>
+<h4>4.2 MessageData</h4>
+<p>这一节的内容将包括rtc::MessageData类以及多个它的子类和几个工具函数。这些类和函数都很简单，所以就不介绍代码和原理，仅仅罗列一下它们的功能。</p>
+<h5>4.2.1 rtc::MessageData</h5>
+<p>定义了基类，并将析构函数定义为虚函数。</p>
+<h5>4.2.2 rtc::TypedMessageData</h5>
+<p>使用模板定义的rtc::MessageData的一个子类，便于扩展。</p>
+<h5>4.2.3 rtc::ScopedMessageData</h5>
+<p>类似于rtc::TypedMessageData，用于指针类型。在析构函数中，自动对该指针调用delete。</p>
+<h5>4.2.4 rtc::ScopedRefMessageData</h5>
+<p>类似于rtc::TypedMessageData，用于引用计数的指针类型。</p>
+<h5>4.2.5 rtc::WrapMessageData函数</h5>
+<p>模板函数，便于创建rtc::TypedMessageData</p>
+<h5>4.2.6 rtc::UseMessageData函数</h5>
+<p>模板函数，用于将rtc::TypedMessageData中的Data取出</p>
+<h5>4.2.7 rtc::DisposeData</h5>
+<p>这是一个很特殊的消息，用以将某个对象交给消息引擎销毁。可能的用途有2个：1. 有些函数不便在当前函数范围内销毁对象，见范例rtc::HttpServer::Connection::~Connection；2.某对象属于某一线程，因此销毁操作应该交给所有者线程（未见范例）。WebRTC用户不需要自行使用该类，调用rtc::MessageQueue::Dispose函数即可使用它的功能。</p>
+<p>以上7个类或函数的实现非常简单，有C++使用经验的读者非常容易就能理解（标准库中就有相似的类）。</p>
+<h4>4.3 Message</h4>
+<p>这一节将简单介绍一下3个类：rtc::Message、rtc::DelayedMessage和rtc::MessageList。</p>
+<h5>4.3.1 rtc::Message</h5>
+<p>定义了消息的基本数据结构。</p>
+<h5>4.3.2 rtc::DelayedMessage</h5>
+<p>定义了延迟触发消息的数据结构。在rtc::MessageQueue中，延迟消息被存放在以rtc::DelayedMessage::msTrigger_排序（rtc::DelayedMessage类定义了operator&lt;）的队列中。如果2个延迟消息的触发时间相同，响应顺序按先进先出原则。</p>
+<p>这里我将简单介绍一下各个成员变量的用途：</p>
+<p><code>cmsDelay_</code>：延迟多久触发消息，仅作调试使用</p>
+<p><code>msTrigger_</code>：触发消息的时间</p>
+<p><code>num_</code>：添加消息的时间</p>
+<p><code>msg_</code>：消息本身</p>
+<p>在使用延迟消息时，不需要自行构建rtc::DelayedMessage实例。直接调用rtc::MessageQueue::PostDelayed或者rtc::MessageQueue::PostAt函数即可。</p>
+<h5>4.3.3 rtc::MessageList</h5>
+<p>消息列表，定义为std::list<rtc::Message></p>
+<h4>4.4 rtc::MessageQueue</h4>
+<p>现在我们正式进入多线程篇最为激动人心的部分——多路信号分离器的消息队列组件。WebRTC的多路型号分离器由2部分组成：消息队列和rtc::SocketServer（主要实现就是rtc::PhysicalSocketServer）。消息队列负责接受消息，并使用消息处理器（rtc::MessageHandler的子类）处理消息。在处理完所有消息后，消息队列调用rtc::SocketServer::Wait函数阻塞等待新的IO信号。如果有新的消息进入，消息队列会调用rtc::SocketServer::WakeUp唤醒rtc::SocketServer阻塞等待。这就是消息队列和rtc::SocketServer协同工作的基本流程。</p>
+<p>让我们先来看一下，消息队列的实现。消息队列的主要功能是接收和处理消息，并作为rtc::Thread的基类出现。</p>
+<p>它的主要部件（成员变量）包括：</p>
+<p><code>ss_</code>：协同工作的rtc::SocketServer</p>
+<p><code>default_ss_</code>：默认的rtc::SocketServer。如果在构造的时候提供talb<em>base::SocketServer，那么消息队列就使用用户提供的；如果没有提供，消息队列就初始化一个rtc::PhysicalSocketServer并保存在`default_ss</em><code>上，然后赋值给</code>ss<em><code>。在消息队列析构的时候，如果</code>default_ss</em>`保存有默认构造rtc::PhysicalSocketServer，那就销毁它</p>
+<p><code>msgq_</code>：消息队列，队列内的消息按照先进先出的原则立即执行</p>
+<p><code>dmsgq_</code>：延迟消息队列，队列内的消息按照指定的时间延迟执行</p>
+<p>接着，我们来看一下rtc::MessageQueue的主要成员函数：</p>
+<p><strong>rtc::MessageQueue::Get：等待接收消息。</strong></p>
+<p>参数说明：</p>
+<blockquote><p>pmsg：存放消息的指针，用于返回消息
+cmsWait：等待的时间，kForever表示无限等待
+process_io：是否要求rtc::SocketServer处理IO信号</p>
+</blockquote>
+<p><strong>rtc::MessageQueue::PostDelayed：发送一个延迟消息（从当前时间计算延迟处理时间）</strong></p>
+<p>参数说明：</p>
+<blockquote><p>cmsDelay：延迟毫秒数
+phandler：消息处理器（rtc::MessageHandler的子类）
+id：消息ID
+pdata：MessageData指针</p>
+</blockquote>
+<p><strong>rtc::MessageQueue::PostAt：发送一个延迟消息（直接指定延迟处理时间）</strong></p>
+<p>参数说明：</p>
+<blockquote><p>tstamp：消息触发的时间
+phandler：消息处理器（rtc::MessageHandler的子类）
+id：消息ID
+pdata：MessageData指针</p>
+</blockquote>
+<p><strong>rtc::MessageQueue::Clear：通过指定rtc::MessageHandler和消息ID删除消息</strong></p>
+<p>参数说明：</p>
+<p>phandler：指定被删除消息的rtc::MessageHandler</p>
+<blockquote><p>id：指定被删除消息的ID；如果该id为MQID_ANY所有与phandler相关的消息都将被删除
+removed：返回所有被删除消息的列表</p>
+</blockquote>
+<p><strong>rtc::MessageQueue::GetDelay：从现在到下一条将要触发的延迟消息的触发时间的毫秒数（无参数）</strong></p>
+<p><strong>rtc::MessageQueue::Dispose：请求消息引擎删除一个对象（delete对象指针）</strong></p>
+<p>参数说明：</p>
+<blockquote><p>doomed：将要被删除的对象的指针</p>
+</blockquote>
+<p>rtc::MessageQueue::SignalQueueDestroyed（signal slot）：通知接收者（observer）消息队列将要删除（参数无）</p>
+<p>rtc::MessageQueue类的核心是rtc::MessageQueue::Get函数。Get函数的主循环首先检查<code>dmsgq_</code>和<code>msgq_</code>是否有立即需要处理的消息。如果检查到需要立即处理的消息，就马上将该消息返回。如果没有检查到需要立即处理的消息，那么线程就阻塞等待在rtc::SocketServer::Wait函数上。如果阻塞等待期间有新的消息进入队列或者线程需要停止退出，通过rtc::SocketServer::WakeUp函数唤醒被阻塞的rtc::SocketServer::Wait函数。从rtc::SocketServer::Wait函数返回后，rtc::MessageQueue::Get函数会重新检查是否有可以返回的消息，如果没有则再次阻塞等待在rtc::SocketServer::Wait函数上。以上流程如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210105-213200-1.png" alt=""></p>
+<p>rtc::MessageQueue的原理大致如此。如果读者结合代码依然无法理解，我会在多线程篇的最后给出几段范例代码，并完整地展开所有函数的调用序列和调用栈。相信到时候大多数读者都能够理解WebRTC的线程架构是如何工作的。</p>
+<h3>5 physicalsocketserver</h3>
+<p>physicalsocketserver.h/physicalsocketserver.cc文件实现了一个基本的多路信号分离器。这个多路信号分离器的实现代码可以横跨Windows、Linux、OSX、Android、ios等平台，非常复杂。其实在/trunk/talk/base目录下，还有多个SocketServer的实现，从这些SocketServer的名字就可以看出是针对哪些平台特化实现，比如rtc::MacCocoaSocketServer。在这里我就不对这些SocketServer进行分析，只要能够明白rtc::PhysicalSocketServer的原理，再加上对平台API的了解应该很容易读懂这些平台特化的SocketServer。</p>
+<p>在该文件中将大量使用socket相关的系统调用。由于本篇章的内容为多线程编程，所以尽量不做过多的涉及，并且忽略引用其他文件定义的socket相关类（比如rtc::PhysicalSocket）。</p>
+<h4>5.1 rtc::Dispatcher</h4>
+<p>该类定义了事件分发器的纯虚基类。事件分发器主要是将IO或Event信号对应到一定的处理函数上去。该纯虚基类在Windows和Posix2个平台下定义的函数接口有很大的区别。但是主要的功能大致差不多。</p>
+<h4>5.2 rtc::PhysicalSocket</h4>
+<p>该类是physicalsocketserver.cc文件的内部私有的类，不对外暴露，它主要是对Socket的跨平台封装。由于Windows也提供了基本和BSDsocket一致的Socket API所以该类的代码不难理解。</p>
+<p>rtc::PhysicalSocket的主要组件包括：</p>
+<p><code>s_</code>：socket句柄/文件描述符</p>
+<p><code>enabled_events_</code>：需要监听的IO事件</p>
+<p><code>udp_</code>：通信方式是否为UDP</p>
+<p><code>error_</code>：最后出错码（Last Error）</p>
+<p><code>state_</code>：连接状态</p>
+<p><code>resolver_</code>：异步的网址解析器</p>
+<p>rtc::PhysicalSocket的主要成员函数包括：</p>
+<p>构造函数：创建并初始化rtc::PhysicalSocket对象</p>
+<p>参数说明：</p>
+<blockquote><p>ss：管理的rtc::SocketServer
+s：封装的系统socket句柄/文件描述符；如果不提供该参数， rtc::PhysicalSocket将创建一个；如果提供rtc::PhysicalSocket将对其进行封装</p>
+</blockquote>
+<p>rtc::PhysicalSocket::Create：创建系统socket句柄/文件描述符</p>
+<p>参数说明：</p>
+<blockquote><p>family：socket的寻址方案（AF_INET/AF_INET6）；从这个参数可以看出WebRTC是支持IPV6的
+type：socket的类型（TCP/UDP）</p>
+</blockquote>
+<p>rtc::PhysicalSocket::Connect：连接指定的地址和端口，如果地址尚未解析，调用异步的地址解析器</p>
+<p>参数说明：</p>
+<blockquote><p>addr：需要连接的地址（使用rtc::SocketAddress，该类包括地址和端口号）</p>
+</blockquote>
+<p>rtc::PhysicalSocket::EstimateMTU：获取socket连接的MTU（最大传输单元）</p>
+<p>参数说明：</p>
+<blockquote><p>mtu：返回最大传输单元
+返回值：出错码</p>
+</blockquote>
+<p>原理：</p>
+<p>Windows平台调用Ping库获取</p>
+<p>IOS和OSX平台没有简单地方法获取，直接返回出错</p>
+<p>Linux平台调用getsockopt(s_,IPPROTO_IP, IP_MTU, &amp;value, &amp;vlen)获取</p>
+<p>由于Windows提供了基本和BSD socket一致的API，所以在Windows的代码和Linux的代码几乎一致。一下将简单对比一下API：</p>
+<blockquote><p>socket、getsocketname、getpeername、bind、connect、recv、recvfrom、accept、closesocket</p>
+</blockquote>
+<p>Linux平台下完全一致</p>
+<blockquote><p>getsockopt、setsockopt</p>
+</blockquote>
+<p>Linux平台下完全一致（仅有一些特殊的选项不同）</p>
+<blockquote><p>send、sendto</p>
+</blockquote>
+<p>在Linux平台下将最后一个参数flag设置为MSG_NOSIGNAL，屏蔽SIGPIPE</p>
+<p>rtc::PhysicalSocket需要注意2点：</p>
+<ol>
+<li><p>虽然它继承自rtc::AsyncSocket，但是它管理的内部系统socket句柄/描述符是阻塞的（它的子类rtc::SocketDispatcher会将系统socket句柄/描述符转为非阻塞的）。继承自rtc:: AsyncSocket的原因可能是为了避免多继承造成类继承结构过于复杂。</p>
+</li>
+<li><p>虽然该类具有很多和rtc::SocketServer相关的成员变量和成员函数，但是rtc::PhysicalSocketServer不能直接管理rtc::PhysicalSocket。能被rtc::PhysicalSocketServer管理的是rtc::PhysicalSocket的一个子类rtc::SocketDispatcher，它也是一个physicalsocketserver.cc内部私有的一个类。</p>
+</li>
+</ol>
+<p>当然以上这2点只是实现的细节问题，这些类都是不对外暴露的，我们仅仅需要懂得如何使用对外暴露的接口就可以了。</p>
+<h4>5.3 rtc::EventDispatcher</h4>
+<p>rtc::EventDispatcher类实现了跨平台的等价于Win32自动重置（autoreset）WSAEvent的功能。在Windows平台上有网络多线程开发经验的读者应该很熟悉WSAEvent，我就不再多做介绍了。</p>
+<p>我在1.1节讲解过rtc::Event类。那rtc::PhysicalSocketServer还需要rtc::EventDispatcher来模拟Event呢？这是应为rtc::Event仅仅实现了Win32的WaitForSingleObject函数的功能，这无法应用到多路信号分离器里面去。多路信号分离器需要有能力在一个阻塞函数里等待多个event和IO信号的能力，在Windows平台上就是WSAWaitForMultipleEvents函数的功能。</p>
+<p>与之相类似的在Linux平台上可以使用的API有select函数，不过select函数只能等待IO信号不能等待其他Event。这就很难实现一个阻塞函数同时等待IO信号和消息队列的功能。这对于网络服务器端的开发并不是非常重要，但是对于图形用户界面客户端的开发没有这个功能有时会变得很麻烦。而rtc::EventDispatcher的职责就是为我们模拟出这个功能。</p>
+<p>既然select函数已经具有了我们需要的一半功能，怎样才能获得另一半功能呢？比较直接的方法就是将一个event的signal语义转化为IO信号，是的WebRTC就是这么做的。Linux版本的rtc::EventDispatcher的一个成员变量是一对管道（pipe）的文件描述符。如果需要signal一个rtc::EventDispatcher，只要对这个管道发送一个字节（内容无所谓），就能打开select函数的阻塞状态。紧接着rtc::EventDispatcher会立即将管道内的数据读出，rtc::EventDispatcher重新回到unsignal的状态。这就实现了event的auto reset语义。当然，这种实现并不完美，比如说多个select等待在同一个rtc::EventDispatcher上就会出问题。WebRTC的开发人员也明白这一点，所以对rtc::EventDispatcher加上了以下注释：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// It is not possible to perfectly emulate an auto-resetting event with</span>
+<span class="c1">// pipes.  This simulates it byresetting before the event is handled.</span>
+</code></pre></div>
+<p>虽然存在以上的问题，但这并不影响rtc::EventDispatcher配合rtc::PhysicalSocketServer的工作。因为每一个rtc::EventDispatcher实例仅隶属于一个rtc::PhysicalSocketServer，所以不存在多个rtc::PhysicalSocketServer等待同一个rtc::EventDispatcher的状况。这也可能是为什么rtc::EventDispatcher是physicalsocketserver.cc文件私有的原因。</p>
+<p>通过上面的讲解我们应该可以理解Linux版的rtc::EventDispatcher的工作原理。以下我将Windows版本和Linux版本的API调用做一下简单类比：</p>
+<p><strong>WSACreateEvent</strong></p>
+<blockquote><p>pipe函数，用于创建管道</p>
+</blockquote>
+<p><strong>WSACloseEvent</strong></p>
+<blockquote><p>close函数，用于关闭管道</p>
+</blockquote>
+<p><strong>WSASetEvent</strong></p>
+<blockquote><p>write函数，向管道内写入一个字节数据，用以解锁阻塞的select函数</p>
+</blockquote>
+<p><strong>WSAResetEvent</strong></p>
+<blockquote><p>read函数，从管道内读出所有数据，清除管道的可读状态，下次调用select函数时恢复阻塞</p>
+</blockquote>
+<h4>5.4 rtc::PosixSignalHandler</h4>
+<p>rtc::PosixSignalHandler和rtc::PosixSignalDispatcher这两个类只有Linux版本。并且在整个WebRTC的源代码中没有任何地方使用过这两个类。因此，对它们的代码分析主要是为了帮助Windows开发人员从实用的角度学习如何使用Linux平台下的部件。</p>
+<p>rtc::PosixSignalHandler类主要实现了将Linux的Signal机制纳入到多路分离器的架构中去。对于Windows开发人员来说，Signal机制是一个比较陌生的东西。而且对它的处理比较麻烦。因为Signal会在程序运行的任何时候出现，一旦触发就会调用注册的处理函数，开发人员没法假定这时程序中哪些工具是否可用。正如在rtc::PosixSignalHandler::OnPosixSignalReceived函数的注释中所说的在出错的时候我们甚至无法记录log：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// Nothing we can do here. If there&#39;s an error somehow then there&#39;s</span>
+<span class="c1">// nothing we can safely do from a signal handler.</span>
+<span class="c1">// No, we can&#39;t even safely log it.</span>
+</code></pre></div>
+<p>此外，Linux的有些signal相关的函数在不同版本的Linux/Unix平台以及的表现完全不同。因为，signal机制是一个古老的历史遗留问题，在当年Unix主导一切，各个大公司又各自为战的年代，要提供一个公认完备的标准确实不易。幸运的是从WebRTC的代码来看，几乎没有什么组件使用了signal机制，那就说明绝大多数的现代程序都是可以不使用signal机制就能实现自己想要的功能的。</p>
+<p>首先，让我们来看一下rtc::PosixSignalHandler类的工作原理。它被伪装成了一个singleton，而它其实是一个全局唯一的对象，创建后永不释放，直到程序退出时内存泄露。注意，这不是开发人员不小心泄露了内存，而是主动的泄露了内存。在WebRTC中有一个专用的宏（<code>LIBJINGLE_DEFINE_STATIC_LOCAL</code>）用来定义定义这种类实例。如果，在程序中有限的几个类实例被设置成<code>LIBJINGLE_DEFINE_STATIC_LOCAL</code>理论上来说是没有什么负面效果的。因为它不会造成程序在运行期间不断地积累内存泄露直到拖垮整个系统。但是使用这种手法依然需要谨慎。在使用rtc::PosixSignalHandler的时候，rtc::PhysicalSocketServer会将 rtc::PosixSignalHandler::OnPosixSignalReceived函数通过sigaction注册到系统以响应感兴趣signal。当系统发出被监听的signal后OnPosixSignalReceived函数会被调用。该函数会在成员变量<code>received_signal_</code>（数组）中相应的位置上设置为true，并在pipe中写入1个字节的数据（是的，它的核心工作原理和rtc::EventDispatcher是一样的），这样就能解锁阻塞等待在select函数上的rtc::PhysicalSocketServer。rtc::PhysicalSocketServer通过rtc::PosixSignalHandler::IsSignalSet函数来检查<code>received_signal_</code>数组以确定哪个signal被激活，并调用相应的处理函数。</p>
+<p>在rtc::PosixSignalHandler中主要使用的Linux API包括：</p>
+<p>pipe：创建管道</p>
+<p>fcntl：设置文件描述符的选项；该函数在构造函数中被调用，将新创建的一对pipe文件描述符设置为非阻塞。调用代码为：fcntl(afd_[0], F_SETFL, O_NONBLOCK)。不过，根据EventDispatcher构造函数的代码来看，这一步好像没有必要。考虑到EventDispatcher是一个被重度使用的对象，可以确信没有必要把pipe的文件描述符设置为非阻塞（pipe默认应该就是阻塞的，并且在绝大多数系统中IO默认都是阻塞的）。</p>
+<p>read：从管道读出数据，解除管道文件描述符的可读状态（该函数在rtc::PosixSignalDispatcher中使用）</p>
+<p>write：向管道写入数据，以解锁阻塞的select函数</p>
+<p>close：关闭管道</p>
+<p>sigaction：将signal处理函数注册到系统，当signum指定编号的signal触发时，系统会调用相应的处理函数（该函数在rtc::PhysicalSocketServer::InstallSignal中使用）</p>
+<h4>5.5 rtc::PosixSignalDispatcher</h4>
+<p>该类也是Linux独有的一个类，主要是作为代表rtc::PosixSignalHandler的分发器，通过将该对象添加入rtc::PhysicalSocketServer可以将实现接收PosixSignal。它的原理已经在上一节rtc::PosixSignalHandler中讨论过了，这里就不再多做分析。它的主要函数如下：</p>
+<p><strong>rtc::PosixSignalDispatcher::SetHandler：将signal的响应函数加入到分发器</strong></p>
+<p>参数说明：</p>
+<blockquote><p>signum：需要响应的signal编号
+handler：当signal触发时，响应的处理函数</p>
+</blockquote>
+<h4>5.6 rtc::SocketDispatcher</h4>
+<p>rtc::SocketDispatcher类主要将rtc::PhysicalSocket封装成一个分发器。所以，在实现上该类仅仅就是为rtc::PhysicalSocket添加一些rtc::Dispatcher接口需要的一些成员函数，以及一些状态维护代码。仅有在Linux版本仅有的成员函数rtc::SocketDispatcher::IsDescriptorClosed中有些比较特殊的情况。通过这个函数中的注释我们发现尚无一些可靠的手段判断一个socket文件描述符是否已经被关闭，所以实现代码使用了::recv(s_, &amp;ch, 1, MSG_PEEK)来判断。在Window版本的rtc::SocketDispatcher中没有这个成员函数。除此之外，rtc::SocketDispatcher类的Windows实现和Linux实现基本一致。以下对比一下2个平台API调用的情况：</p>
+<p><strong>ioctlsocket</strong></p>
+<p>fcntl函数用于设置文件描述符的选项（比如阻塞或非阻塞）</p>
+<h4>5.7 rtc::FileDispatcher</h4>
+<p>rtc::FileDispatcher类是一个Linux平台独有的类，它的功能是简单将文件描述符封装成Dispatcher。不过它在WebRTC中基本上没有使用过。该类在创建的时候（构造函数中），接受并保存文件描述符，并通过fcntl函数将文件描述符设置为非阻塞。此外它还实现了一些rtc::Dispatcher接口要求的一些函数，并维护一些状态变量。该类并没有什么难点。</p>
+<h4>5.8 rtc::Signaler</h4>
+<p>rtc::Signaler的用处只有一个：实现rtc::PhysicalSocketServer的<code>signal_wakeup_</code>成员变量（用于解除多路信号分离器的阻塞状态）。它的主要功能由父类rtc::EventDispatcher实现，仅仅添加了在解除多路信号分离器阻塞状态后将rtc::PhysicalSocketServer::fwait_成员变量设置为false的代码。rtc::PhysicalSocketServer::fwait_成员变量在被设置为false后，rtc::PhysicalSocketServer::Wait函数就会退出，rtc::MessageQueue就可以及时处理消息队列的消息。</p>
+<h4>5.9 rtc::PhysicalSocketServer</h4>
+<p>如果说rtc::MessageQueue是多路信号分离器的外围，那么rtc::PhysicalSocketServer就是多路信号分离器的真正核心。rtc::PhysicalSocketServer主要实现了消息和IO的多路分发功能，类似于Windows平台上的WSAWaitForMultipleEvents的功能。</p>
+<p>rtc::PhysicalSocketServer的主要成员变量包括：</p>
+<p>dispatchers<em>：分发器列表
+signal_wakeup</em>：中止rtc::PhysicalSocketServer::Wait函数的rtc::Signaler对象（通常在rtc::MessageQueue接收到事件时调用）</p>
+<p>rtc::PhysicalSocketServer的主要成员函数包括：</p>
+<p>rtc::PhysicalSocketServer::CreateSocket：创建一个rtc::Socket实例，实质为rtc::PhysicalSocket</p>
+<p>参数说明：</p>
+<blockquote><p>family：socket的寻址方案（AF_INET/AF_INET6），说明WebRTC能够支持IPv6
+type：socket的类型（TCP/IP）</p>
+</blockquote>
+<p>rtc::PhysicalSocketServer::CreateAsyncSocket：创建一个rtc::AsyncSocket实例，实质是rtc::SocketDispatcher。此外，与rtc::PhysicalSocketServer::CreateSocket函数不同的是创建后的实例立即被添加入rtc::PhysicalSocketServer的分发器列表（<code>dispatchers_</code>）。用户不需要在调用rtc::PhysicalSocketServer::Add函数</p>
+<p>参数说明：</p>
+<blockquote><p>family：socket的寻址方案（AF_INET/AF_INET6），说明WebRTC能够支持IPv6
+type：socket的类型（TCP/IP）</p>
+</blockquote>
+<p>rtc::PhysicalSocketServer::WrapSocket：将一个系统socket句柄/文件描述符封装成rtc::SocketDispatcher并添加入分发器列表（<code>rtc::PhysicalSocketServer::dispatchers_</code>）</p>
+<p>参数说明：</p>
+<blockquote><p>s：一个系统socket句柄/文件描述符，可以是同步（阻塞）的，也可以是异步（非阻塞）的。如果是同步的，该函数会通过fcntl（Linux）或ioctlsocket（Windows）转成异步的。</p>
+</blockquote>
+<p>rtc::PhysicalSocketServer::Add/Remove：向分发器列表添加/删除一个分发器</p>
+<p>参数说明：</p>
+<blockquote><p>pdispatcher：一个添加/删除的rtc::Dispatcher实例，rtc::PhysicalSocketServer在下一次IO监听循环中会添加/删除监听它的句柄/文件描述符。注意，是下一次监听循环，新添加的分发器不会影响当前阻塞的select（Linux）函数或WSAWaitForMultipleEvents（Windows）函数。也不会唤醒当前阻塞的select（Linux）函数或WSAWaitForMultipleEvents（Windows）函数。如果开发人员需要添加/删除操作立即生效，需要自行唤醒当前阻塞的select（Linux）函数或WSAWaitForMultipleEvents（Windows）函数。</p>
+</blockquote>
+<p>rtc::PhysicalSocketServer::Wait：实现了多路信号分离器</p>
+<p>参数说明：</p>
+<blockquote><p>cmsWait：以毫秒为单位的等待时间，kForever表示永久等待
+process_io：是否处理IO</p>
+</blockquote>
+<p>rtc::PhysicalSocketServer的核心代码就在成员函数Wait中。该函数比较复杂我将分几个要点来讲解：</p>
+<p><strong>a. 大体流程</strong></p>
+<p>在rtc::PhysicalSocketServer::Wait函数中，代码的主体为IO监听循环。在IO监听循环中，Wait函数首先将分发器列表（rtc::PhysicalSocketServer::dispatchers<em>）中所有分发器的IO句柄/文件描述符加入到监听数组（需要注意的是分发器列表已经包括了rtc::PhysicalSocketServer::signal_wakeup</em>，激发该分发器可以终止整个IO监听循环，导致Wait函数退出）。接着Wait函数就调用系统的IO阻塞等待函数，在Linux平台上为select，在Windows平台上为WSAWaitForMultipleEvents。Wait函数阻塞等待IO期间释放CPU资源。在阻塞等待API返回时，Wait函数先检查它的返回值。如果是因为等待超时，Wait函数将立即返回。否则，将调用被激发IO句柄/文件描述符的分发器的OnPreEvent和OnEvent函数。最后，检查rtc::PhysicalSocketServer::fwait_，如果需要继续等待就再次执行IO监听循环，否则就退出Wait函数。整个函数流程如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210105-213200-2.png" alt=""></p>
+<p><strong>b. 阻塞等待机制（Windows）</strong></p>
+<p>虽然rtc::PhysicalSocketServer::Wait函数在Windows平台和Linux平台上的流程大体相同，但是在实现细节上却有很大不同。首先让我们先看一下Windows平台。Windows平台调用的等待API是WSAWaitForMultipleEvents，该函数有能力将多个IO句柄使用WSAEventSelect函数绑定到一个WSAEvent句柄上去，并在等待结束后调用WSAEnumNetworkEvents来确定到底哪些IO句柄被激发。所以，Windows版本的rtc::Dispatcher定义有两个成员函数GetSocket和GetWSAEvent。如果能调用GetSocket函数返回一个有效的socket，那么就将这个socket句柄绑定到一个统一的WSAEvent上；如果不能返回一个有效的socket句柄就继续调用GetWSAEvent，取出分发器的WSAEvent，并把它加入到WSAWaitForMultipleEvents函数的等待数组中去。大致过程如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210105-213200-3.png" alt=""></p>
+<p><strong>c. 阻塞等待机制（Linux）</strong></p>
+<p>Linux的rtc::PhysicalSocketServer::Wait相对来说比较简单。它使用select函数等待所有从rtc::Dispatcher::GetDescriptor返回的文件描述符。所有的文件描述符一视同仁，也没有内置特殊文件描述符。select函数返回后调用相应的rtc::Dispatcher的事件响应函数OnPreEvent和OnEvent。唯一比较复杂的就是rtc::PhysicalSocketServer::signal<em>dispatcher</em>，具体的原理见5.4节rtc::PosixSignalHandler。</p>
+<p><strong>d. 与rtc::MessageQueue互动</strong></p>
+<p>其实，这部分内容已经在前面的章节讲述过一些了，只是比较分散。在这里我将比较全面总结一下：</p>
+<ol>
+<li><p>整个多路信号分离器由rtc::MessageQueue和rtc::PhysicalSocketServer组成，这2个组件轮流获得控制权。rtc::MessageQueue最先获得控制权，它会检查自己的消息队列，如果有需要立即处理的消息就马上处理，如果没有就把控制权交给rtc::PhysicalSocketServer。rtc::PhysicalSocketServer将等待所有位于其分发器列表（rtc::PhysicalSocketServer::dispatchers_）的IO句柄/文件描述符。如果有IO句柄/文件描述符被激发，rtc::PhysicalSocketServer将调用对应的rtc::Dispatcher的消息响应函数（OnPreEvent、OnEvent）。</p>
+</li>
+<li><p>如果在rtc::PhysicalSocketServer阻塞等待时rtc::MessageQueue接收到消息，rtc::MessageQueue将会调用rtc::PhysicalSocketServer::WakeUp函数激发rtc::PhysicalSocketServer::signal_wakeup_以解除rtc::PhysicalSocketServer的阻塞状态。并将rtc::PhysicalSocketServer::fWait_设置为false，这将导致rtc::PhysicalSocketServer退出IO监控循环重新将控制权交给rtc::MessageQueue。rtc::MessageQueue获得控制权后将立即处理消息，在完成消息处理后再将控制权交给rtc::PhysicalSocketServer。</p>
+</li>
+</ol>
+<p>由于，rtc::PhysicalSocketServer的实现比较复杂，因此已经无法比较Windows平台和Linux平台的代码。所以，仅仅简单罗列一下Linux平台下的API：</p>
+<blockquote><p>select：用于对IO文件描述符数组进行轮询，阻塞等待IO信号
+FD_ZERO：用于初始化一个IO文件描述符数组的宏
+FD_SET：用于将IO文件描述符添加入由FD_ZERO初始化的IO文件描述符数组的宏
+FD_ISSET：用于检查一个IO文件描述符数组是否包括指定的IO文件描述符。由于select函数在返回时会将没有激发的IO文件描述符剔除掉，所以依然存在于数组中的IO文件描述符表示已经被激发
+FD_CLR：从IO文件描述符数组中删除一个指定的IO文件描述符</p>
+</blockquote>
+<p>到此位置，我们已经完成了对整个多路信号分离器的分析。但是，这还不是WebRTC线程模型的全部，它还有一个重要的模块——thread，我们将在下一节对它进行分析。</p>
+<h3>6 thread</h3>
+<p>thread.h/thread.cc文件实现了WebRTC对系统线程的封装。它主要包括3个类rtc::ThreadManager类、rtc::Thread类和rtc::Runnalbe类；以及几个工具类rtc::AutoThread类、rtc::ComThread类和rtc::SocketServerScope类。</p>
+<h4>6.1 rtc::ThreadManager</h4>
+<p>rtc::ThreadManager类虽然比较复杂，但是它实现的功能还是比较简单的——帮助rtc::Thread类实现rtc::Thread::Current静态函数功能。rtc::Thread::Current静态函数的主要功能就是获取代表当前线程的rtc::Thread实例。这就要求在创建系统线程的同时能够立即将它自动封装成rtc::Thread并加以合理地保存。这就是rtc::ThreadManager的主要功能。</p>
+<p>rtc::ThreadManager的主要组件包括：</p>
+<p><code>key_</code>：系统TLS（Thread LocalStorage）的key。在Windows系统上它是一个DWORD变量，在Linux系统上它被定义为<code>pthread_key_t</code>。</p>
+<p>TLS能够在线程空间内保存一些数据，所有的线程通过它只能访问到自己线程空间的变量，各个线程之间互不影响。它也是一个重要的多线程编程的工具。到这里rtc::ThreadManager的基本原理其实已经可以猜得出来了，其实rtc::ThreadManager就是将封装线程的rtc::Thread类的实例指针存放在TLS内。线程内运行的代码在调用rtc::Thread::Current静态函数的时候，rtc::ThreadManager就从当前线程的TLS内取出该指针并返回。</p>
+<p>rtc::ThreadManager的主要函数包括：</p>
+<p>rtc::ThreadManager::WrapCurrentThread：将当前线程封装成一个rtc::Thread对象，并存储在TLS中。</p>
+<p>参数说明：无</p>
+<p>前面已经提到了rtc::ThreadManager的基本原理是使用TLS，这里将更具体的讲解它工作的过程。rtc::ThreadManager本身是一个伪装成singleton的类，但是它没有释放的过程，这个手法在前面的rtc::PosixSignalHandler中已经讲解过了。rtc::ThreadManager在构造的时候会将当前线程自动包装成rtc::Thread。为了达到绝对保证主线程先于其他线程被包装成rtc::Thread，每个系统线程启动的时候都会在rtc::Thread::Start函数中调用rtc::ThreadManager::Instance函数以确认rtc::ThreadManager实例已经被创建。而在这工程中rtc::Thread::Start函数是在父线程中被调用的。以上这些保证了在第一次创建子线程之前rtc::ThreadManager已经在单线程环境中被创建（），并且主线程被封装成rtc::Thread对象。每个线程的启动函数rtc::Thread::PreRun函数（在新线程的空间中运行）会调用rtc::ThreadManager::SetCurrentThread函数将新创建的rtc::Thread对象放入系统线程的TLS中使它纳入到rtc::ThreadManager的管理之下。当调用rtc::ThreadManage::CurrentThread函数时，rtc::ThreadManager仅仅从TLS中返回代表当前线程的rtc::Thread对象。</p>
+<p>对照Windows版和Linux版的代码，我们可以发现2者基本一致。那我们来看一下两者API的对比：</p>
+<p>OpenThread、GetCurrentThreadId</p>
+<p>pthread_self函数用于获取当前线程的<code>pthread_t</code>。在Windows平台下一般可以使用线程ID或线程句柄代表当前线程，而在Linux平台下使用<code>pthread_t</code>代表当前线程。</p>
+<p><strong>TlsAlloc</strong></p>
+<p><code>pthread_key_create</code>函数用于创建一个TLS的key</p>
+<p><strong>TlsGetValue</strong></p>
+<p><code>pthread_getspecific</code>函数用于从TLS中取出数据</p>
+<p><strong>TlsSetValue</strong></p>
+<p><code>pthread_setspecific</code>函数用于TLS中存放数据</p>
+<p><strong>TlsFree</strong></p>
+<p><code>pthread_key_delete</code>函数用于删除一个TLS的key</p>
+<h4>6.2 rtc::Runnalbe</h4>
+<p>该类定义了rtc::Runnalbe纯虚基类（接口），如果希望定制rtc::Threaad::Run函数的行为可以继承rtc::Runnable类，并将实例传递给rtc::Thread::Start函数</p>
+<h4>6.3 rtc::Thread</h4>
+<p>rtc::Thread的主要功能是封装线程，为线程提供消息队列和多路信号分离器的功能。需要注意的是，rtc::Thread的绝大多数功能是rtc::MessageQueue和rtc::PhysicalSocketServer的代码提供的，仅有rtc::Thread::Send函数的功能主要由rtc::Thread的代码提供。</p>
+<p>rtc::Thread的主要组件包括：</p>
+<p><code>sendlist_</code>：通过rtc::Thread::Send函数请求处理的消息列表</p>
+<p><code>running_</code>：标示系统线程是否在正在运行的rtc::Event，该成员变量表示线程正在运行</p>
+<p><code>thread_</code>：保存系统的线程句柄/pthread_t对象</p>
+<p><code>owned_</code>：标示rtc::Thread对象是否是线程的所有者，该变量的语义和大家的直觉可能很不一样（至少和我的直觉不一样，造成了不少麻烦）。由rtc::Thread::Start函数启动的系统线程，该成员变量为true；通过rtc::Thread::WrapCurrent函数包装的线程为false。并不是rtc::Thread实例对应的哪个线程就占有（own）哪个线程，甚至有些情况下rtc::Thread实例是唯一的封装系统线程的实例，并通过rtc::Thread::WrapCurrent设置到了TLS中去，但是这个实例依然不占有系统线程。唯有通过rtc::Thread::Start函数启动的系统线程，该实例才占有那个系统线程。这个概念很重要，它会影响很多函数的行为。</p>
+<p>rtc::Thread的主要成员函数包括：</p>
+<p>rtc::Thread::Current（静态）：获取封装当前线程的rtc::Thread对象，该功能由rtc::ThreadManager提供</p>
+<p>参数说明：无</p>
+<p>rtc::Thread::IsCurrent：测试该rtc::Thread对象是否是封装当前线程的对象。只有在TLS中保存的rtc::Thread对象才是封装当前线程的对象。在当前线程构造的rtc::Thread对象不一定是封装当前线程的对象（这点很重要，它将影响多个函数的行为）。</p>
+<p>参数说明：无</p>
+<p>rtc::Thread::Start：启动线程</p>
+<p>参数说明：</p>
+<blockquote><p>runnable：如果为NULL，则调用rtc::Thread::ProcessMessages函数处理消息循环运行线程；如果不是NULL，则调用runnable-&gt;Run运行线程。</p>
+</blockquote>
+<p>rtc::Thread::Stop：停止消息循环，并调用rtc::Thread::Join等待线程结束</p>
+<p>参数说明：无</p>
+<p>rtc::Thread::Send：向一个线程发送消息，并等待消息完成，被请求线程可以是当前线程</p>
+<p>参数说明：</p>
+<blockquote><p>phandler：消息处理器
+id：消息ID
+pdata：消息数据</p>
+</blockquote>
+<p>rtc::Thread::Invoke：请求在一个线程上执行函数，被请求的线程可以是当前线程</p>
+<p>模板参数说明：</p>
+<blockquote><p>ReturnT：仿函数的返回值类型</p>
+</blockquote>
+<p>FunctorT：仿函数的类型</p>
+<p>参数说明：</p>
+<blockquote><p>functor：被请求执行的仿函数</p>
+</blockquote>
+<p>rtc::Thread::Clear：继承自rtc::MessageQueue::Clear函数，为了保持父类该函数的语义需要同时删除sendlist_列表中的消息</p>
+<p>参数说明：</p>
+<blockquote><p>phandler：消息处理器
+id：消息ID
+pdata：消息数据</p>
+</blockquote>
+<p>rtc::Thread::ReceiveSends：处理Send函数发来的消息</p>
+<p>参数说明：无</p>
+<p>rtc::Thread::WrapCurrent/UnwrapCurrent：封装/解除封装当前线程，该功能由rtc::ThreadManager提供</p>
+<p>参数说明：无</p>
+<p>rtc::Thread::running（私有）：线程是否运行。只有使用该实例启动一个系统线程（rtc::Thread::Start）或者包装一个线程（rtc::Thread::WrapCurrent）后，该函数才会返回true；</p>
+<p>参数说明：无</p>
+<p>接下来我将简单讲解一下rtc::Thread的原理。rtc::Thread的绝大多数功能由rtc::MessageQueue、rtc::PhysicalSocketServer和rtc::ThreadManager类提供。rtc::Thread的大多数代码是用来实现rtc::Thread::Send函数的功能。rtc::Thread::Send函数接受到消息后判断是否当前线程是否就是被请求的线程。如果当前线程即为被请求的线程，立即处理消息。如果当前线程不是被请求线程，将消息加入到被请求线程的rtc::Thread::sendlist<em>列表。然后通过rtc::MessageQueue::ss</em>-&gt;WakeUp函数解除被请求线程的IO阻塞状态，并且通过current_thread-&gt;socketserver()-&gt;Wait函数让自己等待在IO阻塞中。被请求线程的消息循环rtc::MessageQueue::Get函数会调用rtc::Thread::ReceiveSends（虚）函数处理sendlist_中的消息。被请求线程处理完消息后会调用请求线程的thread-&gt;socketserver()-&gt;WakeUp以解除它的IO阻塞状态。请求线程通过局部变量ready获知被请求线程已经完成了消息处理。整个rtc::Thread::Send函数在请求线程和被请求线程之间的交互操作流程大致如此。</p>
+<p>最后，让我们对比下Windows API和Linux API在rtc::Thread类中的使用状况：</p>
+<p><strong>Sleep</strong></p>
+<p>nanosleep函数用于将当前线程阻塞等待指定的时间</p>
+<p><strong>SetThreadPriority</strong></p>
+<p>在Linux版本的rtc::Thread中没有实现该功能</p>
+<p><strong>CreateThread</strong></p>
+<p><code>pthread_attr_init</code>函数用于初始化pthread的线程属性；<code>pthread_create</code>函数用于创建系统线程</p>
+<p>修改线程的名字</p>
+<p>在Windows平台上使用了一个比较晦涩的方法实现：调用RaiseException(0x406D1388, ... )函数；但是在Linux版本的rtc::Thread中没有实现该功能（其实这个功能没什么大的作用）。</p>
+<p><strong>WaitForSingleObject、CloseHandle</strong></p>
+<p><code>pthread_join</code>用于等待系统线程结束。</p>
+<h4>6.4 rtc::AutoThread</h4>
+<p>该类是一个工具类，它的主要功能是临时封装一个线程。用户的应用程序自行调用了系统API创建了一个线程，而这条线程需要临时使用一下rtc::Thread的功能，比如调用另一个线程rtc::Thread::Send并阻塞等待另一条线程完成函数调用。是的，在rtc::Thread中rtc::Thread::Send就用到了rtc::AutoThread来确保发起Send调用的线程具备等待调用返回的能力（如果发起Send的线程已经被rtc::Thread封装，那么rtc::AutoThread将不起作用）。</p>
+<p>接下来让我们看一下WebRTC是如何是如何实现rtc::AutoThread的。首先，在它的构造函数中会检查TLS。如果在TLS已经保存了封装当前线程的rtc::Thread，则什么事情都不做；如果没有，就将当前构造rtc::AutoThread设置入TLS。需要注意的是“设置”操作，即调用rtc::ThreadManager::SetCurrentThread函数，不是包装，该函数仅仅将rtc::AutoThread的指针村放入TLS。没有激发rtc::AutoThread::running<em>（它不是布尔变量，而是一个rtc::Event类型的变量），所以调用rtc::Thread::running返回值为false。析构函数中虽然调用了rtc::Thread::Stop函数，但是因为没有激发rtc::Thread::running</em>，结果是什么都没做。最后检查TLS，如果存放着指向自己（rtc::AutoThread）的指针就将他设置为NULL。</p>
+<h4>6.5 rtc::ComThread</h4>
+<p>该类是一个很简单的辅助工具类，就是帮助在Windows平台下需要使用COM组件的线程在启动的时候调用CoInitializeEx，并在线程结束的时候调用CoUninitialize。作为Windows平台的开发人员，对这两个函数应该是非常熟悉的。</p>
+<h4>6.6 rtc::SocketServerScope</h4>
+<p>该类也是一个非常简单的辅助工具类，主要功能就是临时替换当前线程的rtc::SocketServer的实现。它在构造函数中调用rtc::MessageQueue::set_socketserver函数将临时使用的rtc::SocketServer提交给当前线程的rtc::MessageQueue，并在析构函数中换回原来的rtc::SocketServer。</p>
+<p>到此为止，WebRTC的线程模型相关的代码基本已经介绍完毕。在结合阅读源代码的前提下，通读这6个章节的内容应该可以很顺畅地理解它们的工作原理以及调用关系。不过，可能有些读者在全局的理解上依然觉得比较困难。没有关系，我们将在下一章节使用2段小代码讲解一下整个线程模型如何工作。</p>
+<h3>7 实际使用WebRTC的线程模型</h3>
+<p>在这一章节我将实际演示如何将WebRTC的/trunk/rtc_base目录下的所有文件编译成静态库。并且在这基础上编译运行2个小程序，以观察整个线程模型的调用关系。这将能够很好地帮助读者理解各个模块是如何协同工作的。</p>
+<h4>7.1 编译静态库</h4>
+<p>正如在本文开头时提到的，这一节的内容可能是大家最感兴趣的，但也是我不得不和大家说声抱歉的，我是在Mac OSX平台上完成了对WebRTC的/trunk/talk/base目录下的源代码的编译。所以编译脚本只能在Mac OSX下使用，不过我相信向Linux和Windows移植的工作应该不会很困难。因为：</p>
+<ol>
+<li><p>WebRTC本身就是跨平台编写的，它本身就支持所有的平台；</p>
+</li>
+<li><p>谷歌已经为WebRTC编写了完美的编译脚本，这种脚本以python为基础可以在各个平台上使用命令行编译或者生成IDE（包括Visual Studio）工程脚本。特别要提一下的是谷歌使用的ninjia实在太强大了，编译速度超快无比，推荐使用；</p>
+</li>
+<li><p>我所使用的脚本并不复杂，所以通过简单修改应该可以在各个平台上使用；</p>
+</li>
+</ol>
+<p>基于以上的原因，可能大家会觉得我自己写编译脚本有些多此一举。从理论上来说确实有些多此一举，但是我也有我自己的理由：</p>
+<ol>
+<li><p>最近为了找工作所以学习了一些关于make脚本的知识，这次正好用来练手。其实在以前的工作中使用过nmake，不过主体框架是美国同事写得，我们不过是在添加删除文件时维护一下。所以，这次学习WebRTC源代码可以有机会在实践中检验一下对make脚本的理解。</p>
+</li>
+<li><p>我希望将/trunk/rtc_base目录独立编译出来，这样可以将它作为独立的模块进行试验，避免被其他模块干扰。</p>
+</li>
+</ol>
+<p>言归正题，让我们先来看一下编译脚本：</p>
+<div class="highlight"><pre><code><span></span><span class="p">.</span><span class="n">PHONY</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">all</span><span class="w"> </span><span class="n">create_dir</span><span class="w"> </span><span class="n">clean</span>
+
+<span class="nl">CC</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">g</span><span class="o">++</span>
+<span class="nl">COCOACC</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">g</span><span class="o">++</span>
+<span class="nl">AR</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">ar</span>
+
+<span class="nl">ut_srcs</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">wildcard</span><span class="w"> </span><span class="o">*</span><span class="n">_unittest</span><span class="p">.</span><span class="n">cc</span><span class="p">)</span>
+<span class="nl">exclusive_files</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">ut_srcs</span><span class="p">)</span><span class="w"> </span>\
+<span class="w">                                   </span><span class="n">diskcache_win32</span><span class="p">.</span><span class="n">ccjson</span><span class="p">.</span><span class="n">cc</span><span class="w"> </span><span class="n">linuxwindowpicker</span><span class="p">.</span><span class="n">cc</span><span class="w"> </span>\
+<span class="w">                                   </span><span class="n">macsocketserver</span><span class="p">.</span><span class="n">ccnatserver_main</span><span class="p">.</span><span class="n">cc</span><span class="w"> </span><span class="n">schanneladapter</span><span class="p">.</span><span class="n">cc</span><span class="w"> </span>\
+<span class="w">                                   </span><span class="n">sslidentity</span><span class="p">.</span><span class="n">ccunittest_main</span><span class="p">.</span><span class="n">cc</span><span class="w"> </span><span class="n">win32</span><span class="p">.</span><span class="n">cc</span><span class="w"> </span><span class="n">win32filesystem</span><span class="p">.</span><span class="n">cc</span><span class="w"> </span>\
+<span class="w">                                   </span><span class="n">win32regkey</span><span class="p">.</span><span class="n">ccwin32securityerrors</span><span class="p">.</span><span class="n">cc</span><span class="w"> </span><span class="n">win32socketserver</span><span class="p">.</span><span class="n">cc</span><span class="w"> </span>\
+<span class="w">                                   </span><span class="n">win32window</span><span class="p">.</span><span class="n">ccwin32windowpicker</span><span class="p">.</span><span class="n">cc</span><span class="w"> </span><span class="n">winfirewall</span><span class="p">.</span><span class="n">cc</span><span class="w"> </span><span class="n">winping</span><span class="p">.</span><span class="n">cc</span>
+
+<span class="nl">proj_dir</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="p">..</span><span class="o">/</span><span class="p">..</span>
+<span class="nl">obj_dir</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">proj_dir</span><span class="p">)</span><span class="o">/</span><span class="n">bin</span><span class="o">/</span><span class="n">rtc</span>
+
+<span class="nl">all_srcs</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">wildcard</span><span class="w"> </span><span class="o">*</span><span class="p">.</span><span class="n">cc</span><span class="p">)</span>
+<span class="nl">srcs</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">filter</span><span class="o">-</span><span class="n">out</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">exclusive_files</span><span class="p">),</span><span class="n">$</span><span class="p">(</span><span class="n">all_srcs</span><span class="p">))</span>
+
+<span class="nl">objs</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">patsubst</span><span class="w"> </span><span class="o">%</span><span class="p">.</span><span class="n">cc</span><span class="p">,</span><span class="w"> </span><span class="o">%</span><span class="p">.</span><span class="n">o</span><span class="p">,</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">srcs</span><span class="p">))</span>
+<span class="nl">fp_objs</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">addprefix</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">obj_dir</span><span class="p">)</span><span class="o">/</span><span class="p">,</span><span class="n">$</span><span class="p">(</span><span class="n">objs</span><span class="p">))</span>
+
+<span class="nl">cocoa_srcs</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">scoped_autorelease_pool</span><span class="p">.</span><span class="n">mm</span><span class="w"> </span><span class="n">maccocoathreadhelper</span><span class="p">.</span><span class="n">mm</span>
+<span class="nl">cocoa_objs</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">patsubst</span><span class="w"> </span><span class="o">%</span><span class="p">.</span><span class="n">mm</span><span class="p">,</span><span class="w"> </span><span class="o">%</span><span class="p">.</span><span class="n">o</span><span class="p">,</span><span class="n">$</span><span class="p">(</span><span class="n">cocoa_srcs</span><span class="p">))</span>
+<span class="nl">fp_cocoa_objs</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">addprefix</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">obj_dir</span><span class="p">)</span><span class="o">/</span><span class="p">,</span><span class="n">$</span><span class="p">(</span><span class="n">cocoa_objs</span><span class="p">))</span>
+
+<span class="nl">CCFLAGS</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="o">-</span><span class="n">DPOSIX</span><span class="w"> </span><span class="o">-</span><span class="n">DOSX</span><span class="w"> </span><span class="o">-</span><span class="n">I$</span><span class="p">(</span><span class="n">proj_dir</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="n">g</span>
+<span class="nl">COCOACCFLAGS</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="o">-</span><span class="n">DOSX</span><span class="w"> </span><span class="o">-</span><span class="n">I$</span><span class="p">(</span><span class="n">proj_dir</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="n">g</span>
+<span class="nl">ARFlAGS</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">crv</span>
+
+<span class="nl">all</span><span class="p">:</span><span class="w"> </span><span class="n">create_dir</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">fp_objs</span><span class="p">)</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">fp_cocoa_objs</span><span class="p">)</span>
+<span class="w">       </span><span class="n">$</span><span class="p">(</span><span class="n">AR</span><span class="p">)</span><span class="n">$</span><span class="p">(</span><span class="n">ARFlAGS</span><span class="p">)</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">obj_dir</span><span class="p">)</span><span class="o">/</span><span class="n">libtalkbase</span><span class="p">.</span><span class="n">a</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">fp_objs</span><span class="p">)</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">fp_cocoa_objs</span><span class="p">)</span>
+
+<span class="n">$</span><span class="p">(</span><span class="n">fp_objs</span><span class="p">)</span><span class="o">:</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">obj_dir</span><span class="p">)</span><span class="o">/%</span><span class="p">.</span><span class="n">o</span><span class="o">:</span><span class="w"> </span><span class="o">%</span><span class="p">.</span><span class="n">cc</span>
+<span class="w">       </span><span class="n">$</span><span class="p">(</span><span class="n">CC</span><span class="p">)</span><span class="n">$</span><span class="p">(</span><span class="n">CCFLAGS</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="n">o</span><span class="w"> </span><span class="n">$</span><span class="err">@</span><span class="w"> </span><span class="o">-</span><span class="n">c</span><span class="w"> </span><span class="n">$</span><span class="o">^</span>
+
+<span class="n">$</span><span class="p">(</span><span class="n">fp_cocoa_objs</span><span class="p">)</span><span class="o">:</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">obj_dir</span><span class="p">)</span><span class="o">/%</span><span class="p">.</span><span class="n">o</span><span class="o">:</span><span class="w"> </span><span class="o">%</span><span class="p">.</span><span class="n">mm</span>
+<span class="w">       </span><span class="n">$</span><span class="p">(</span><span class="n">COCOACC</span><span class="p">)</span><span class="n">$</span><span class="p">(</span><span class="n">COCOACCFLAGS</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="n">o</span><span class="w"> </span><span class="n">$</span><span class="err">@</span><span class="w"> </span><span class="o">-</span><span class="n">c</span><span class="w"> </span><span class="n">$</span><span class="o">^</span>
+
+<span class="nl">create_dir</span><span class="p">:</span>
+<span class="w">       </span><span class="n">mkdir</span><span class="o">-</span><span class="n">p</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">obj_dir</span><span class="p">)</span>
+
+<span class="nl">clean</span><span class="p">:</span>
+<span class="w">       </span><span class="n">rm</span><span class="o">-</span><span class="n">rf</span><span class="w"> </span><span class="n">$</span><span class="p">(</span><span class="n">obj_dir</span><span class="p">)</span>
+</code></pre></div>
+<p>对于使用惯Visual Studio的Windows开发人员来说，make脚本确实有些晦涩，不过以上脚本并不是很难。由于初次编写make脚本，所以特意避开了一些复杂的技巧，并且尽可能不考虑编译环境的通用性。比如，通常make脚本需要生成依赖文件（*.d），由于当前只是为了编译确定版本的WebRTC代码（代码不会发生变化），所以我省略了这一步。</p>
+<p>整个make脚本的大致就是先把所有的代码文件（<em>.cc）罗列出来，然后去除掉unit test文件，以及一些Windows平台下特有的文件。将余下的文件使用g++编译成目标文件（</em>.o）。由于我使用的是Mac OSX平台，所以需要特别编译几个Mac OSX的代码文件（<em>.mm）文件。最后使用ar工具将所有的目标文件（</em>.o）打包成静态库（libtalkbase.a）。整个过程并没有什么特别的。不过，由于初次编写make脚本，有些地方并不是很规范（比如变量名的使用），请各位读者见谅。</p>
+<h4>7.2 范例代码1</h4>
+<p>这里先让我们看一段网上摘录的代码：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;string&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;talk/base/thread.h&quot;</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">HelpData</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">MessageData</span>
+<span class="p">{</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">info_</span><span class="p">;</span>
+<span class="p">};</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">Police</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">MessageHandler</span>
+<span class="p">{</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="p">{</span>
+<span class="w">   </span><span class="n">MSG_HELP</span><span class="p">,</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">Help</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&amp;</span><span class="w"> </span><span class="n">info</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">   </span><span class="n">HelpData</span><span class="o">*</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">HelpData</span><span class="p">;</span>
+<span class="w">   </span><span class="n">data</span><span class="o">-&gt;</span><span class="n">info_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">info</span><span class="p">;</span>
+<span class="w">   </span><span class="n">rtc</span><span class="o">::</span><span class="n">Thread</span><span class="o">::</span><span class="n">Current</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">Post</span><span class="p">(</span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="n">MSG_HELP</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w"> </span><span class="k">virtual</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">OnMessage</span><span class="p">(</span><span class="n">rtc</span><span class="o">::</span><span class="n">Message</span><span class="o">*</span><span class="w"> </span><span class="n">msg</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">   </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">msg</span><span class="o">-&gt;</span><span class="n">message_id</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">   </span><span class="k">case</span><span class="w"> </span><span class="no">MSG_HELP</span><span class="p">:</span>
+<span class="w">     </span><span class="n">HelpData</span><span class="o">*</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">HelpData</span><span class="o">*</span><span class="p">)</span><span class="n">msg</span><span class="o">-&gt;</span><span class="n">pdata</span><span class="p">;</span>
+<span class="w">     </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;MSG_HELP : &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">data</span><span class="o">-&gt;</span><span class="n">info_</span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+<span class="w">     </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">};</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="o">**</span><span class="w"> </span><span class="n">argv</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Test Thread is started&quot;</span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+<span class="w"> </span><span class="n">Police</span><span class="w"> </span><span class="n">p</span><span class="p">;</span>
+<span class="w"> </span><span class="n">p</span><span class="p">.</span><span class="n">Help</span><span class="p">(</span><span class="s">&quot;Please help me!&quot;</span><span class="p">);</span>
+<span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">Thread</span><span class="o">::</span><span class="n">Current</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">Run</span><span class="p">();</span>
+<span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Test Thread is completed&quot;</span><span class="o">&lt;&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+<span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这段代码很简单，它演示了单线程环境下如何使用消息处理器。不过这个程序会永久等待在以下语句：
+rtc::Thread::Current()-&gt;Run();</p>
+<p>不能，正常退出。如果读者感兴趣，可以尝试以下如何使用一条延迟消息，让程序正常退出。</p>
+<p>接下来，让我们看一下整个WebRTC代码的调用栈展开会是一个生个状况。可能会出乎你的意料，整个调用栈还是比较复杂的：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210105-213200-4.png" alt=""></p>
+<p>从上图可以看到，在调用rtc::Thread::Current函数之后，整个调用栈涉及到了rtc::ThreadManager、rtc::MessageQueue、rtc::MessageQueueManager三个类，其中rtc::ThreadManager和rtc::MessageQueueManager是在其Instance函数被调用后触发构造的全局唯一的对象实例。从这个调用栈可以看出，一旦调用有些rtc::Thread的成员函数（静态/非静态）就会自动触发构造rtc::ThreadManager和rtc::MessageQueueManager，并且把当前线程封装成一个rtc::Thread实例。</p>
+<h4>7.3 范例代码2</h4>
+<p>范例代码1是一个单线程的例子，所以并不能够足以研究WebRTC在多线程环境下的工作情况。因此，在这个例子的基础上，我把它改良成了多线程的版本：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;string&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;talk/base/thread.h&quot;</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">HelpData</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">MessageData</span>
+<span class="p">{</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">info_</span><span class="p">;</span>
+<span class="p">};</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">Police</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">MessageHandler</span>
+<span class="p">{</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="p">{</span>
+<span class="w">   </span><span class="n">MSG_HELP</span><span class="p">,</span>
+<span class="w">  </span><span class="p">};</span>
+
+<span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">Help</span><span class="p">(</span><span class="n">rtc</span><span class="o">::</span><span class="n">Thread</span><span class="o">&amp;</span><span class="w"> </span><span class="n">targetThread</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&amp;</span><span class="n">info</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">   </span><span class="n">HelpData</span><span class="o">*</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">HelpData</span><span class="p">;</span>
+<span class="w">   </span><span class="n">data</span><span class="o">-&gt;</span><span class="n">info_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">info</span><span class="p">;</span>
+<span class="w">   </span><span class="n">targetThread</span><span class="p">.</span><span class="n">Post</span><span class="p">(</span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="n">MSG_HELP</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w"> </span><span class="k">virtual</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">OnMessage</span><span class="p">(</span><span class="n">rtc</span><span class="o">::</span><span class="n">Message</span><span class="o">*</span><span class="w"> </span><span class="n">msg</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">   </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">msg</span><span class="o">-&gt;</span><span class="n">message_id</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">   </span><span class="k">case</span><span class="w"> </span><span class="no">MSG_HELP</span><span class="p">:</span>
+<span class="w">      </span><span class="n">HelpData</span><span class="o">*</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">HelpData</span><span class="o">*</span><span class="p">)</span><span class="n">msg</span><span class="o">-&gt;</span><span class="n">pdata</span><span class="p">;</span>
+<span class="w">     </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;MSG_HELP :&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">data</span><span class="o">-&gt;</span><span class="n">info_</span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+<span class="w">     </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">};</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="o">**</span><span class="w"> </span><span class="n">argv</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Test Multi-thread is started&quot;</span><span class="o">&lt;&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+<span class="w"> </span><span class="n">Police</span><span class="w"> </span><span class="n">p</span><span class="p">;</span>
+<span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">Thread</span><span class="w"> </span><span class="kr">thread</span><span class="p">;</span>
+<span class="w"> </span><span class="kr">thread</span><span class="p">.</span><span class="n">Start</span><span class="p">();</span>
+
+<span class="w"> </span><span class="n">p</span><span class="p">.</span><span class="n">Help</span><span class="p">(</span><span class="kr">thread</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Please help me!&quot;</span><span class="p">);</span>
+<span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">Thread</span><span class="o">::</span><span class="n">Current</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">SleepMs</span><span class="p">(</span><span class="mi">100</span><span class="p">);</span>
+<span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Test Multi-thread is completed&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+
+<span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这个版本的代码仅仅就是稍微改装了一点点，但是整个调用栈的情况发生了很大的变化：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210105-213200-5.png" alt=""></p>
+<p>从上图可以看出，虽然在多线程环境下情况复杂得多，但是WebRTC依然可以保证rtc::ThreadManager和rtc::MessageQueueManager这两个全局设施可以在任何子线程启动之前被构造完毕。</p>
+<p>结合以上2个例子，加上本文对涉及的各个类的解说，我想应该大多数读者能够掌握WebRTC的线程模型的所有细节。如果还有什么疑问的话，那就只能靠动手才能解决问题了。请将以上两个例子编译通过并在你有疑惑的函数中设置log输出，甚至于单步调试你有疑惑的代码，是掌握代码原理的终极手段。</p>
+<h3>8 我们所学到Linux API</h3>
+<p>通过详尽地阅读WebRTC的线程模型代码，我们学到了以下这些Linux API是如何被实际应用的：</p>
+<blockquote><p><code>pthread_mutex_init、pthread_mutex_destroy、pthrea_mutex_lock、pthread_mutex_trylock、pthread_mutex_unlock</code></p>
+</blockquote>
+<p>这5个函数可以完成对mutex的操作，基本上和Windows平台下地mutex差不多。</p>
+<blockquote><p><code>pthread_cond_init、pthread_cond_destroy、pthread_cond_broadcast、pthrea_cond_wait、pthread_cond_signal</code></p>
+</blockquote>
+<p>这5个函数用来操作pthread的条件变量，它的功能有点类似于Windows平台的Event，但是颗粒度更加细。需要注意的是<code>pthread_cond_wait</code>函数在进入时会解锁mutex，并在返回之前加锁mutex，这是一个Windows程序员不太熟悉的行为。</p>
+<blockquote><p>socket、getsocketname、getpeername、bind、connect、recv、recvfrom、accept、closesocket、getsockopt、setsockopt、send、sendto</p>
+</blockquote>
+<p>由于Windows平台也实现了BSD socket所以对于有网络编程经验的Windows开发人员应该可以很顺畅地使用Linux平台下的API。仅有一些参数的设置有些不同罢了（通常这些参数在Windows平台下设置为NULL）。</p>
+<blockquote><p>pipe、close、read、write、fcntl</p>
+</blockquote>
+<p>这5个函数可以完成对管道的操作，其实在Windows平台下也有管道操作的API只是用得不多。简单一点来说，管道操作和socket操作差不多。</p>
+<blockquote><p>sigaction</p>
+</blockquote>
+<p>signal相关的函数是Linux系统开发的一个难点。不过好在大多数状况下我们可以不依赖于signal机制开发应用软件。signal相关的有些函数在各个不同版本的Linux和Unix平台下会有不同的行为，所以在跨平台移植的时候会造成很多难以琢磨的bug。因此，我认为应该尽可能避免使用signal机制，如果必须使用请详细查阅目标平台的API说明。</p>
+<blockquote><p>select、FD_ZERO、FD_SET、FD_ISSET、FD_CLR</p>
+</blockquote>
+<p>Linux下IO信号分离器，其实在Windows平台下也有，只是大多数情况下Windows程序员都会使用WSA版本的API。使用select函数其实也并不是很复杂，参考WebRTC的代码，可以很快地掌握它的用法。</p>
+<blockquote><p><code>pthread_key_create、pthread_getspecific、pthread_setspecific、pthread_key_delete</code></p>
+</blockquote>
+<p>这4个函数实现了Linux平台下的TLS。它们的使用方法几乎等同于Windows下的TLS API，没有任何难度。</p>
+<blockquote><p><code>nanosleep、pthread_attr_init、pthread_create、pthread_join</code></p>
+</blockquote>
+<p>以上5个线程操作函数也没有什么特别的地方，和Windows版本的API没有多大的区别。仅仅就是在Windows平台下使用WaitForSingleObject函数来替代pthread_join函数。</p>
+<p>最后，让我们回溯一下本文，在Linux平台下WebRTC还有什么不能实现的Windows API功能？也许你在前面的章节注意到了，有一个很复杂的状况WebRTC没有解决方案：有多条线程同时调用WSAWaitForMultipleEvents函数，并且在所有的等待的句柄数组中都有同一个Event句柄。在这种情况下不论这个被等待的Event是auto reset或是manual reset，都没有很好的解决方案。不过，这种状况实在应该是极力避免的，如果你的程序中有这种状况出现，应该是非常难维护的。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "WebRTC多线程API说明.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

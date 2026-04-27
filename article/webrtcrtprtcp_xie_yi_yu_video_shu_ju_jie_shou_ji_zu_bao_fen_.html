@@ -1,0 +1,951 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>WebRTC RTP:RTCP协议与Video数据接收及组包分析 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="WebRTC RTP:RTCP协议与Video数据接收及组包分析,WebRTC,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="WebRTC RTP/RTCP协议<br/>WebRTC RTP Video数据接收及组包分析" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>WebRTC RTP:RTCP协议与Video数据接收及组包分析</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2021-07-10 10:20
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_webrtc.html' class='article_tag'>WebRTC</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://www.jianshu.com/p/f13c9b730658' target='blank'>WebRTC RTP/RTCP协议分析</a></p></h4>
+<h2>1 rtp/rtcp通道创建流程</h2>
+<p>RtpTransportInternal为webrtc 网络rtp以及rtcp传输层的接口,rtp和rtcp数据经该api层讲数据发送到PacketTransportInternal它们之间的关系如下图:</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210710-102000-0.png" alt=""></p>
+<ul>
+<li>RtpTransportInternal主要供用户拿到rtp数据流后调用,而PacketTransportInternal为底层网络通信层接口</li>
+<li>RtpTransportInternal的创建时机是在创建PeerConnection的时候通过绑定音频轨和视频轨的时候创建</li>
+<li>PacketTransportInternal的创建时机是在当通过调用PeerConnection的SetLocalDescription或者SetRemoteDescription的时候创建,也就是握手完成后创建</li>
+<li>RtpTransportInternal对象中持有PacketTransportInternal对象一个用于发送rtp包一个用于发送rtcp包</li>
+</ul>
+<h3>1.1 Transport的创建</h3>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210710-102000-1.png" alt=""></p>
+<ul>
+<li>通过SetLocalDescription或者SetRemoteDescription经过一系列的函数回调最终会创建RtpTransportInternal和PacketTransportInternal</li>
+<li>首先在MaybeCreateJsepTransport函数中通过CreateIceTransport()创建P2PTransportChannel</li>
+<li>其次以P2PTransportChannel为参数创建<code>rtp_dtls_transport</code>,同理如果rtp和rtcp不同端口的话还需要创建<code>rtcp_dtls_transport</code></li>
+<li>再次以<code>rtp_dtls_transport</code>和<code>rtcp_dtls_transport</code>为参数调用CreateDtlsSrtpTransport创建<code>dtls_srtp_transport</code>,创建完后调用SetDtlsTransports并传入<code>rtcp_dtls_transport</code>和<code>dtls_srtp_transport</code>将其保存到RtpTransportInternal类中的<code>rtcp_packet_transport_</code>和<code>rtp_packet_transport_</code></li>
+<li>同时在SetDtlsTransports函数中会调用RtpTransport::SetRtpPacketTransport将RtpTransport类和PacketTransportInternal类中提供的信号进行绑定,这样当PacketTransportInternal从网络连接中获取到数据后经过相应的信号处理即可触发RtpTransport类中的相关函数</li>
+<li>最后以上面创建好的各transport为参数构造cricket::JsepTransport并调用SetTransportForMid将以mid为key,以JsepTransport对象为value将其插入到<code>mid_to_transport_</code>容器当中,在后续的通信当中根据mid返回使用</li>
+<li>经过上面的流程就已经将RtpTransportInternal和PacketTransportInternal关联起来</li>
+</ul>
+<h3>1.2 RtpTransportInternal的初始化</h3>
+<div class="highlight"><pre><code><span></span><span class="c1">// TODO(steveanton): Perhaps this should be managed by the RtpTransceiver.</span>
+<span class="cp">#pc/peer_connection.cc</span>
+<span class="n">cricket</span><span class="o">::</span><span class="n">VideoChannel</span><span class="o">*</span><span class="w"> </span><span class="nf">PeerConnection::CreateVideoChannel</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&amp;</span><span class="w"> </span><span class="n">mid</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RtpTransportInternal</span><span class="o">*</span><span class="w"> </span><span class="n">rtp_transport</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">GetRtpTransport</span><span class="p">(</span><span class="n">mid</span><span class="p">);</span>
+<span class="w">  </span><span class="n">MediaTransportConfig</span><span class="w"> </span><span class="n">media_transport_config</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">transport_controller_</span><span class="o">-&gt;</span><span class="n">GetMediaTransportConfig</span><span class="p">(</span><span class="n">mid</span><span class="p">);</span>
+<span class="w">  </span><span class="n">cricket</span><span class="o">::</span><span class="n">VideoChannel</span><span class="o">*</span><span class="w"> </span><span class="n">video_channel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">channel_manager</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">CreateVideoChannel</span><span class="p">(</span>
+<span class="w">      </span><span class="n">call_ptr_</span><span class="p">,</span><span class="w"> </span><span class="n">configuration_</span><span class="p">.</span><span class="n">media_config</span><span class="p">,</span><span class="w"> </span><span class="n">rtp_transport</span><span class="p">,</span>
+<span class="w">      </span><span class="n">media_transport_config</span><span class="p">,</span><span class="w"> </span><span class="n">signaling_thread</span><span class="p">(),</span><span class="w"> </span><span class="n">mid</span><span class="p">,</span><span class="w"> </span><span class="n">SrtpRequired</span><span class="p">(),</span>
+<span class="w">      </span><span class="n">GetCryptoOptions</span><span class="p">(),</span><span class="w"> </span><span class="o">&amp;</span><span class="n">ssrc_generator_</span><span class="p">,</span><span class="w"> </span><span class="n">video_options_</span><span class="p">,</span>
+<span class="w">      </span><span class="n">video_bitrate_allocator_factory_</span><span class="p">.</span><span class="n">get</span><span class="p">());</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">video_channel</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">video_channel</span><span class="o">-&gt;</span><span class="n">SignalDtlsSrtpSetupFailure</span><span class="p">.</span><span class="n">connect</span><span class="p">(</span>
+<span class="w">      </span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">PeerConnection</span><span class="o">::</span><span class="n">OnDtlsSrtpSetupFailure</span><span class="p">);</span>
+<span class="w">  </span><span class="n">video_channel</span><span class="o">-&gt;</span><span class="n">SignalSentPacket</span><span class="p">.</span><span class="n">connect</span><span class="p">(</span><span class="k">this</span><span class="p">,</span>
+<span class="w">                                          </span><span class="o">&amp;</span><span class="n">PeerConnection</span><span class="o">::</span><span class="n">OnSentPacket_w</span><span class="p">);</span>
+<span class="w">  </span><span class="n">video_channel</span><span class="o">-&gt;</span><span class="n">SetRtpTransport</span><span class="p">(</span><span class="n">rtp_transport</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">video_channel</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>其流程如下:</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210710-102000-2.png" alt=""></p>
+<ul>
+<li>根据mid从拿RtpTransportInternal实例</li>
+<li>通过ChannelManager创建VideoChannel病调用inin_w函数并传入RtpTransportInternal对象</li>
+<li>将BaseChannel中定义的SignalSentPacket和PeerConnection::OnSentPacket_w函数进行绑定,当数据发送完后会被调用</li>
+<li>通过SetRtpTransport将RtpTransportInternal对象保存到BaseChannel类中供后续rtp/rtcp发送接收以及处理使用</li>
+<li>在SetRtpTransport函数中调用ConnectToRtpTransport函数,该函数的核心作用是使用信号机制将BaseChannel和RtpTransportInternal对象定义的信号进行绑定,这样RtpTransportInternal接收到数据流或可以发送流的时候会通过信号机制触发BaseChannel类中的相应回调</li>
+<li>ConnectToRtpTransport函数的实现如下:</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="cp">#pc/channel.cc</span>
+<span class="kt">bool</span><span class="w"> </span><span class="nf">BaseChannel::ConnectToRtpTransport</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">rtp_transport_</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">RegisterRtpDemuxerSink</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">rtp_transport_</span><span class="o">-&gt;</span><span class="n">SignalReadyToSend</span><span class="p">.</span><span class="n">connect</span><span class="p">(</span>
+<span class="w">      </span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">BaseChannel</span><span class="o">::</span><span class="n">OnTransportReadyToSend</span><span class="p">);</span>
+<span class="w">  </span><span class="n">rtp_transport_</span><span class="o">-&gt;</span><span class="n">SignalRtcpPacketReceived</span><span class="p">.</span><span class="n">connect</span><span class="p">(</span>
+<span class="w">      </span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">BaseChannel</span><span class="o">::</span><span class="n">OnRtcpPacketReceived</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// TODO(bugs.webrtc.org/9719): Media transport should also be used to provide</span>
+<span class="w">  </span><span class="c1">// &#39;writable&#39; state here.</span>
+<span class="w">  </span><span class="n">rtp_transport_</span><span class="o">-&gt;</span><span class="n">SignalWritableState</span><span class="p">.</span><span class="n">connect</span><span class="p">(</span><span class="k">this</span><span class="p">,</span>
+<span class="w">                                              </span><span class="o">&amp;</span><span class="n">BaseChannel</span><span class="o">::</span><span class="n">OnWritableState</span><span class="p">);</span>
+<span class="w">  </span><span class="n">rtp_transport_</span><span class="o">-&gt;</span><span class="n">SignalSentPacket</span><span class="p">.</span><span class="n">connect</span><span class="p">(</span><span class="k">this</span><span class="p">,</span>
+<span class="w">                                            </span><span class="o">&amp;</span><span class="n">BaseChannel</span><span class="o">::</span><span class="n">SignalSentPacket_n</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<div class="highlight"><pre><code><span></span><span class="cp">#pc/rtp_transport_internal.h</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">RtpTransportInternal</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">sigslot</span><span class="o">::</span><span class="n">has_slots</span><span class="o">&lt;&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">public</span><span class="o">:</span>
+<span class="w">  </span><span class="k">virtual</span><span class="w"> </span><span class="o">~</span><span class="n">RtpTransportInternal</span><span class="p">()</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">default</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// Called whenever a transport&#39;s ready-to-send state changes. The argument</span>
+<span class="w">  </span><span class="c1">// is true if all used transports are ready to send. This is more specific</span>
+<span class="w">  </span><span class="c1">// than just &quot;writable&quot;; it means the last send didn&#39;t return ENOTCONN.</span>
+<span class="w">  </span><span class="n">sigslot</span><span class="o">::</span><span class="n">signal1</span><span class="o">&lt;</span><span class="kt">bool</span><span class="o">&gt;</span><span class="w"> </span><span class="n">SignalReadyToSend</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// Called whenever an RTCP packet is received. There is no equivalent signal</span>
+<span class="w">  </span><span class="c1">// for RTP packets because they would be forwarded to the BaseChannel through</span>
+<span class="w">  </span><span class="c1">// the RtpDemuxer callback.</span>
+<span class="w">  </span><span class="n">sigslot</span><span class="o">::</span><span class="n">signal2</span><span class="o">&lt;</span><span class="n">rtc</span><span class="o">::</span><span class="n">CopyOnWriteBuffer</span><span class="o">*</span><span class="p">,</span><span class="w"> </span><span class="kt">int64_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">SignalRtcpPacketReceived</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// Called whenever a transport&#39;s writable state might change. The argument is</span>
+<span class="w">  </span><span class="c1">// true if the transport is writable, otherwise it is false.</span>
+<span class="w">  </span><span class="n">sigslot</span><span class="o">::</span><span class="n">signal1</span><span class="o">&lt;</span><span class="kt">bool</span><span class="o">&gt;</span><span class="w"> </span><span class="n">SignalWritableState</span><span class="p">;</span>
+<span class="w">  </span><span class="n">sigslot</span><span class="o">::</span><span class="n">signal1</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">SentPacket</span><span class="o">&amp;&gt;</span><span class="w"> </span><span class="n">SignalSentPacket</span><span class="p">;</span>
+<span class="w">  </span><span class="k">virtual</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="nf">RegisterRtpDemuxerSink</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">RtpDemuxerCriteria</span><span class="o">&amp;</span><span class="w"> </span><span class="n">criteria</span><span class="p">,</span>
+<span class="w">                                      </span><span class="n">RtpPacketSinkInterface</span><span class="o">*</span><span class="w"> </span><span class="n">sink</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="k">virtual</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="nf">UnregisterRtpDemuxerSink</span><span class="p">(</span><span class="n">RtpPacketSinkInterface</span><span class="o">*</span><span class="w"> </span><span class="n">sink</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>ConnectToRtpTransport的核心实现就是将BaseChannel类和RtpTransportInternal类中定义的信号进行绑定</li>
+<li>SignalRtcpPacketReceived信号当收到rtcp包时会触发进而调用BaseChannel::OnRtcpPacketReceived</li>
+<li>SignalSentPacket信号当连接可数据发送后被触发,由ice connection层触发</li>
+<li>调用RegisterRtpDemuxerSink注册rtp分发器</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="c1">// This class represents a receiver of already parsed RTP packets.</span>
+<span class="cp">#call/rtp_packet_sink_interface.h</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">RtpPacketSinkInterface</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">public</span><span class="o">:</span>
+<span class="w">  </span><span class="k">virtual</span><span class="w"> </span><span class="o">~</span><span class="n">RtpPacketSinkInterface</span><span class="p">()</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">default</span><span class="p">;</span>
+<span class="w">  </span><span class="k">virtual</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">OnRtpPacket</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">RtpPacketReceived</span><span class="o">&amp;</span><span class="w"> </span><span class="n">packet</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<div class="highlight"><pre><code><span></span><span class="cp">#pc/channel.cc</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">BaseChannel</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">sigslot</span><span class="o">::</span><span class="n">has_slots</span><span class="o">&lt;&gt;</span><span class="p">,</span>
+<span class="w">                    </span><span class="k">public</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpPacketSinkInterface</span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// RtpPacketSinkInterface overrides.</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">OnRtpPacket</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpPacketReceived</span><span class="o">&amp;</span><span class="w"> </span><span class="n">packet</span><span class="p">)</span><span class="w"> </span><span class="k">override</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<div class="highlight"><pre><code><span></span><span class="cp">#pc/channel.cc</span>
+<span class="kt">bool</span><span class="w"> </span><span class="nf">BaseChannel::RegisterRtpDemuxerSink</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">rtp_transport_</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">network_thread_</span><span class="o">-&gt;</span><span class="n">Invoke</span><span class="o">&lt;</span><span class="kt">bool</span><span class="o">&gt;</span><span class="p">(</span><span class="n">RTC_FROM_HERE</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="k">this</span><span class="p">]</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">rtp_transport_</span><span class="o">-&gt;</span><span class="n">RegisterRtpDemuxerSink</span><span class="p">(</span><span class="n">demuxer_criteria_</span><span class="p">,</span><span class="w"> </span><span class="k">this</span><span class="p">);</span>
+<span class="w">  </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<div class="highlight"><pre><code><span></span><span class="cp">#pc/rtp_transport.h</span>
+<span class="kt">bool</span><span class="w"> </span><span class="nf">RtpTransport::RegisterRtpDemuxerSink</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">RtpDemuxerCriteria</span><span class="o">&amp;</span><span class="w"> </span><span class="n">criteria</span><span class="p">,</span>
+<span class="w">                                          </span><span class="n">RtpPacketSinkInterface</span><span class="o">*</span><span class="w"> </span><span class="n">sink</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">rtp_demuxer_</span><span class="p">.</span><span class="n">RemoveSink</span><span class="p">(</span><span class="n">sink</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">rtp_demuxer_</span><span class="p">.</span><span class="n">AddSink</span><span class="p">(</span><span class="n">criteria</span><span class="p">,</span><span class="w"> </span><span class="n">sink</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_ERROR</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Failed to register the sink for RTP demuxer.&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>在RtpTransport类中RegisterRtpDemuxerSink将BaseChannel类注册成rtp数据的消费者</li>
+<li>在RtpTransport类的OnReadPacket函数实现中当接收到rtp或rtcp数据流后,首先判断类型如果是rtp数据则将数据通过rtp_demuxer_得到注册的消费者(RtpPacketSinkInterface),也就是BaseChannel,然后通过回调其OnRtpPacket函数将rtp包交给BaseChannel处理</li>
+<li>如果是rtcp包则通过信号机制触发SignalRtcpPacketReceived信号进而调用BaseChannel::OnRtcpPacketReceived函数对rtcp包进行处理</li>
+<li>当创建VideoChannel或者AudioChannel的时候通过一系列的调用最终会创建RtpTransportInternal对象并且会将该对象保存到BaseChannel对象当中供后续使用</li>
+</ul>
+<h2>2 rtp/rtcp数据发送</h2>
+<h3>2.1 rtp包的数据发送流程</h3>
+<ul>
+<li>rtp数据发送流程经过PacedSender队列管理,然后再由<code>paced_sender</code>实现平滑发送,其入队前大致流程如下</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210710-102000-3.png" alt=""></p>
+<ul>
+<li>经过PacedSender所管理的队列处理后其最终将rtp包发送到网络层,其流程如下</li>
+<li>本文涉及到PacedSender相关的东西不做详细分析,在PacedSender原理分析一文中有详细分析</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210710-102000-4.png" alt=""></p>
+<ul>
+<li>在PacketRouter::SendPacket函数中会为rtp包加入TransportSequenceNumber,webrtc子m55版本之后开始使用发送端bwe算法来实现动态码率自适应,在rtp包发送头部必须扩展transport number用于支持tcc算法</li>
+<li>rtp包经过如上图数据连接将数据发送给BaseChannel,最后在BaseChannel层将数据交给RtpTransport最后发送到网络</li>
+<li>在RTPSender::TrySendPacket通过RTPSender::SendPacketToNetwork将数据发给channel层后,自身会将当前发送的rtp包保存到<code>packet_history_</code>,RtpPacketHistory用于缓存发送包,若有丢包重传则从该缓存中拿数据</li>
+</ul>
+<h3>2.2 rtcp包的数据发送流程</h3>
+<ul>
+<li>根据ModuleRtpRtcpImpl的派生关系,它继承Module,重载TimeUntilNextProcess和Process函数</li>
+<li>每隔TimeUntilNextProcess时间间隔会回调一次Process</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="cp">#modules/rtp_rtcp/source/rtp_rtcp_impl.cc</span>
+<span class="c1">// Returns the number of milliseconds until the module want a worker thread</span>
+<span class="c1">// to call Process.</span>
+<span class="kt">int64_t</span><span class="w"> </span><span class="nf">ModuleRtpRtcpImpl::TimeUntilNextProcess</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="o">&lt;</span><span class="kt">int64_t</span><span class="o">&gt;</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span>
+<span class="w">                            </span><span class="n">next_process_time_</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">clock_</span><span class="o">-&gt;</span><span class="n">TimeInMilliseconds</span><span class="p">());</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li><p><code>next_process_time_</code>初始化值为<code>clock_-&gt;TimeInMilliseconds() + kRtpRtcpMaxIdleTimeProcessMs(5ms)</code></p>
+</li>
+<li><p>默认初始情况为每隔5ms调用一次Process</p>
+</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="cp">#modules/rtp_rtcp/source/rtp_rtcp_impl.cc</span>
+<span class="c1">// Process any pending tasks such as timeouts (non time critical events).</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">ModuleRtpRtcpImpl::Process</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">now</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock_</span><span class="o">-&gt;</span><span class="n">TimeInMilliseconds</span><span class="p">();</span>
+<span class="w">  </span><span class="n">next_process_time_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">now</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">kRtpRtcpMaxIdleTimeProcessMs</span><span class="p">;</span>
+<span class="w">  </span><span class="p">.......</span><span class="n">省略</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">rtcp_sender_</span><span class="p">.</span><span class="n">TimeToSendRTCPReport</span><span class="p">())</span>
+<span class="w">    </span><span class="n">rtcp_sender_</span><span class="p">.</span><span class="n">SendRTCP</span><span class="p">(</span><span class="n">GetFeedbackState</span><span class="p">(),</span><span class="w"> </span><span class="n">kRtcpReport</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">TMMBR</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">rtcp_receiver_</span><span class="p">.</span><span class="n">UpdateTmmbrTimers</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">rtcp_receiver_</span><span class="p">.</span><span class="n">NotifyTmmbrUpdated</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>首先更新<code>next_process_time_</code>,由此来看后续的回调时间是已流逝的时间加上5ms</li>
+<li>先调用GetFeedbackState获取反馈状态</li>
+<li>然后使用SendRTCP进行RTCP包发送</li>
+<li>其大概的函数调用流程如下</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210710-102000-5.png" alt=""></p>
+<ul>
+<li>ModuleProcess线程周期性的调用ModuleRtpRtcpImpl::Process函数(最小调用间隔为5ms),该函数通过RTCPSender::TimeToSendRTCPReport函数判断当前是否要立即发送RTCP报文</li>
+<li>若需要立即发送RTCP报文,首先通过ModuleRtpRtcpImpl::GetFeedbackState函数获取RTP包发送统计信息,然后调用RTCPSender::SendRTCP函数将RTCP数据发送到网络层.</li>
+<li>RTCPSender::SendRTCP函数调用RTCPSender::SendCompoundRTCP对RTCP包进行组合</li>
+<li>RTCPSender::SendCompoundRTCP函数首先会调用PrepareReport(<code>feedback_state</code>)根据<code>feedback_state</code>状态确定当前要发送那种类型的RTCP包,紧接着调用其编译函数,构造该类包,如SR包使用BuildSR函数,RR报文使用BuildRR等,最后将构造好的的RTCP包存到PacketContainer容器当中,最后调用其SendPackets函数进行发送</li>
+<li>接下来以SR包为例,分析其构造原理,进而分析RTCP SR包相关内容,SR报文的发送时机是在接收到报文后如果由数据发送则会发送SR报文,相对与媒体发送端</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="cp">#modules/rtp_rtcp/source/rtp_rtcp_impl.cc</span>
+<span class="c1">// TODO(pbos): Handle media and RTX streams separately (separate RTCP</span>
+<span class="c1">// feedbacks).</span>
+<span class="n">RTCPSender</span><span class="o">::</span><span class="n">FeedbackState</span><span class="w"> </span><span class="nf">ModuleRtpRtcpImpl::GetFeedbackState</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTCPSender</span><span class="o">::</span><span class="n">FeedbackState</span><span class="w"> </span><span class="n">state</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// This is called also when receiver_only is true. Hence below</span>
+<span class="w">  </span><span class="c1">// checks that rtp_sender_ exists.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">rtp_sender_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">StreamDataCounters</span><span class="w"> </span><span class="n">rtp_stats</span><span class="p">;</span>
+<span class="w">    </span><span class="n">StreamDataCounters</span><span class="w"> </span><span class="n">rtx_stats</span><span class="p">;</span>
+<span class="w">    </span><span class="n">rtp_sender_</span><span class="o">-&gt;</span><span class="n">GetDataCounters</span><span class="p">(</span><span class="o">&amp;</span><span class="n">rtp_stats</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">rtx_stats</span><span class="p">);</span>
+<span class="w">    </span><span class="n">state</span><span class="p">.</span><span class="n">packets_sent</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">rtp_stats</span><span class="p">.</span><span class="n">transmitted</span><span class="p">.</span><span class="n">packets</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">rtx_stats</span><span class="p">.</span><span class="n">transmitted</span><span class="p">.</span><span class="n">packets</span><span class="p">;</span>
+<span class="w">    </span><span class="n">state</span><span class="p">.</span><span class="n">media_bytes_sent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rtp_stats</span><span class="p">.</span><span class="n">transmitted</span><span class="p">.</span><span class="n">payload_bytes</span><span class="w"> </span><span class="o">+</span>
+<span class="w">                              </span><span class="n">rtx_stats</span><span class="p">.</span><span class="n">transmitted</span><span class="p">.</span><span class="n">payload_bytes</span><span class="p">;</span>
+<span class="w">    </span><span class="n">state</span><span class="p">.</span><span class="n">send_bitrate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rtp_sender_</span><span class="o">-&gt;</span><span class="n">BitrateSent</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">state</span><span class="p">.</span><span class="k">module</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">;</span>
+<span class="w">  </span><span class="n">LastReceivedNTP</span><span class="p">(</span><span class="o">&amp;</span><span class="n">state</span><span class="p">.</span><span class="n">last_rr_ntp_secs</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">state</span><span class="p">.</span><span class="n">last_rr_ntp_frac</span><span class="p">,</span>
+<span class="w">                  </span><span class="o">&amp;</span><span class="n">state</span><span class="p">.</span><span class="n">remote_sr</span><span class="p">);</span>
+<span class="w">  </span><span class="n">state</span><span class="p">.</span><span class="n">last_xr_rtis</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rtcp_receiver_</span><span class="p">.</span><span class="n">ConsumeReceivedXrReferenceTimeInfo</span><span class="p">();</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">state</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>首先根据ModuleRtpRtcpImpl::GetFeedbackState获取rtp发送统计信息</li>
+<li>调用RTCPSender::GetDataCounters获取<code>rtp_stats</code>和<code>rtx_stats</code>,其中<code>rtp_stats</code>代表的是正常发送的RTP流的统计,而<code>rtx_stats</code>应该是丢包重传发送的RTP流的统计,GetDataCounters是从定义在RTCPSender的成员变量 <code>StreamDataCounters rtp_stats_ RTC_GUARDED_BY(statistics_crit_)</code>;<code>StreamDataCounters rtx_rtp_stats_ RTC_GUARDED_BY(statistics_crit_)</code>;中获取</li>
+<li>这两个变量的更新是在RTPSender::SendPacketToNetwork将rtp包发送到网络层后如果发送成功则调用RTPSender::UpdateRtpStats函数对其更新统计</li>
+<li>StreamDataCounters主要在这里主要是统计成功发送的rtp包数量,发送的字节数等信息</li>
+<li>最后调用LastReceivedNTP更新<code>last_rr_ntp_secs,last_rr_ntp_frac</code>以及<code>remote_sr</code>,其中<code>last_rr_ntp_secs</code>对应的是发送端上一次接收到SR报告时的NTP时间对应的秒数,<code>last_rr_ntp_frac</code>为发送端上一次接收到SR报告时的NTP时间的小数,该NTP时间都是在发送端进行计算的属于local NTP time</li>
+<li><code>remote_sr</code>为remote ntp time 计算得来,用与本次SR报告发送是计算时延?</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="cp">#modules/rtp_rtcp/source/rtp_rtcp_impl.cc</span>
+<span class="kt">bool</span><span class="w"> </span><span class="nf">ModuleRtpRtcpImpl::LastReceivedNTP</span><span class="p">(</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="o">*</span><span class="w"> </span><span class="n">rtcp_arrival_time_secs</span><span class="p">,</span><span class="w">  </span><span class="c1">// When we got the last report.</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="o">*</span><span class="w"> </span><span class="n">rtcp_arrival_time_frac</span><span class="p">,</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="o">*</span><span class="w"> </span><span class="n">remote_sr</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Remote SR: NTP inside the last received (mid 16 bits from sec and frac).</span>
+<span class="w">  </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">ntp_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">ntp_frac</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">rtcp_receiver_</span><span class="p">.</span><span class="n">NTP</span><span class="p">(</span><span class="o">&amp;</span><span class="n">ntp_secs</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">ntp_frac</span><span class="p">,</span><span class="w"> </span><span class="n">rtcp_arrival_time_secs</span><span class="p">,</span>
+<span class="w">                          </span><span class="n">rtcp_arrival_time_frac</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="o">*</span><span class="n">remote_sr</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="p">((</span><span class="n">ntp_secs</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mh">0x0000ffff</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">16</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="p">((</span><span class="n">ntp_frac</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mh">0xffff0000</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">16</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>该函数的核心实现是通过RTCPReceiver::NTP函数是通过获取远程端发送过来的包得出来的,<code>rtcp_arrival_time_secs</code>为发送端上一次接收到SR报告的ntp时间的秒数(在发送端计算),<code>rtcp_arrival_time_frac</code>为发送端上一次接收到SR报告的ntp时间小数(在发送端计算),<code>ntp_secs</code>为发送端上一次接收到远端发送过来的SR报告,从其报告中解析其NTP字段得出的时间秒数,<code>ntp_frac</code>为发送端上一次接收到远端发送过来的SR报告,从其报告中解析其NTP字段得出的时间小数,对应的是remote NTP time</li>
+<li><code>remote_sr</code>为remote ntp time 计算得来,用于填充SR报告中的LSR部分</li>
+<li>成功获取到RTCPSender::FeedbackState后,到这里已经包含了在本次RTCP报文发送时已经得到了已经发送了多少的RTP数据等信息</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">int32_t</span><span class="w"> </span><span class="nf">RTCPSender::SendRTCP</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">FeedbackState</span><span class="o">&amp;</span><span class="w"> </span><span class="n">feedback_state</span><span class="p">,</span>
+<span class="w">                              </span><span class="n">RTCPPacketType</span><span class="w"> </span><span class="n">packetType</span><span class="p">,</span>
+<span class="w">                              </span><span class="kt">int32_t</span><span class="w"> </span><span class="n">nack_size</span><span class="p">,</span>
+<span class="w">                              </span><span class="k">const</span><span class="w"> </span><span class="kt">uint16_t</span><span class="o">*</span><span class="w"> </span><span class="n">nack_list</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">SendCompoundRTCP</span><span class="p">(</span>
+<span class="w">      </span><span class="n">feedback_state</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">set</span><span class="o">&lt;</span><span class="n">RTCPPacketType</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="n">packetType</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">packetType</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">),</span>
+<span class="w">      </span><span class="n">nack_size</span><span class="p">,</span><span class="w"> </span><span class="n">nack_list</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>以FeedbackState为参数调用SendCompoundRTCP将其发送到底层</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">int32_t</span><span class="w"> </span><span class="nf">RTCPSender::SendCompoundRTCP</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">FeedbackState</span><span class="o">&amp;</span><span class="w"> </span><span class="n">feedback_state</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">set</span><span class="o">&lt;</span><span class="n">RTCPPacketType</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">packet_types</span><span class="p">,</span>
+<span class="w">    </span><span class="kt">int32_t</span><span class="w"> </span><span class="n">nack_size</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">uint16_t</span><span class="o">*</span><span class="w"> </span><span class="n">nack_list</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">PacketContainer</span><span class="w"> </span><span class="n">container</span><span class="p">(</span><span class="n">transport_</span><span class="p">,</span><span class="w"> </span><span class="n">event_log_</span><span class="p">);</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">max_packet_size</span><span class="p">;</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">rtc</span><span class="o">::</span><span class="n">CritScope</span><span class="w"> </span><span class="n">lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">critical_section_rtcp_sender_</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// Add all flags as volatile. Non volatile entries will not be overwritten.</span>
+<span class="w">    </span><span class="c1">// All new volatile flags added will be consumed by the end of this call.</span>
+<span class="w">    </span><span class="n">SetFlags</span><span class="p">(</span><span class="n">packet_types</span><span class="p">,</span><span class="w"> </span><span class="nb">true</span><span class="p">);</span>
+<span class="w">    </span><span class="p">.....</span>
+<span class="w">    </span><span class="c1">// We need to send our NTP even if we haven&#39;t received any reports.</span>
+<span class="w">    </span><span class="n">RtcpContext</span><span class="w"> </span><span class="n">context</span><span class="p">(</span><span class="n">feedback_state</span><span class="p">,</span><span class="w"> </span><span class="n">nack_size</span><span class="p">,</span><span class="w"> </span><span class="n">nack_list</span><span class="p">,</span>
+<span class="w">                        </span><span class="n">clock_</span><span class="o">-&gt;</span><span class="n">TimeInMicroseconds</span><span class="p">());</span>
+<span class="w">    </span><span class="n">PrepareReport</span><span class="p">(</span><span class="n">feedback_state</span><span class="p">);</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">rtcp</span><span class="o">::</span><span class="n">RtcpPacket</span><span class="o">&gt;</span><span class="w"> </span><span class="n">packet_bye</span><span class="p">;</span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">it</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">report_flags_</span><span class="p">.</span><span class="n">begin</span><span class="p">();</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">it</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">report_flags_</span><span class="p">.</span><span class="n">end</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">auto</span><span class="w"> </span><span class="n">builder_it</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">builders_</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">it</span><span class="o">-&gt;</span><span class="n">type</span><span class="p">);</span>
+<span class="w">      </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">builder_it</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">builders_</span><span class="p">.</span><span class="n">end</span><span class="p">())</span>
+<span class="w">          </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Could not find builder for packet type &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">it</span><span class="o">-&gt;</span><span class="n">type</span><span class="p">;</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">it</span><span class="o">-&gt;</span><span class="n">is_volatile</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">report_flags_</span><span class="p">.</span><span class="n">erase</span><span class="p">(</span><span class="n">it</span><span class="o">++</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="o">++</span><span class="n">it</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="n">BuilderFunc</span><span class="w"> </span><span class="n">func</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">builder_it</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">;</span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">rtcp</span><span class="o">::</span><span class="n">RtcpPacket</span><span class="o">&gt;</span><span class="w"> </span><span class="n">packet</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="o">-&gt;*</span><span class="n">func</span><span class="p">)(</span><span class="n">context</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">packet</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="k">nullptr</span><span class="p">)</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="mi">-1</span><span class="p">;</span>
+<span class="w">      </span><span class="c1">// If there is a BYE, don&#39;t append now - save it and append it</span>
+<span class="w">      </span><span class="c1">// at the end later.</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">builder_it</span><span class="o">-&gt;</span><span class="n">first</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">kRtcpBye</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">packet_bye</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">packet</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">container</span><span class="p">.</span><span class="n">Append</span><span class="p">(</span><span class="n">packet</span><span class="p">.</span><span class="n">release</span><span class="p">());</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// Append the BYE now at the end</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">packet_bye</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">container</span><span class="p">.</span><span class="n">Append</span><span class="p">(</span><span class="n">packet_bye</span><span class="p">.</span><span class="n">release</span><span class="p">());</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">packet_type_counter_observer_</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">packet_type_counter_observer_</span><span class="o">-&gt;</span><span class="n">RtcpPacketTypesCounterUpdated</span><span class="p">(</span>
+<span class="w">          </span><span class="n">remote_ssrc_</span><span class="p">,</span><span class="w"> </span><span class="n">packet_type_counter_</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">AllVolatileFlagsConsumed</span><span class="p">());</span>
+<span class="w">    </span><span class="n">max_packet_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">max_packet_size_</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">bytes_sent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">container</span><span class="p">.</span><span class="n">SendPackets</span><span class="p">(</span><span class="n">max_packet_size</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">bytes_sent</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mi">-1</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>首先SetFlags更新<code>report_flags_</code>集合将当前传入的<code>packet_types</code>插入到集合</li>
+<li>以当前NTP时间做为参数构造RtcpContext</li>
+<li>PrepareReport以<code>feedback_state</code>为参数,来选择要构建什么样的rtcp报文,同时会根据<code>feedback_state</code>中当前rtp包的发送码率配合<code>report_interval_ms_</code>来刷新<code>next_time_to_send_rtcp_</code>也就是下次发送RTCP的时间</li>
+<li>根据对PrepareReport的分析,它的原理是假设当前<code>report_flags_</code>集合中包含了kRtcpSr或者kRtcpRr并且volatile值为false的情况下表示RTCP已经有了则直接返回</li>
+<li>否则如果RtcpMode为kCompound(webrtc默认为这个模式),则会根据<code>sending_</code>变量判断当前是发送端还是接收端,<code>SetFlag(sending_ ? kRtcpSr : kRtcpRr, true)</code>,如果是发送端则准备发送发送者报告,如果是接收端不发送数据则准备发送RR报文</li>
+<li>同时还会准备扩展报文如kRtcpAnyExtendedReports=&gt;SetFlag(kRtcpAnyExtendedReports, true);</li>
+<li>PrepareReport函数更新完<code>report_flags_</code>集合,将要发送的报文的flag插入到该集合后,开始对<code>report_flags_</code>集合进行遍历,对<code>report_flags_</code>集合中已有的标记使用相应的build函数构造报文,如SR报文BuildSR函数</li>
+<li>将构造好的rtcp::RtcpPacket添加到container容器,然后将当前已经构造完的报文的标记从<code>report_flags_</code>集合中移除</li>
+<li>最后调用<code>container.SendPackets(max_packet_size)</code>;将报文发给RTCP通道</li>
+<li>以SR报文为例分析SR RTCP协议</li>
+</ul>
+<p>协议地址:
+<a href="http://tools.ietf.org/html/rfc3550#section-6.4.1">http://tools.ietf.org/html/rfc3550#section-6.4.1</a></p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210710-102000-6.png" alt=""></p>
+<ul>
+<li>RTCP SR报文分成两大部分第一部分是发送者信息,第二部分是接收者报告块</li>
+<li>发送者信息块的描述如下</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Fields</th>
+<th><strong>explain</strong></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>NTP timestamp</strong></td>
+<td>64 bits 网络时间戳,用于不同源之间的同步,如音频和视频</td>
+</tr>
+<tr>
+<td><strong>RTP timestamp</strong></td>
+<td>32 bits RTP包发送的相对时间戳,该frame从编码器中编码出来的时间</td>
+</tr>
+<tr>
+<td><strong>sender's packet count</strong></td>
+<td>32 bits 发送者总发送的包数,SSRC发生变化时会被重置</td>
+</tr>
+<tr>
+<td><strong>sender's octet count</strong></td>
+<td>32 bits 发送者总发送的字节数=每个包的字节数X总的发包数</td>
+</tr>
+</tbody>
+</table><ul>
+<li>接收报告块的描述如下:</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Fields</th>
+<th><strong>Explain</strong></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>SSRC n</strong></td>
+<td>32 bits, source identifier，接收到的每个媒体源,如音频和视频,n表示第几个</td>
+</tr>
+<tr>
+<td><strong>fraction lost:</strong></td>
+<td>8 bits 上一次报告之后到本次报告之间的丢包比列</td>
+</tr>
+<tr>
+<td><strong>number of packets lost</strong></td>
+<td>24 bits 自接收开始丢包总数,迟到的包不算</td>
+</tr>
+<tr>
+<td><strong>highest sequence number</strong></td>
+<td>32 bits 低16位表示收到的最大seq,高16位表示seq的循环次数</td>
+</tr>
+<tr>
+<td>
+<strong>interarrival</strong> <strong>jitter</strong>
+</td>
+<td>32 bits 估算的RTP包到达时间间隔的统计方差,延迟大小</td>
+</tr>
+<tr>
+<td><strong>last SR timestamp (LSR)</strong></td>
+<td>32 bits 上一次接收到的SR的NTP时间戳(remote ntp time),取值为:ntp_msw&amp;0xffff + ntp_lsw&gt;&gt;16（取ntp_msw的低16位和ntp_lsw的高16位）</td>
+</tr>
+<tr>
+<td><strong>delay since last SR (DLSR)</strong></td>
+<td>32 bits 从接收到上一个SR包到发送此接收报告块之间的延时,以1/65536秒为单位.</td>
+</tr>
+</tbody>
+</table><ul>
+<li>BuildSR函数的实现如下:</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">rtcp</span><span class="o">::</span><span class="n">RtcpPacket</span><span class="o">&gt;</span><span class="w"> </span><span class="n">RTCPSender</span><span class="o">::</span><span class="n">BuildSR</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">RtcpContext</span><span class="o">&amp;</span><span class="w"> </span><span class="n">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Timestamp shouldn&#39;t be estimated before first media frame.</span>
+<span class="w">  </span><span class="n">RTC_DCHECK_GE</span><span class="p">(</span><span class="n">last_frame_capture_time_ms_</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// The timestamp of this RTCP packet should be estimated as the timestamp of</span>
+<span class="w">  </span><span class="c1">// the frame being captured at this moment. We are calculating that</span>
+<span class="w">  </span><span class="c1">// timestamp as the last frame&#39;s timestamp + the time since the last frame</span>
+<span class="w">  </span><span class="c1">// was captured.</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">rtp_rate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rtp_clock_rates_khz_</span><span class="p">[</span><span class="n">last_payload_type_</span><span class="p">];</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">rtp_rate</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">rtp_rate</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="p">(</span><span class="n">audio_</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">kBogusRtpRateForAudioRtcp</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">kVideoPayloadTypeFrequency</span><span class="p">)</span><span class="w"> </span><span class="o">/</span>
+<span class="w">        </span><span class="mi">1000</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// Round now_us_ to the closest millisecond, because Ntp time is rounded</span>
+<span class="w">  </span><span class="c1">// when converted to milliseconds,</span>
+<span class="w">  </span><span class="c1">// 同一帧数据的rtp_timestamp的时间戳是一样的</span>
+<span class="w">  </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">rtp_timestamp</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">timestamp_offset_</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">last_rtp_timestamp_</span><span class="w"> </span><span class="o">+</span>
+<span class="w">      </span><span class="p">((</span><span class="n">ctx</span><span class="p">.</span><span class="n">now_us_</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">500</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">1000</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">last_frame_capture_time_ms_</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">rtp_rate</span><span class="p">;</span>
+<span class="w">  </span><span class="n">rtcp</span><span class="o">::</span><span class="n">SenderReport</span><span class="o">*</span><span class="w"> </span><span class="n">report</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">rtcp</span><span class="o">::</span><span class="n">SenderReport</span><span class="p">();</span>
+<span class="w">  </span><span class="n">report</span><span class="o">-&gt;</span><span class="n">SetSenderSsrc</span><span class="p">(</span><span class="n">ssrc_</span><span class="p">);</span>
+<span class="w">  </span><span class="n">report</span><span class="o">-&gt;</span><span class="n">SetNtp</span><span class="p">(</span><span class="n">TimeMicrosToNtp</span><span class="p">(</span><span class="n">ctx</span><span class="p">.</span><span class="n">now_us_</span><span class="p">));</span>
+<span class="w">  </span><span class="n">report</span><span class="o">-&gt;</span><span class="n">SetRtpTimestamp</span><span class="p">(</span><span class="n">rtp_timestamp</span><span class="p">);</span>
+<span class="w">  </span><span class="n">report</span><span class="o">-&gt;</span><span class="n">SetPacketCount</span><span class="p">(</span><span class="n">ctx</span><span class="p">.</span><span class="n">feedback_state_</span><span class="p">.</span><span class="n">packets_sent</span><span class="p">);</span>
+<span class="w">  </span><span class="n">report</span><span class="o">-&gt;</span><span class="n">SetOctetCount</span><span class="p">(</span><span class="n">ctx</span><span class="p">.</span><span class="n">feedback_state_</span><span class="p">.</span><span class="n">media_bytes_sent</span><span class="p">);</span>
+<span class="w">  </span><span class="n">report</span><span class="o">-&gt;</span><span class="n">SetReportBlocks</span><span class="p">(</span><span class="n">CreateReportBlocks</span><span class="p">(</span><span class="n">ctx</span><span class="p">.</span><span class="n">feedback_state_</span><span class="p">));</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">rtcp</span><span class="o">::</span><span class="n">RtcpPacket</span><span class="o">&gt;</span><span class="p">(</span><span class="n">report</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>依次依据RTCP SR报告约束填充信息</li>
+<li>着重分析其接收报告块信息的填充</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">rtcp</span><span class="o">::</span><span class="n">ReportBlock</span><span class="o">&gt;</span><span class="w"> </span><span class="n">RTCPSender</span><span class="o">::</span><span class="n">CreateReportBlocks</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">FeedbackState</span><span class="o">&amp;</span><span class="w"> </span><span class="n">feedback_state</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">rtcp</span><span class="o">::</span><span class="n">ReportBlock</span><span class="o">&gt;</span><span class="w"> </span><span class="n">result</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">receive_statistics_</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">result</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// TODO(danilchap): Support sending more than |RTCP_MAX_REPORT_BLOCKS| per</span>
+<span class="w">  </span><span class="c1">// compound rtcp packet when single rtcp module is used for multiple media</span>
+<span class="w">  </span><span class="c1">// streams.</span>
+<span class="w">  </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">receive_statistics_</span><span class="o">-&gt;</span><span class="n">RtcpReportBlocks</span><span class="p">(</span><span class="n">RTCP_MAX_REPORT_BLOCKS</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">result</span><span class="p">.</span><span class="n">empty</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">((</span><span class="n">feedback_state</span><span class="p">.</span><span class="n">last_rr_ntp_secs</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="o">||</span>
+<span class="w">                          </span><span class="p">(</span><span class="n">feedback_state</span><span class="p">.</span><span class="n">last_rr_ntp_frac</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Get our NTP as late as possible to avoid a race.</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">now</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">CompactNtp</span><span class="p">(</span><span class="n">TimeMicrosToNtp</span><span class="p">(</span><span class="n">clock_</span><span class="o">-&gt;</span><span class="n">TimeInMicroseconds</span><span class="p">()));</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">receive_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">feedback_state</span><span class="p">.</span><span class="n">last_rr_ntp_secs</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mh">0x0000FFFF</span><span class="p">;</span>
+<span class="w">    </span><span class="n">receive_time</span><span class="w"> </span><span class="o">&lt;&lt;=</span><span class="w"> </span><span class="mi">16</span><span class="p">;</span>
+<span class="w">    </span><span class="n">receive_time</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="p">(</span><span class="n">feedback_state</span><span class="p">.</span><span class="n">last_rr_ntp_frac</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mh">0xffff0000</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">16</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">delay_since_last_sr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">now</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">receive_time</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// TODO(danilchap): Instead of setting same value on all report blocks,</span>
+<span class="w">    </span><span class="c1">// set only when media_ssrc match sender ssrc of the sender report</span>
+<span class="w">    </span><span class="c1">// remote times were taken from.</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">report_block</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">result</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">report_block</span><span class="p">.</span><span class="n">SetLastSr</span><span class="p">(</span><span class="n">feedback_state</span><span class="p">.</span><span class="n">remote_sr</span><span class="p">);</span>
+<span class="w">      </span><span class="n">report_block</span><span class="p">.</span><span class="n">SetDelayLastSr</span><span class="p">(</span><span class="n">delay_since_last_sr</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">result</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>首先<code>receive_statistics_-&gt;RtcpReportBlocks</code>获取接收报告块的个数</li>
+<li>计算<code>delay_since_last_sr</code>也就是本次发送SR报告距离上一次收到SR报告之间的时延</li>
+<li><code>SetLastSr(feedback_state.remote_sr)</code>,将上一次接收到的SR报告中的ntp时间填充LSR</li>
+<li>SetDelayLastSr填充本次发送SR报告距离上一次收到SR报告之间的时延</li>
+</ul>
+<hr>
+
+<h4><p>原文出处：<a href='https://www.jianshu.com/p/fd2860178b93' target='blank'>WebRTC RTP Video数据接收及组包分析</a></p></h4>
+<p>经过对WebRTC RTP/RTCP协议分析分析,得出BaseChannel类通过信号和RtpTransport建立关系,同时RtpTransport也通过
+信号和PacketTransportInternal建立关系,数据的接收全部通过信号回调进行触发</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210710-104000-0.png" alt=""></p>
+<h2>1 Video RTP 接收处理</h2>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210710-104000-1.png" alt=""></p>
+<ul>
+<li>首先经过call模块处理将rtp视频数据送到RtpVideoStreamReceiver::OnRtpPacket函数,然后将调用RtpVideoStreamReceiver::ReceivePacket函数进行RTP包解析</li>
+<li>解析完之后的数据,会通过RtpVideoStreamReceiver::OnReceivedPayloadData回调,在该函数中会将rtp数据包打包成VCMPacket包,然后将VCMPacket包插入到<code>packet_buffer_</code></li>
+<li>在PacketBuffer::InsertPacket函数中插入完后会调用PacketBuffer::FindFrames函数查找有没有合适的帧</li>
+<li><code>video_coding::PacketBuffer</code>的工作原理如下</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210710-104000-2.png" alt=""></p>
+<ul>
+<li><code>video_coding::PacketBuffer</code>维护两个集合<code>sequence_buffer_</code>用于管理seqNum对应ContinuityInfo结构体</li>
+<li><code>data_buffer_</code>管理实际的VCMPacket包</li>
+<li><code>video_coding::PacketBuffer::ContinuityInfo</code>的定义如下</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">ContinuityInfo</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// The sequence number of the packet.</span>
+<span class="w">    </span><span class="kt">uint16_t</span><span class="w"> </span><span class="n">seq_num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// If this is the first packet of the frame.</span>
+<span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">frame_begin</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// If this is the last packet of the frame.</span>
+<span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">frame_end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// If this slot is currently used.</span>
+<span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">used</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// If all its previous packets have been inserted into the packet buffer.</span>
+<span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">continuous</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// If this packet has been used to create a frame already.</span>
+<span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">frame_created</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<ul>
+<li>used表示当前位置已经使用</li>
+<li><code>video_coding::PacketBuffer</code>依赖OnAssembledFrameCallback而OnAssembledFrameCallback由RtpVideoStreamReceiver类实现</li>
+<li><code>video_coding::PacketBuffer</code>在构造的时候会初始化<code>data_buffer_</code>和<code>sequence_buffer_</code>容器的大小默认为512</li>
+<li><code>video_coding::PacketBuffer</code>的创建发生在RtpVideoStreamReceiver类的构造阶段,RtpVideoStreamReceiver通过调用PacketBuffer::Create函数创建<code>video_coding::PacketBuffer</code>并将实例对象保存成其私有成员变量<code>packet_buffer_</code></li>
+<li><code>video_coding::PacketBuffer</code>支持扩张,其扩张通过ExpandBufferSize函数实现,具体代码如下:</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">bool</span><span class="w"> </span><span class="nf">PacketBuffer::ExpandBufferSize</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">size_</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">max_size_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_WARNING</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;PacketBuffer is already at max size (&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">max_size_</span>
+<span class="w">                        </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;), failed to increase size.&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">new_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">max_size_</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">size_</span><span class="p">);</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">VCMPacket</span><span class="o">&gt;</span><span class="w"> </span><span class="n">new_data_buffer</span><span class="p">(</span><span class="n">new_size</span><span class="p">);</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">ContinuityInfo</span><span class="o">&gt;</span><span class="w"> </span><span class="n">new_sequence_buffer</span><span class="p">(</span><span class="n">new_size</span><span class="p">);</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">size_</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">used</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kt">size_t</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">seq_num</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">new_size</span><span class="p">;</span>
+<span class="w">      </span><span class="n">new_sequence_buffer</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+<span class="w">      </span><span class="n">new_data_buffer</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">data_buffer_</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">size_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">new_size</span><span class="p">;</span>
+<span class="w">  </span><span class="n">sequence_buffer_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">new_sequence_buffer</span><span class="p">);</span>
+<span class="w">  </span><span class="n">data_buffer_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">new_data_buffer</span><span class="p">);</span>
+<span class="w">  </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;PacketBuffer size expanded to &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">new_size</span><span class="p">;</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>首先判断<code>size_</code>是否已经为最大值2048,如果是则返回,因为最大支持2048</li>
+<li>假设原来的大小为512,经过调用ExpandBufferSize则扩大到1024</li>
+<li>重新创建<code>new_data_buffer</code>和<code>new_sequence_buffer</code>容器,其大小为新值1024</li>
+<li>将新容器移动构造到原有容器,并且保留原有容器中的数据</li>
+</ul>
+<h2>2 Video RTP 数据组包流程</h2>
+<ul>
+<li>video rtp包组包发生在PacketBuffer::InsertPacket函数</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">bool</span><span class="w"> </span><span class="nf">PacketBuffer::InsertPacket</span><span class="p">(</span><span class="n">VCMPacket</span><span class="o">*</span><span class="w"> </span><span class="n">packet</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">RtpFrameObject</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">found_frames</span><span class="p">;</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">rtc</span><span class="o">::</span><span class="n">CritScope</span><span class="w"> </span><span class="n">lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">crit_</span><span class="p">);</span>
+<span class="w">    </span><span class="n">OnTimestampReceived</span><span class="p">(</span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">timestamp</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">uint16_t</span><span class="w"> </span><span class="n">seq_num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">seqNum</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">size_t</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">seq_num</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">size_</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">first_packet_received_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">first_seq_num_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">seq_num</span><span class="p">;</span>
+<span class="w">      </span><span class="n">first_packet_received_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">AheadOf</span><span class="p">(</span><span class="n">first_seq_num_</span><span class="p">,</span><span class="w"> </span><span class="n">seq_num</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// If we have explicitly cleared past this packet then it&#39;s old,</span>
+<span class="w">      </span><span class="c1">// don&#39;t insert it, just silently ignore it.</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_cleared_to_first_seq_num_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">delete</span><span class="p">[]</span><span class="w"> </span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">dataPtr</span><span class="p">;</span>
+<span class="w">        </span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">dataPtr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="n">first_seq_num_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">seq_num</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">used</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Duplicate packet, just delete the payload.</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">data_buffer_</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">seqNum</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">seqNum</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">delete</span><span class="p">[]</span><span class="w"> </span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">dataPtr</span><span class="p">;</span>
+<span class="w">        </span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">dataPtr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="c1">// The packet buffer is full, try to expand the buffer.</span>
+<span class="w">      </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">ExpandBufferSize</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="n">seq_num</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">size_</span><span class="p">].</span><span class="n">used</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">seq_num</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">size_</span><span class="p">;</span>
+<span class="w">      </span><span class="c1">// Packet buffer is still full since we were unable to expand the buffer.</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">used</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Clear the buffer, delete payload, and return false to signal that a</span>
+<span class="w">        </span><span class="c1">// new keyframe is needed.</span>
+<span class="w">        </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_WARNING</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Clear PacketBuffer and request key frame.&quot;</span><span class="p">;</span>
+<span class="w">        </span><span class="n">Clear</span><span class="p">();</span>
+<span class="w">        </span><span class="k">delete</span><span class="p">[]</span><span class="w"> </span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">dataPtr</span><span class="p">;</span>
+<span class="w">        </span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">dataPtr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">frame_begin</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">is_first_packet_in_frame</span><span class="p">();</span>
+<span class="w">    </span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">frame_end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">is_last_packet_in_frame</span><span class="p">();</span>
+<span class="w">    </span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">seq_num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">seqNum</span><span class="p">;</span>
+<span class="w">    </span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">continuous</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">frame_created</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">used</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">    </span><span class="n">data_buffer_</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">packet</span><span class="p">;</span>
+<span class="w">    </span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">dataPtr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">    </span><span class="n">UpdateMissingPackets</span><span class="p">(</span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">seqNum</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">now_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clock_</span><span class="o">-&gt;</span><span class="n">TimeInMilliseconds</span><span class="p">();</span>
+<span class="w">    </span><span class="n">last_received_packet_ms_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">now_ms</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">video_header</span><span class="p">.</span><span class="n">frame_type</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">VideoFrameType</span><span class="o">::</span><span class="n">kVideoFrameKey</span><span class="p">)</span>
+<span class="w">      </span><span class="n">last_received_keyframe_packet_ms_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">now_ms</span><span class="p">;</span>
+<span class="w">    </span><span class="n">found_frames</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FindFrames</span><span class="p">(</span><span class="n">seq_num</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">RtpFrameObject</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">frame</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">found_frames</span><span class="p">)</span>
+<span class="w">    </span><span class="n">assembled_frame_callback_</span><span class="o">-&gt;</span><span class="n">OnAssembledFrame</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">frame</span><span class="p">));</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span><span class="w">   </span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>首先根据VCMPacket包的seqNum求容器索引,使用<code>seq_num % size_</code>,假设容器大小为512,第一个seqNumber为2680,那么得出当前要插入到容器中的位置为120,根据rtp包seqNum的连续性可以得出后续如果不出现丢包的情况索引会依次递增+1(120,121,122,123,124.....),使用这种办法取索引是为了丢包重传包插入到该容器的时候确保索引依然连续吧?</li>
+<li>判断是否为第一次插入VCMPacket,如果是则记录首次VCMPacket对应的seqNum将其赋值给<code>first_seq_num_</code></li>
+<li>每次插入会判断<code>first_seq_num_</code>是否在VCMPacket的seqNum的前面,如果<code>first_seq_num_</code>是在VCMPacket的seqNum的前面则根据<code>is_cleared_to_first_seq_num_</code>是true删除VCMPacket的数据部分,用处后续分析</li>
+<li>如果容器已经满了则进行扩张,扩张原则不超过2048并且按原有容器的双倍大小进行扩展</li>
+<li><code>data_buffer_[index] = *packet</code>调用移动拷贝构造函数将要插入的VCMPacket的信息赋值给<code>data_buffer_[index]</code></li>
+<li>调用UpdateMissingPackets更新<code>missing_packets_</code>容器(未看明白算法)</li>
+<li>最后回调FindFrames查找是否由合适的帧</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">bool</span><span class="w"> </span><span class="nf">PacketBuffer::PotentialNewFrame</span><span class="p">(</span><span class="kt">uint16_t</span><span class="w"> </span><span class="n">seq_num</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">seq_num</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">size_</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">prev_index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">size_</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">  </span><span class="p">....</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">frame_begin</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">  </span><span class="p">....</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="n">prev_index</span><span class="p">].</span><span class="n">continuous</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>判断当前<code>seq_num</code>对应的VCMPackage包是否是潜在的新帧</li>
+<li>如果当前<code>seq_num</code>对应索引的<code>sequence_buffer_[index].frame_begin</code>为true则表示当前<code>seq_number</code>为新的一帧的开始</li>
+<li>如果当前<code>seq_num</code>对应索引的前一个索引的<code>sequence_buffer_[prev_index].continuous</code>为true则表示是潜在的新的一帧</li>
+<li>FindFrames函数的查询实现如下:</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">RtpFrameObject</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">PacketBuffer</span><span class="o">::</span><span class="n">FindFrames</span><span class="p">(</span>
+<span class="w">    </span><span class="kt">uint16_t</span><span class="w"> </span><span class="n">seq_num</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">RtpFrameObject</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">found_frames</span><span class="p">;</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">size_</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">PotentialNewFrame</span><span class="p">(</span><span class="n">seq_num</span><span class="p">);</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">size_t</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">seq_num</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">size_</span><span class="p">;</span>
+<span class="w">    </span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">continuous</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// If all packets of the frame is continuous, find the first packet of the</span>
+<span class="w">    </span><span class="c1">// frame and create an RtpFrameObject.</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">frame_end</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kt">size_t</span><span class="w"> </span><span class="n">frame_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">      </span><span class="kt">int</span><span class="w"> </span><span class="n">max_nack_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">-1</span><span class="p">;</span>
+<span class="w">      </span><span class="kt">uint16_t</span><span class="w"> </span><span class="n">start_seq_num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">seq_num</span><span class="p">;</span>
+<span class="w">      </span><span class="n">RtpPacketInfos</span><span class="o">::</span><span class="n">vector_type</span><span class="w"> </span><span class="n">packet_infos</span><span class="p">;</span>
+<span class="w">      </span><span class="c1">// Find the start index by searching backward until the packet with</span>
+<span class="w">      </span><span class="c1">// the |frame_begin| flag is set.</span>
+<span class="w">      </span><span class="kt">int</span><span class="w"> </span><span class="n">start_index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">index</span><span class="p">;</span>
+<span class="w">      </span><span class="kt">size_t</span><span class="w"> </span><span class="n">tested_packets</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">      </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">frame_timestamp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">data_buffer_</span><span class="p">[</span><span class="n">start_index</span><span class="p">].</span><span class="n">timestamp</span><span class="p">;</span>
+<span class="w">      </span><span class="c1">// Identify H.264 keyframes by means of SPS, PPS, and IDR.</span>
+<span class="w">      </span><span class="kt">bool</span><span class="w"> </span><span class="n">is_h264</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">data_buffer_</span><span class="p">[</span><span class="n">start_index</span><span class="p">].</span><span class="n">codec</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">kVideoCodecH264</span><span class="p">;</span>
+<span class="w">      </span><span class="kt">bool</span><span class="w"> </span><span class="n">has_h264_sps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">      </span><span class="kt">bool</span><span class="w"> </span><span class="n">has_h264_pps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">      </span><span class="kt">bool</span><span class="w"> </span><span class="n">has_h264_idr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">      </span><span class="kt">bool</span><span class="w"> </span><span class="n">is_h264_keyframe</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">      </span><span class="cm">/*使用while true 循环递减组包*/</span>
+<span class="w">      </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="nb">true</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="o">++</span><span class="n">tested_packets</span><span class="p">;</span>
+<span class="w">        </span><span class="cm">/*计算一帧RTP包的总大小*/</span>
+<span class="w">        </span><span class="n">frame_size</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">data_buffer_</span><span class="p">[</span><span class="n">start_index</span><span class="p">].</span><span class="n">sizeBytes</span><span class="p">;</span>
+<span class="w">        </span><span class="cm">/*.....省略...*/</span>
+<span class="w">        </span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="n">start_index</span><span class="p">].</span><span class="n">frame_created</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">        </span><span class="c1">// Should use |push_front()| since the loop traverses backwards. But</span>
+<span class="w">        </span><span class="c1">// it&#39;s too inefficient to do so on a vector so we&#39;ll instead fix the</span>
+<span class="w">        </span><span class="c1">// order afterwards.</span>
+<span class="w">        </span><span class="cm">/*将data_buffer_[start_index].packet_info存入到packet_infos容器*/</span><span class="w">  </span>
+<span class="w">        </span><span class="n">packet_infos</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">data_buffer_</span><span class="p">[</span><span class="n">start_index</span><span class="p">].</span><span class="n">packet_info</span><span class="p">);</span>
+<span class="w">        </span><span class="cm">/*非H264类型的RTP包当检测到sequence_buffer_[start_index].frame_begin为</span>
+<span class="cm">          true,也就是按照下面分析的检测到seqNumber=2680的时候会退出循环</span>
+<span class="cm">        */</span><span class="w">  </span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">is_h264</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="n">start_index</span><span class="p">].</span><span class="n">frame_begin</span><span class="p">)</span>
+<span class="w">          </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_h264</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="n">is_h264_keyframe</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="o">*</span><span class="w"> </span><span class="n">h264_header</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">absl</span><span class="o">::</span><span class="n">get_if</span><span class="o">&lt;</span><span class="n">RTPVideoHeaderH264</span><span class="o">&gt;</span><span class="p">(</span>
+<span class="w">              </span><span class="o">&amp;</span><span class="n">data_buffer_</span><span class="p">[</span><span class="n">start_index</span><span class="p">].</span><span class="n">video_header</span><span class="p">.</span><span class="n">video_type_header</span><span class="p">);</span>
+<span class="w">          </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">h264_header</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">h264_header</span><span class="o">-&gt;</span><span class="n">nalus_length</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">kMaxNalusPerPacket</span><span class="p">)</span>
+<span class="w">            </span><span class="k">return</span><span class="w"> </span><span class="n">found_frames</span><span class="p">;</span>
+<span class="w">          </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">h264_header</span><span class="o">-&gt;</span><span class="n">nalus_length</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">j</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">h264_header</span><span class="o">-&gt;</span><span class="n">nalus</span><span class="p">[</span><span class="n">j</span><span class="p">].</span><span class="n">type</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">H264</span><span class="o">::</span><span class="n">NaluType</span><span class="o">::</span><span class="n">kSps</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">              </span><span class="n">has_h264_sps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">h264_header</span><span class="o">-&gt;</span><span class="n">nalus</span><span class="p">[</span><span class="n">j</span><span class="p">].</span><span class="n">type</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">H264</span><span class="o">::</span><span class="n">NaluType</span><span class="o">::</span><span class="n">kPps</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">              </span><span class="n">has_h264_pps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">h264_header</span><span class="o">-&gt;</span><span class="n">nalus</span><span class="p">[</span><span class="n">j</span><span class="p">].</span><span class="n">type</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">H264</span><span class="o">::</span><span class="n">NaluType</span><span class="o">::</span><span class="n">kIdr</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">              </span><span class="n">has_h264_idr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">          </span><span class="p">}</span>
+<span class="w">          </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">sps_pps_idr_is_h264_keyframe_</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">has_h264_idr</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">has_h264_sps</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">                </span><span class="n">has_h264_pps</span><span class="p">)</span><span class="w"> </span><span class="o">||</span>
+<span class="w">              </span><span class="p">(</span><span class="o">!</span><span class="n">sps_pps_idr_is_h264_keyframe_</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">has_h264_idr</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">is_h264_keyframe</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">          </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="cm">/*.....全部检索...*/</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">tested_packets</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">size_</span><span class="p">)</span>
+<span class="w">          </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span><span class="n">start_index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">start_index</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">start_index</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">size_</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">        </span><span class="c1">// In the case of H264 we don&#39;t have a frame_begin bit (yes,</span>
+<span class="w">        </span><span class="c1">// |frame_begin| might be set to true but that is a lie). So instead</span>
+<span class="w">        </span><span class="c1">// we traverese backwards as long as we have a previous packet and</span>
+<span class="w">        </span><span class="c1">// the timestamp of that packet is the same as this one. This may cause</span>
+<span class="w">        </span><span class="c1">// the PacketBuffer to hand out incomplete frames.</span>
+<span class="w">        </span><span class="c1">// See: https://bugs.chromium.org/p/webrtc/issues/detail?id=7106</span>
+<span class="w">        </span><span class="cm">/*对于H264数据包当frame_timestamp不一样,根据同一帧数据的RTP包的rtp时间戳相等的原则*/</span><span class="w">  </span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_h264</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">            </span><span class="p">(</span><span class="o">!</span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="n">start_index</span><span class="p">].</span><span class="n">used</span><span class="w"> </span><span class="o">||</span>
+<span class="w">              </span><span class="n">data_buffer_</span><span class="p">[</span><span class="n">start_index</span><span class="p">].</span><span class="n">timestamp</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">frame_timestamp</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="o">--</span><span class="n">start_seq_num</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="c1">//while(true)结束完后start_seq_num已经对应为seqNum的包号了  </span>
+<span class="w">      </span><span class="cm">/*上面的检测是递减组包这里将packet_infos的包的顺序进行逆向调整</span>
+<span class="cm">        按照下文的分析调整完后packet_infos[0]对应seqNumb = 2680的包</span>
+<span class="cm">        */</span>
+<span class="w">      </span><span class="c1">// Fix the order since the packet-finding loop traverses backwards.</span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">reverse</span><span class="p">(</span><span class="n">packet_infos</span><span class="p">.</span><span class="n">begin</span><span class="p">(),</span><span class="w"> </span><span class="n">packet_infos</span><span class="p">.</span><span class="n">end</span><span class="p">());</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_h264</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Now that we have decided whether to treat this frame as a key frame</span>
+<span class="w">        </span><span class="c1">// or delta frame in the frame buffer, we update the field that</span>
+<span class="w">        </span><span class="c1">// determines if the RtpFrameObject is a key frame or delta frame.</span>
+<span class="w">        </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">first_packet_index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">start_seq_num</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">size_</span><span class="p">;</span>
+<span class="w">        </span><span class="n">RTC_CHECK_LT</span><span class="p">(</span><span class="n">first_packet_index</span><span class="p">,</span><span class="w"> </span><span class="n">size_</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_h264_keyframe</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="n">data_buffer_</span><span class="p">[</span><span class="n">first_packet_index</span><span class="p">].</span><span class="n">video_header</span><span class="p">.</span><span class="n">frame_type</span><span class="w"> </span><span class="o">=</span>
+<span class="w">              </span><span class="n">VideoFrameType</span><span class="o">::</span><span class="n">kVideoFrameKey</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="n">data_buffer_</span><span class="p">[</span><span class="n">first_packet_index</span><span class="p">].</span><span class="n">video_header</span><span class="p">.</span><span class="n">frame_type</span><span class="w"> </span><span class="o">=</span>
+<span class="w">              </span><span class="n">VideoFrameType</span><span class="o">::</span><span class="n">kVideoFrameDelta</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="c1">// With IPPP, if this is not a keyframe, make sure there are no gaps</span>
+<span class="w">        </span><span class="c1">// in the packet sequence numbers up until this point.</span>
+<span class="w">        </span><span class="k">const</span><span class="w"> </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">h264tid</span><span class="w"> </span><span class="o">=</span>
+<span class="w">            </span><span class="n">data_buffer_</span><span class="p">[</span><span class="n">start_index</span><span class="p">].</span><span class="n">video_header</span><span class="p">.</span><span class="n">frame_marking</span><span class="p">.</span><span class="n">temporal_id</span><span class="p">;</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">h264tid</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">kNoTemporalIdx</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="n">is_h264_keyframe</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">            </span><span class="n">missing_packets_</span><span class="p">.</span><span class="n">upper_bound</span><span class="p">(</span><span class="n">start_seq_num</span><span class="p">)</span><span class="w"> </span><span class="o">!=</span>
+<span class="w">                </span><span class="n">missing_packets_</span><span class="p">.</span><span class="n">begin</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="kt">uint16_t</span><span class="w"> </span><span class="n">stop_index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">index</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">size_</span><span class="p">;</span>
+<span class="w">          </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">start_index</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">stop_index</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="n">start_index</span><span class="p">].</span><span class="n">frame_created</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">            </span><span class="n">start_index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">start_index</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">size_</span><span class="p">;</span>
+<span class="w">          </span><span class="p">}</span>
+<span class="w">          </span><span class="k">return</span><span class="w"> </span><span class="n">found_frames</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="n">missing_packets_</span><span class="p">.</span><span class="n">erase</span><span class="p">(</span><span class="n">missing_packets_</span><span class="p">.</span><span class="n">begin</span><span class="p">(),</span>
+<span class="w">                              </span><span class="n">missing_packets_</span><span class="p">.</span><span class="n">upper_bound</span><span class="p">(</span><span class="n">seq_num</span><span class="p">));</span>
+<span class="w">      </span><span class="n">found_frames</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span>
+<span class="w">          </span><span class="k">new</span><span class="w"> </span><span class="n">RtpFrameObject</span><span class="p">(</span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="n">start_seq_num</span><span class="p">,</span><span class="w"> </span><span class="n">seq_num</span><span class="p">,</span><span class="w"> </span><span class="n">frame_size</span><span class="p">,</span>
+<span class="w">                              </span><span class="n">max_nack_count</span><span class="p">,</span><span class="w"> </span><span class="n">min_recv_time</span><span class="p">,</span><span class="w"> </span><span class="n">max_recv_time</span><span class="p">,</span>
+<span class="w">                              </span><span class="n">RtpPacketInfos</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">packet_infos</span><span class="p">))));</span>
+<span class="w">      </span><span class="n">ClearInterval</span><span class="p">(</span><span class="n">start_seq_num</span><span class="p">,</span><span class="w"> </span><span class="n">seq_num</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="o">++</span><span class="n">seq_num</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">found_frames</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>先假设现在有一帧数据分成5个RTP包他们的seqNumber从2680~2684,假设seqNumber=2680的包是帧开始包,2684包为帧最后一个包</li>
+<li>进入InsertPacket函数2680包对应的index为120经过赋值得到如下:</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="mi">120</span><span class="p">].</span><span class="n">frame_begin</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="n">sequence_buffer_</span><span class="p">[</span><span class="mi">120</span><span class="p">].</span><span class="n">frame_end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="n">sequence_buffer_</span><span class="p">[</span><span class="mi">120</span><span class="p">].</span><span class="n">seq_num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2680</span><span class="p">;</span>
+<span class="n">sequence_buffer_</span><span class="p">[</span><span class="mi">120</span><span class="p">].</span><span class="n">continuous</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="n">sequence_buffer_</span><span class="p">[</span><span class="mi">120</span><span class="p">].</span><span class="n">frame_created</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="n">sequence_buffer_</span><span class="p">[</span><span class="mi">120</span><span class="p">].</span><span class="n">used</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+</code></pre></div>
+<ul>
+<li>紧接着调用FindFrames(2680)函数,该函数进入for循环首先调用PotentialNewFrame(2680)判断是否为true,由于当前的<code>sequence_buffer_[120]</code>.<code>frame_begin=true</code>,所以会返回true,从而顺利进入for循环函数主体</li>
+<li>根据for循环的实现对于seqNumber=2680的包FindFrames函数只做了一件事</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="mi">120</span><span class="p">].</span><span class="n">continuous</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+</code></pre></div>
+<ul>
+<li>然后跳出循环,接着InsertPacket函数返回等待第二个包插入,根据其算法截止到seqNumber=2683包插入完<code>sequence_buffer_[i]</code>的赋值情况如下:</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="mi">120</span><span class="p">].</span><span class="n">frame_begin</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="n">sequence_buffer_</span><span class="p">[</span><span class="mi">120</span><span class="o">~</span><span class="mi">123</span><span class="p">].</span><span class="n">frame_end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="n">sequence_buffer_</span><span class="p">[</span><span class="mi">120</span><span class="o">~</span><span class="mi">123</span><span class="p">].</span><span class="n">seq_num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2680</span><span class="o">~</span><span class="mi">2683</span><span class="p">;</span>
+<span class="n">sequence_buffer_</span><span class="p">[</span><span class="mi">120</span><span class="o">~</span><span class="mi">123</span><span class="p">].</span><span class="n">continuous</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="n">sequence_buffer_</span><span class="p">[</span><span class="mi">120</span><span class="o">~</span><span class="mi">123</span><span class="p">].</span><span class="n">frame_created</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="n">sequence_buffer_</span><span class="p">[</span><span class="mi">120</span><span class="o">~</span><span class="mi">123</span><span class="p">].</span><span class="n">used</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+</code></pre></div>
+<ul>
+<li><p>其中seqNum为2681到2683之间的包插入的时候由于其前一个包的continuous为true所以PotentialNewFrame()函数会返回true从而会将<code>sequence_buffer_[121~123].continuous</code>的值设置成true</p>
+</li>
+<li><p>当seqNumber=2684的包被插入时此时<code>sequence_buffer_[124].frame_end=true</code>,因为为该帧当中的最后一个包</p>
+</li>
+<li><p>当FindFrames(2684)被调用时,首先将<code>sequence_buffer_[124].continuous</code>设置成true,然后由于<code>sequence_buffer_[124].frame_end=true</code>所以会顺利进入<code>if (sequence_buffer_[index].frame_end)</code>分之进行处理</p>
+</li>
+<li><p>到此再回过头分析FindFrames实现中的注释当组包完成后<code>packet_infos</code>容器已经组合完一帧数据</p>
+</li>
+<li><p>最后通过<code>found_frames.emplace_back</code>将以<code>packet_infos</code>容器为参数构造的RtpFrameObject对象插入到<code>found_frames</code>当中<code>found_frames</code>容器中的每一个元素代表一帧完整的RTP包的集合,而这些集合被存储在<code>RtpPacketInfos::vector_type</code>当中,它们之间的关系如下图:</p>
+</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210710-104000-3.png" alt=""></p>
+<ul>
+<li><p>真正的组包是发生在RtpFrameObject对象构造过程当中,在RtpFrameObject的构造函数中会通过调用其父类EncodedImage::SetEncodedData函数分配当前一帧数据的空间,然后调用PacketBuffer::GetBitstream函数将连续的seqNum的RTP包中的数据拷贝到所分配的空间当中</p>
+</li>
+<li><p>RtpFrameObject的派生关系如下:</p>
+</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210710-104000-4.png" alt=""></p>
+<ul>
+<li><p>组包完毕后会通过PacketBuffer::ClearInterval清除PacketBuffer所管理的<code>sequence_buffer_和data_buffer_</code>,主要是清除其索引成未被引用以及释放<code>data_buffer_[index]</code>的空间,供后续RTP包使用</p>
+</li>
+<li><p>PacketBuffer::GetBitstream函数的代码如下:</p>
+</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">bool</span><span class="w"> </span><span class="nf">PacketBuffer::GetBitstream</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">RtpFrameObject</span><span class="o">&amp;</span><span class="w"> </span><span class="n">frame</span><span class="p">,</span>
+<span class="w">                                </span><span class="kt">uint8_t</span><span class="o">*</span><span class="w"> </span><span class="n">destination</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">rtc</span><span class="o">::</span><span class="n">CritScope</span><span class="w"> </span><span class="n">lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">crit_</span><span class="p">);</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">frame</span><span class="p">.</span><span class="n">first_seq_num</span><span class="p">()</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">size_</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">frame</span><span class="p">.</span><span class="n">last_seq_num</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">size_</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">uint16_t</span><span class="w"> </span><span class="n">seq_num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">frame</span><span class="p">.</span><span class="n">first_seq_num</span><span class="p">();</span>
+<span class="w">  </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">timestamp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">frame</span><span class="p">.</span><span class="n">Timestamp</span><span class="p">();</span>
+<span class="w">  </span><span class="kt">uint8_t</span><span class="o">*</span><span class="w"> </span><span class="n">destination_end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">destination</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">frame</span><span class="p">.</span><span class="n">size</span><span class="p">();</span>
+<span class="w">  </span><span class="k">do</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Check both seq_num and timestamp to handle the case when seq_num wraps</span>
+<span class="w">    </span><span class="c1">// around too quickly for high packet rates.</span>
+<span class="w">    </span><span class="p">......</span>
+<span class="w">    </span><span class="n">RTC_DCHECK_EQ</span><span class="p">(</span><span class="n">data_buffer_</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">seqNum</span><span class="p">,</span><span class="w"> </span><span class="n">sequence_buffer_</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">seq_num</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">size_t</span><span class="w"> </span><span class="n">length</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">data_buffer_</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">sizeBytes</span><span class="p">;</span>
+<span class="w">    </span><span class="p">......</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">uint8_t</span><span class="o">*</span><span class="w"> </span><span class="n">source</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">data_buffer_</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">dataPtr</span><span class="p">;</span>
+<span class="w">    </span><span class="n">memcpy</span><span class="p">(</span><span class="n">destination</span><span class="p">,</span><span class="w"> </span><span class="n">source</span><span class="p">,</span><span class="w"> </span><span class="n">length</span><span class="p">);</span>
+<span class="w">    </span><span class="n">destination</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">length</span><span class="p">;</span>
+<span class="w">    </span><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">index</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">size_</span><span class="p">;</span>
+<span class="w">    </span><span class="o">++</span><span class="n">seq_num</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">index</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">end</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>destination为在构造RtpFrameObject的时候通过其父亲类EncodedImage::SetEncodedData所分配的空间</li>
+<li>通过循环从<code>data_buffer_[120~124]</code>的数据拷贝到destination空间</li>
+<li>继续回到PacketBuffer::InsertPacket函数,当有组包完成时,<code>found_frames</code>容器中已经由数据,最后通过遍历<code>found_frames</code>容器对每帧RtpFrameObject通过<code>assembled_frame_callback_-&gt;OnAssembledFrame(std::move(frame))</code>;将求回调到RtpVideoStreamReceiver类中,经由RtpVideoStreamReceiver::OnAssembledFrame函数对已组包完成的的数据进行操作(如寻找对应的解码器,然后将数据发送给解码器进行解码操作等.)</li>
+</ul>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "WebRTC RTP:RTCP协议与Video数据接收及组包分析.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

@@ -1,0 +1,880 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>How a C++ compiler implements exception handling - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="How a C++ compiler implements exception handling,C/C++,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="How a C++ compiler implements exception handling" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>How a C++ compiler implements exception handling</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2016-07-22 16:39
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='http://www.codeproject.com/Articles/2126/How-a-C-compiler-implements-exception-handling' target='blank'>........</a></p></h4>
+<p>An indepth discussion of how VC++ implements exception handling. Source code
+includes exception handling library for VC++.</p>
+<ul>
+<li><a href="../file/image/Exceptionhandler_src.zip">Download source files - 19 Kb</a></li>
+</ul>
+<h3>Introduction</h3>
+<p>One of the revolutionary features of C++ over traditional languages is its
+support for exception handling. It provides a very good alternative to
+traditional techniques of error handling which are often inadequate and error-
+prone. The clear separation between the normal code and the error handling
+code makes programs very neat and maintainable. This article discusses what it
+takes to implement exception handling by the compiler. General understanding
+of the exception handling mechanism and its syntax is assumed. I implemented
+exception handling library for VC++ that is accompanied with this article. To
+replace the exception handler provided by VC++ with my handler, call the
+following function:</p>
+<p><code>install_my_handler();</code></p>
+<p>After this point, any exception that occurs with in the program - from
+throwing an exception to stack unwinding, calling the catch block and then
+resuming the execution - is processed by my exception handling library.</p>
+<p>The C++ standard, like any other feature in C++, doesn't say anything about
+how exception handling should be implemented. This means that every vendor is
+free to use any implementation as he sees fit. I will describe how VC++
+implements this feature, but it should be a good study material for those as
+well who use other compilers or Operating Systems [1]. VC++ builds its
+exception handling support on top of structured exception handling (SEH)
+provided by Windows operating system [2].</p>
+<h3>Structure exception handling - Overview</h3>
+<p>For this discussion, I will consider exceptions to be those that are
+explicitly thrown or occur due to conditions like divide by zero or null
+pointer access. When exception occurs, interrupt is generated and control is
+transferred to the operating system. Operating System, in turn, calls the
+exception handler that inspects the function call sequence starting from the
+current function from where the exception originated, and performs its job of
+stack unwinding and control transfer. We can write our own exception handler
+and register it with the operating system that it would call in the event of
+an exception.</p>
+<p>Windows defines a special structure for registration, called
+<code>EXCEPTION_REGISTRATION</code>:</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">EXCEPTION_REGISTRATION</span>
+<span class="p">{</span>
+<span class="w">   </span><span class="n">EXCEPTION_REGISTRATION</span><span class="w"> </span><span class="o">*</span><span class="n">prev</span><span class="p">;</span>
+<span class="w">   </span><span class="n">DWORD</span><span class="w"> </span><span class="n">handler</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>To register your own exception handler, create this structure and store its
+address at offset zero of the segment pointed to by FS register, as the
+following pseudo assembly language instruction shows:</p>
+<p><code>mov FS:[0], exc_regp</code></p>
+<p>prev field signifies linked list of <code>EXCEPTION_REGISTRATION</code> structures. When
+we register <code>EXCEPTION_REGISTRATION</code> structure, we store the address of the
+previously registered structure in prev field.</p>
+<p>So how does the exception call back function look like? Windows requires that
+the signature of exception handler, defined in EXCPT.h, be like:</p>
+<div class="highlight"><pre><code><span></span><span class="n">EXCEPTION_DISPOSITION</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">handler</span><span class="p">)(</span>
+<span class="w">    </span><span class="n">_EXCEPTION_RECORD</span><span class="w"> </span><span class="o">*</span><span class="n">ExcRecord</span><span class="p">,</span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">EstablisherFrame</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="n">_CONTEXT</span><span class="w"> </span><span class="o">*</span><span class="n">ContextRecord</span><span class="p">,</span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">DispatcherContext</span><span class="p">);</span>
+</code></pre></div>
+<p>You can ignore all the parameters and return type for now. The following
+program registers exception handler with the Operating System and generates an
+exception by attempting to divide by zero. This exception is caught by the
+exception handler which does not do much. It just prints a message and exits.</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;windows.h&gt;</span>
+
+
+<span class="n">using</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="p">;</span>
+<span class="n">using</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+
+<span class="k">struct</span><span class="w"> </span><span class="nc">EXCEPTION_REGISTRATION</span>
+<span class="p">{</span>
+<span class="w">   </span><span class="n">EXCEPTION_REGISTRATION</span><span class="w"> </span><span class="o">*</span><span class="n">prev</span><span class="p">;</span>
+<span class="w">   </span><span class="n">DWORD</span><span class="w"> </span><span class="n">handler</span><span class="p">;</span>
+<span class="p">};</span>
+
+<span class="n">EXCEPTION_DISPOSITION</span><span class="w"> </span><span class="nf">myHandler</span><span class="p">(</span>
+<span class="w">    </span><span class="n">_EXCEPTION_RECORD</span><span class="w"> </span><span class="o">*</span><span class="n">ExcRecord</span><span class="p">,</span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">EstablisherFrame</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="n">_CONTEXT</span><span class="w"> </span><span class="o">*</span><span class="n">ContextRecord</span><span class="p">,</span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">DispatcherContext</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;In the exception handler&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">endl</span><span class="p">;</span>
+<span class="w">    </span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Just a demo. exiting...&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">endl</span><span class="p">;</span>
+<span class="w">    </span><span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">ExceptionContinueExecution</span><span class="p">;</span><span class="w"> </span><span class="c1">//will not reach here</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="n">g_div</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">bar</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="c1">//initialize EXCEPTION_REGISTRATION structure</span>
+<span class="w">    </span><span class="n">EXCEPTION_REGISTRATION</span><span class="w"> </span><span class="n">reg</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">preg</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">reg</span><span class="p">;</span>
+<span class="w">    </span><span class="n">reg</span><span class="p">.</span><span class="n">handler</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">DWORD</span><span class="p">)</span><span class="n">myHandler</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">//get the current head of the exception handling chain    </span>
+<span class="w">    </span><span class="n">DWORD</span><span class="w"> </span><span class="n">prev</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_asm</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="n">mov</span><span class="w"> </span><span class="n">EAX</span><span class="p">,</span><span class="w"> </span><span class="n">FS</span><span class="o">:</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+<span class="w">        </span><span class="n">mov</span><span class="w"> </span><span class="n">prev</span><span class="p">,</span><span class="w"> </span><span class="n">EAX</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">reg</span><span class="p">.</span><span class="n">prev</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">EXCEPTION_REGISTRATION</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="n">prev</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">//register it!</span>
+<span class="w">    </span><span class="n">_asm</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="n">mov</span><span class="w"> </span><span class="n">EAX</span><span class="p">,</span><span class="w"> </span><span class="n">preg</span>
+<span class="w">        </span><span class="n">mov</span><span class="w"> </span><span class="n">FS</span><span class="o">:</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span><span class="w"> </span><span class="n">EAX</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">//generate the exception</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">g_div</span><span class="p">;</span><span class="w">  </span><span class="c1">//Exception. Divide by 0. </span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">bar</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="cm">/*-------output-------------------</span>
+<span class="cm">In the exception handler</span>
+<span class="cm">Just a demo. exiting...</span>
+<span class="cm">---------------------------------*/</span>
+</code></pre></div>
+<p>Please note that Windows strictly enforces one rule: EXCEPTION_REGISTRATION
+structure should be on the stack and it should be at a lower memory address
+than its previous node. Windows will terminate the process if it does not find
+such to be the case.</p>
+<h3>Functions and Stack</h3>
+<p>Stack is a contiguous area of memory which is used for storing local objects
+of a function. More specifically, each function has an associated stack frame
+that houses all the local objects of the function as well as any temporaries
+generated by the expressions with in the function. Please note that this is a
+typical picture. In reality, the compiler may store all or some of the objects
+in internal registers for faster access. Stack is a notion that is supported
+at the processor level. Processor provides internal registers and special
+instructions to manipulate it.</p>
+<p>Figure 2 shows how a typical stack may look like when function foo calls
+function bar and bar calls function widget. Please note that in this case the
+stack grows downwards. This means that the next item to be pushed on the stack
+would be at lower memory address than the previous item.</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/figure2.gif" alt=""></p>
+<p>The compiler uses EBP register to identify the current active stack frame. In
+current case, widget is being executed and as the figure shows, EBP register
+points at widget's stack frame. Function accesses its local objects relative
+to the frame pointer. The compiler resolves at compile time all the local
+object names to some fixed offset from frame pointer. For instance, widget
+would typically access its local variable as some fixed number of bytes below
+the frame pointer, say EBP-24.</p>
+<p>The figure also shows the ESP register, stack pointer that points at the last
+item in the stack, or in current case, ESP points at the end of widget's
+frame. Next frame would be created after this location.</p>
+<p>Processor supports two operations for the stack: push and pop. Consider:</p>
+<p><code>pop EAX</code></p>
+<p>means read 4 bytes from the location where ESP is pointing and increment
+(remember, stack grows downwards in our case) ESP by 4 (in 32 bit processors).
+Similarly,</p>
+<p><code>push EBP</code></p>
+<p>means decrement ESP by 4 and then write the contents of EBP register at the
+location where ESP is pointing.</p>
+<p>When compiler compiles a function, it adds some code in the beginning of the
+function called prologue that creates and initializes the stack frame of the
+function. Similarly, it adds code at the end of the function called epilogue
+to pop the stack frame of the exiting function.</p>
+<p>Compiler typically generates the following sequence for the prologue:</p>
+<div class="highlight"><pre><code><span></span><span class="n">Push</span><span class="w"> </span><span class="n">EBP</span><span class="w">      </span><span class="p">;</span><span class="w"> </span><span class="n">save</span><span class="w"> </span><span class="n">current</span><span class="w"> </span><span class="n">frame</span><span class="w"> </span><span class="n">pointer</span><span class="w"> </span><span class="n">on</span><span class="w"> </span><span class="n">stack</span>
+<span class="n">Mov</span><span class="w"> </span><span class="n">EBP</span><span class="p">,</span><span class="w"> </span><span class="n">ESP</span><span class="w">  </span><span class="p">;</span><span class="w"> </span><span class="n">Activate</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">new</span><span class="w"> </span><span class="n">frame</span>
+<span class="n">Sub</span><span class="w"> </span><span class="n">ESP</span><span class="p">,</span><span class="w"> </span><span class="mi">10</span><span class="w">   </span><span class="p">;</span><span class="w"> </span><span class="n">Subtract</span><span class="p">.</span><span class="w"> </span><span class="n">Set</span><span class="w"> </span><span class="n">ESP</span><span class="w"> </span><span class="n">at</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">end</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">frame</span>
+</code></pre></div>
+<p>The first statement saves the current frame pointer EBP on the stack. The
+second statement activates the frame for the callee by setting EBP register at
+the location where it stored the EBP of the caller. And the third statement
+sets the ESP register at the end of the current frame by subtracting ESP's
+value with the total size of all the local objects and the temporaries that
+the function will create. Compiler knows at compile time the type and size of
+all the local objects of a function, so it effectively knows the frame size.</p>
+<p>The epilogue does the reverse of the prologue, It has to remove the current
+frame from the stack:</p>
+<div class="highlight"><pre><code><span></span><span class="n">Mov</span><span class="w"> </span><span class="n">ESP</span><span class="p">,</span><span class="w"> </span><span class="n">EBP</span><span class="w">    </span>
+<span class="n">Pop</span><span class="w"> </span><span class="n">EBP</span><span class="w">         </span><span class="p">;</span><span class="w"> </span><span class="n">activate</span><span class="w"> </span><span class="n">caller</span><span class="err">&#39;</span><span class="n">s</span><span class="w"> </span><span class="n">frame</span>
+<span class="n">Ret</span><span class="w">             </span><span class="p">;</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">caller</span>
+</code></pre></div>
+<p>It sets ESP at the location where its caller's frame pointer is saved (which
+is at the location where callee's frame pointer points), pops it off in EBP
+thus activating its caller's stack frame and then executes return.</p>
+<p>When processor encounters return instruction, it does the following: it pops
+off the return address from the stack and transfer's control at that address.
+The return address was put on the stack when its caller executed call
+instruction to call it. Call instruction first pushes the address of the next
+instruction where control should be returned and then jumps to the beginning
+of the callee. Figure 3 shows a more detailed view of the stack at runtime. As
+the figure shows, function parameters are also part of the stack frame of the
+function. The caller pushes callee's arguments on the stack. When the function
+returns, the caller removes the callee's arguments from the stack by adding
+the size of the arguments to the ESP which is known at compile time:</p>
+<p><code>Add ESP, args_size</code></p>
+<p>Alternatively, callee can also remove the parameters by specifying the total
+parameter size in return instruction which again is known at compile time. The
+instruction below removes 24 bytes from the stack before returning to the
+caller, assuming total parameter size is 24:</p>
+<p><code>Ret 24</code></p>
+<p>Only one of these schemes is used at a time depending upon callee's calling
+convention. Please note that every thread in a process has its own associated
+stack.</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/figure3.gif" alt=""></p>
+<h3>C++ and Exceptions</h3>
+<p>Recall that I had talked about <code>EXCEPTION_REGISTRATION</code> structure in the first
+section. It is used to register the exception callback with the operating
+system that it calls when exception occurs.</p>
+<p>VC++ extends the semantics of this function by adding two more fields at the
+end:</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">EXCEPTION_REGISTRATION</span>
+<span class="p">{</span>
+<span class="w">   </span><span class="n">EXCEPTION_REGISTRATION</span><span class="w"> </span><span class="o">*</span><span class="n">prev</span><span class="p">;</span>
+<span class="w">   </span><span class="n">DWORD</span><span class="w"> </span><span class="n">handler</span><span class="p">;</span>
+<span class="w">   </span><span class="kt">int</span><span class="w">   </span><span class="n">id</span><span class="p">;</span>
+<span class="w">   </span><span class="n">DWORD</span><span class="w"> </span><span class="n">ebp</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>VC++, with few exceptions, creates <code>EXCEPTION_REGISTRATION</code> structure for
+every function as its local variable [3]. The last field of the structure
+overlaps the location where frame pointer EBP points. Function's prologue
+creates this structure on its stack frame and registers it with the operating
+system. The epilogue restores the <code>EXCEPTION_REGISTRATION</code> of the caller. I
+will discuss the significance of the id field in the next sections.</p>
+<p>When VC++ compiles a function, it generates two set of data for the function:</p>
+<p>a) Exception callback function.<br>
+b) A data structure that contains important information about the function
+like the catch blocks, their addresses, the type of exception they are
+interested in catching etc. I will refer to this structure as <code>funcinfo</code> and
+talk more about it in the next section.</p>
+<p>Figure 4 shows a broader picture of how things look like at runtime when
+considering exception handling. Widget's exception callback is at the head of
+the exception chain pointed to by FS:[0] (which was set by widget's prologue).
+Exception handler passes widget's <code>funcinfo</code> structure's address to
+<code>__CxxFrameHandler</code> function, which inspects this data structure to see if
+there is any catch block in the function interested in catching the current
+exception. If it does not find any, it returns <code>ExceptionContinueSearch</code> value
+back to the operating system. Operating system gets the next node off the
+exception handling list and calls its exception handler (which is the handler
+for the caller of the current function).</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/figure4.gif" alt=""></p>
+<p>This continues until the exception handler finds the catch block interested in
+catching the exception in which case it does not return back to the operating
+system. But before it calls the catch block (it knows the address of the catch
+block from <code>funcinfo</code> structure, see figure 4), it must perform stack
+unwinding: cleaning up the stack frames of the functions below this function's
+frame. Cleaning of the stack frame involves nice little intricacy: The
+exception handler must find all the local objects of the function alive on the
+frame at the time of the exception and call their destructors. I will discuss
+more about it in a later section.</p>
+<p>The exception handler delegates the task of cleaning the frame to the
+exception handler associated with that frame. It starts from the beginning of
+the exception handling list pointed to by FS:[0] and calls the exception
+handler at each node, telling it that the stack is being unwound. In response,
+the handler calls destructor for all the local objects on the frame and
+returns. This continues until it arrives at the node that corresponds to
+itself.</p>
+<p>Since catch block is part of a function, it uses the stack frame of the
+function to which it belongs. Hence the exception handler needs to activate
+its stack frame before calling the catch block. Secondly, every catch block
+accepts exactly one parameter, its type being the type of exception it is
+willing to catch. Exception handler should copy the exception object or its
+reference to catch block's frame. It knows where to copy the exception from
+<code>funcinfo</code> structure. The compiler is generous enough to generate this
+information for it.</p>
+<p>After copying the exception and activating the frame, exception handler calls
+the catch block. Catch block returns it the address where control should be
+transferred in the function after try-catch block. Please note that at this
+moment, even though the stack unwinding has occurred and frames have been
+cleaned up, they have not been removed and they still physically occupy the
+space on the stack. This is because the exception handler is still executing
+and like any other normal function, it also uses the stack for its local
+objects, its frame present below the last function's frame from where the
+exception originated. When catch block returns it needs to destroy the
+exception. It is after this point that the exception handler removes all the
+frames including its own by setting the ESP at the end of the function's frame
+(to which it has to transfer the control) and transfers control at the end of
+try-catch block. How does it know where the end of function's frame is? It has
+no way of knowing. That's why the compiler saves it (through function's
+prologue) on function's stack frame for the exception handler to find it. See
+figure 4. It is sixteen bytes below the stack frame pointer EBP.</p>
+<p>The catch block may itself throw a new exception or rethrow the same
+exception. Exception handler has to watch for this situation and take
+appropriate action. If catch block throws a new exception, the exception
+handler has to destroy the old exception. If catch block specifies a rethrow,
+then the exception handler has to propagate the old exception.</p>
+<p>There is one important point to note here: Since every thread has its own
+stack, this means that every thread has its own list of EXCEPTION_REGISTRATION
+structures pointed to by FS:[0].</p>
+<h3>C++ and Exceptions - 2</h3>
+<p>Figure 5 shows the layout of <code>funcinfo</code> structure. Please note that the names
+may vary from the actual names used by VC++ compiler and I have only shown the
+relevant fields. Structure of unwind table is discussed in the next section.</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/figure5.gif" alt=""></p>
+<p>When exception handler has to search for a catch block in a function, the
+first thing it has to determine is whether the point from where the exception
+originated from within a function has an enclosing try block or not. If it
+does not find any try block, then it returns back. Otherwise, it searches the
+list of catch blocks associated with the enclosing try block.</p>
+<p>First, let's see how it goes about finding the try block. At compile time, the
+compiler assigns each try block a start id and end id. These id's are also
+accessible to exception handler through funcinfo structure. See &gt; figure 5.
+The compiler generates tryblock data structure for each try block with in the
+function.</p>
+<p>In the previous section, I had talked about VC++ extending the
+<code>EXCEPTION_REGISTRATION</code> structure to include id field. Recall, this structure
+is present on function's stack frame. See figure 4. At the time of exception,
+the exception handler reads this id from the frame and checks the tryblock
+structure to see if the id is equal to or falls in between its start id and
+end id. If it does, then the exception originated from with in this try block.
+Otherwise, it looks at the next tryblock structure in tryblocktable.</p>
+<p>Who writes the id value on the stack and what should be written there? The
+compiler adds statements in the function at various points that update id
+value to reflect the current runtime state. For instance, the compiler will
+add a statement in the function at the point where try block is entered that
+will write the start id of the try block on the stack frame.</p>
+<p>Once exception handler finds the try block, it can traverse the catchblock
+table associated with the try block to see if any catch block is interested in
+catching the exception. Please note that in case of nested try blocks, the
+exception that originated from inner try block also originated from outer try
+block. The exception handler should first look for the catch blocks for the
+inner try block. If none is found, then it looks for the catch blocks of the
+outer try block. While laying the structures in tryblock table, VC++ puts
+inner try block structure before the outer try block.</p>
+<p>How is the exception handler going to determine (from catchblock structure) if
+a catch block is interested in catching the current exception? It does so by
+comparing the type of the exception with the type of the catch block's
+parameter. Consider:</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">foo</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">   </span><span class="n">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">throw</span><span class="w"> </span><span class="n">E</span><span class="p">();</span>
+<span class="w">   </span><span class="p">}</span>
+<span class="w">   </span><span class="n">catch</span><span class="p">(</span><span class="n">H</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">//.</span>
+<span class="w">   </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The catch block catches the exception if H and E are the exact same type. The
+exception handler has to compare the types at runtime. Normally, languages
+like C provide no facility to determine object's type at runtime. C++ provides
+run time type identification mechanism (RTTI) and has a standard way of
+comparing types at runtime. It defines a class <code>type_info</code>, defined in
+standard header <code>&lt;typeinfo&gt;</code> that represents a type at runtime. The second
+field of the catchblock structure (see figure 5) is a pointer to the
+<code>type_info</code> structure that represents the type of the catch block's parameter
+at runtime. <code>type_info</code> has <code>operator ==</code> that tells whether the two types are
+of exact same class or not. So, all the exception handler has to do is to
+compare (call <code>operator ==</code>) the <code>type_info</code> of the catch block's parameter
+(available through catchblock structure) with the <code>type_info</code> of the exception
+to determine if the catch block is interested in catching the current
+exception.</p>
+<p>The exception handler knows about the type of the catch block's parameter from
+<code>funcinfo</code> structure, but how does it know about the <code>type_info</code> of the
+exception? When compiler encounters a statement like</p>
+<p><code>throw E();</code></p>
+<p>It generates <code>excpt_info</code> strcuture for the exception thrown. See figure 6.
+Please note that the names may vary from the actual names used by VC++
+compiler and I have only shown the relevant fields. As shown in the figure,
+exception's <code>type_info</code> is available through <code>excpt_info</code> structure. At some
+point of time, exception handler needs to destroy the exception (after the
+catch block is invoked). It may also need to copy the exception (before
+invoking the catch block). To help exception handler do these tasks, compiler
+makes available exception's destructor, copy constructor and size to the
+exception handler through <code>excpt_info</code> structure.</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/figure6.gif" alt=""></p>
+<p>If the catch block's parameter type is a base class and the exception is its
+derived class, the exception handler should still invoke that catch block.
+However, comparing the typeinfo's of the two in this case would yield false as
+they are not the same type. Neither does class <code>type_info</code> provide any member
+function or operator that tells if one class is base class of the other. And
+yet, the exception handler has to invoke this catch block. To help it do so,
+the compiler has generated more information for the handler. If the exception
+is a derived class, then <code>etypeinfo_table</code> (available through <code>excpt_info</code>
+structure) contains <code>etype_info</code> (extended type_info, my name) pointer for all
+the classes in the hierarchy. So the exception handler compares the
+<code>type_info</code> of the catch block's parameter with all the type_info's available
+through the <code>excpt_info</code> structure. If any match is found then the catch block
+will be invoked.</p>
+<p>Before I wrap up this section, one last point: How does the exception handler
+become aware of the exception and the excpt_info structure? I will attempt to
+answer this question in the following discussion.</p>
+<p>VC++ translates throw statement into something like:</p>
+<div class="highlight"><pre><code><span></span><span class="c1">//throw E(); //compiler generates excpt_info structure for E.</span>
+<span class="n">E</span><span class="w"> </span><span class="n">e</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">E</span><span class="p">();</span><span class="w">  </span><span class="c1">//create exception on the stack</span>
+<span class="n">_CxxThrowException</span><span class="p">(</span><span class="o">&amp;</span><span class="n">e</span><span class="p">,</span><span class="w"> </span><span class="n">E_EXCPT_INFO_ADDR</span><span class="p">);</span>
+</code></pre></div>
+<p><code>_CxxThrowException</code> passes control to the operating system (through software
+interrupt, see function <code>RaiseException</code>) passing it both of its parameters.
+The operating system packages these two parameters in <code>_EXCEPTION_RECORD</code>
+structure in its preparation to call the exception callback. It starts from
+the head of the <code>EXCEPTION_REGISTRATION</code> list pointed to by FS:[0] and calls
+the exception handler at that node. The pointer to this
+<code>EXCEPTION_REGISTRATION</code>is also the second parameter of the exception
+handler. Recall that in VC++, every function creates its own
+<code>EXCEPTION_REGISTRATION</code> on its stack frame and registers it. Passing the
+second parameter to the exception handler makes important information
+available to it like EXCEPTION_REGISTRATION's id field (important for finding
+the catch block). It also makes the exception handler aware of the function's
+stack frame (useful for cleaning the stack frame) and the position of the
+<code>EXCEPTION_REGISTRATION</code> node on the exception list (useful for stack
+unwinding). The first parameter is the pointer to the <code>_EXCEPTION_RECORD</code>structure through which the exception pointer and its <code>excpt_info</code> structure
+is available. The signature of the exception handler defined in EXCPT.H is:</p>
+<div class="highlight"><pre><code><span></span><span class="n">EXCEPTION_DISPOSITION</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">handler</span><span class="p">)(</span>
+<span class="w">    </span><span class="n">_EXCEPTION_RECORD</span><span class="w"> </span><span class="o">*</span><span class="n">ExcRecord</span><span class="p">,</span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">EstablisherFrame</span><span class="p">,</span><span class="w"> </span>
+<span class="w">    </span><span class="n">_CONTEXT</span><span class="w"> </span><span class="o">*</span><span class="n">ContextRecord</span><span class="p">,</span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">DispatcherContext</span><span class="p">);</span>
+</code></pre></div>
+<p>You can ignore the last two parameters. The return type is an enumeration (see
+EXCPT.H). As I discussed before, if the exception handler cannot find catch
+block, it returns <code>ExceptionContinueSearch</code> value back to the system. For this
+discussion, other values are not important. <code>_EXCEPTION_RECORD</code> structure is
+defined in WINNT.H as:</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">_EXCEPTION_RECORD</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">DWORD</span><span class="w"> </span><span class="n">ExceptionCode</span><span class="p">;</span>
+<span class="w">    </span><span class="n">DWORD</span><span class="w"> </span><span class="n">ExceptionFlags</span><span class="p">;</span><span class="w"> </span>
+<span class="w">    </span><span class="n">_EXCEPTION_RECORD</span><span class="w"> </span><span class="o">*</span><span class="n">ExcRecord</span><span class="p">;</span>
+<span class="w">    </span><span class="n">PVOID</span><span class="w">   </span><span class="n">ExceptionAddress</span><span class="p">;</span><span class="w"> </span>
+<span class="w">    </span><span class="n">DWORD</span><span class="w"> </span><span class="n">NumberParameters</span><span class="p">;</span>
+<span class="w">    </span><span class="n">DWORD</span><span class="w"> </span><span class="n">ExceptionInformation</span><span class="p">[</span><span class="mi">15</span><span class="p">];</span><span class="w"> </span>
+<span class="p">}</span><span class="w"> </span><span class="n">EXCEPTION_RECORD</span><span class="p">;</span>
+</code></pre></div>
+<p>The number and kind of entries in the <code>ExceptionInformation</code> array depends
+upon the <code>ExceptionCode</code> field. If the <code>ExceptionCode</code> represents C++
+(Exception code is 0xe06d7363) exception (which will be the case if the
+exception occurs due to throw), then <code>ExceptionInformation</code> array contains
+pointer to the exception and the <code>excpt_info</code> structure. For other kind of
+exceptions, it almost never has any entry. Other kind of exceptions can be
+divide by zero, access violation etc and their values can be found in WINNT.H.</p>
+<p>Exception handler looks at the <code>ExceptionFlags</code> field of the
+<code>_EXCEPTION_RECORD</code> structure to determine what action to take. If the value
+is <code>EH_UNWINDING</code> (defined in Except.inc), that is an indication to the
+exception handler that the stack is being unwound and it should clean its
+stack frame and return. Cleaning up involves finding all the local objects
+alive on the frame at the time of the exception and calling their destructors.
+The next section discusses this. Otherwise, exception handler has to search
+for the catch block in the function and invoke it if it is found.</p>
+<h3>Stack Frame Cleanup</h3>
+<p>C++ standard says that when the stack is being unwound, destructor for all the
+local objects alive at the time of exception should be called. Consider:</p>
+<div class="highlight"><pre><code><span></span><span class="kt">int</span><span class="w"> </span><span class="n">g_i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">foo</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">   </span><span class="n">T</span><span class="w"> </span><span class="n">o1</span><span class="p">,</span><span class="w"> </span><span class="n">o2</span><span class="p">;</span>
+<span class="w">   </span><span class="p">{</span>
+<span class="w">       </span><span class="n">T</span><span class="w"> </span><span class="n">o3</span><span class="p">;</span>
+<span class="w">   </span><span class="p">}</span>
+<span class="w">   </span><span class="mi">10</span><span class="o">/</span><span class="n">g_i</span><span class="p">;</span><span class="w"> </span><span class="c1">//exception occurs here</span>
+<span class="w">   </span><span class="n">T</span><span class="w"> </span><span class="n">o4</span><span class="p">;</span>
+<span class="w">   </span><span class="c1">//...</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>When exception occurs, local objects o1 and o2 exists on foo's frame while o3
+has completed its lifetime. O4 was never created. Exception handler should be
+aware of this fact and should call destructor for o1 and o2.</p>
+<p>As I wrote before, the compiler adds code to the function at various special
+points that register the current runtime state of the function as execution
+proceeds. It assigns id's to these special regions in the function. For
+instance, try block entry point is a special region. As discussed before, the
+compiler will add statement in the function at the point when try block is
+entered that will write the start id of the try block on function's frame.</p>
+<p>The other special region in the function is where the local object is created
+or destroyed. In other words, the compiler assigns each local object a unique
+id. When compiler encounters object definition like:</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">foo</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">   </span><span class="n">T</span><span class="w"> </span><span class="n">t1</span><span class="p">;</span>
+<span class="w">   </span><span class="c1">//.</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>It adds statement after the definition (after the point when object will be
+created) to write its id value on the frame:</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">foo</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">   </span><span class="n">T</span><span class="w"> </span><span class="n">t1</span><span class="p">;</span>
+<span class="w">   </span><span class="n">_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">t1_id</span><span class="p">;</span><span class="w"> </span><span class="c1">//statement added by the compiler</span>
+<span class="w">   </span><span class="c1">//.</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The compiler creates a hidden local variable (designated in the above code as
+_id) that overlaps with the <code>id</code> field of the <code>EXCEPTION_REGISTRATION</code>
+structure. Similarly, it adds statement before calling the destructor for the
+object to write the id of the previous region.</p>
+<p>When exception handler has to clean up the frame, it reads the id value from
+the frame (<code>id</code> field of the <code>EXCEPTION_REGISTRATION</code> structure or 4 bytes
+below the frame pointer, EBP). This id is an indication that the code in the
+function up to the point to which current id corresponds executed without any
+exception. All the objects above this point were created. Destructors for all
+or some of the objects above this point need to be called. Please note that
+some of these objects may have been destroyed if they are part of a sub block.
+Destructor for these should not be called.</p>
+<p>Compiler generates yet another data structure for the function,
+<code>unwindtable</code>(my name), which is an array of unwind structures. This table is
+available through funcinfo structure. See figure 5. For every special region
+in the function, there is one unwind structure. The structure entries appear
+in the unwindtable in the same order as their corresponding regions appear in
+the function. unwind structure corresponding to objects is of interest
+(remember, each object definition denotes special region and has id associated
+with it). It contains information to destroy the object. When compiler
+encounters object definition, it generates a short routine that knows about
+the object's address on the frame (or its offset from the frame pointer) and
+destroys this object. One of the fields of unwind structure contains the
+address of this routine:</p>
+<div class="highlight"><pre><code><span></span><span class="k">typedef</span><span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">CLEANUP_FUNC</span><span class="p">)();</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">unwind</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">prev</span><span class="p">;</span>
+<span class="w">    </span><span class="n">CLEANUP_FUNC</span><span class="w">  </span><span class="n">cf</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>unwind structure for try block has a value of zero for the second field. prev
+field signifies that the unwintable is also a linked list of unwind
+structures. When exception handler has to cleanup the frame, it reads the
+current id from the frame and uses it as an index into the unwind table. It
+reads the unwind structure at that index and calls the clean up function as
+specified by the second field of the structure. This destroys the object
+corressponding to this id. The handler then reads the previous unwind
+structure from unwind table at an index as specified by prev field. This
+continues until end of list is reached (prev is -1). Figure 7 shows how a
+unwind table may look like for the function in the figure.</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/figure7.gif" alt=""></p>
+<p>Consider case of the new operator:</p>
+<p><code>T* p = new T();</code></p>
+<p>The system first allocates memory for T and then calls the constructor. If
+constructor throws an exception, then the system must free up the memory
+allocated for this object. To achieve this, VC++ also assigns id to each new
+operator for a type that has a non-trivial constructor. There is corresponding
+entry in the unwind table, the cleanup routine frees the space allocated.
+Before calling the constructor, it stores id for the allocation in
+<code>EXCEPTION_REGISTRATION</code> structure. After constructor returns successfully, it
+restores the id of the previous special region.</p>
+<p>Furthermore, the object may have been partially constructed when the
+constructor throws exception. If it has member sub objects or base class sub
+objects and some of them had been constructed at the time of exception,
+destructor for those objects must be called. Compiler generates same set of
+data for a constructor as for any normal function to perform these tasks.</p>
+<p>Please note that the exception handler calls the user-defined destructors
+while unwinding the stack. It is possible for the destructor to throw an
+exception. The C++ standard says that while the stack is unwinding, the
+destructor may not throw an exception. If it does, the system calls
+std::terminate.</p>
+<h3>Implementation</h3>
+<p>This section talks about three topics that have not been discussed above:</p>
+<p>a) Installing the exception handler.<br>
+b) Catch block rethrowing the exception or throwing a new exception.<br>
+c) Per thread exception handling support.</p>
+<p>Please look at the Readme.txt file in the source distribution for build
+instructions [1]. It also includes a demo project.</p>
+<p>The first task is to install the exception handling library, or in other
+words, replace the library provided by VC++. From the above discussion, it is
+clear that VC++ provides <code>__CxxFrameHandler</code> function that is the entry point
+for the all the exceptions. For each function, the compiler generates
+exception handling routine that is called if the exception occurs with in this
+function. This routine passes funcinfo pointer to the <code>__CxxFrameHandler</code>
+function.</p>
+<p><code>install_my_handler()</code> function inserts code at the beginning of
+<code>__CxxFrameHandler</code> that jumps to <code>my_exc_handler()</code>. But <code>__CxxFrameHandler</code>
+resides in readonly code page. Any attempt to write to it would cause access
+violation. So the first step is to change the access of the page to read-write
+using <code>VirtualProtectEx</code> function provided by Windows API. After writing to
+the memory, we restore the old protection of the page. The function writes the
+contents of jmp_instr structure at the beginning of <code>__CxxFrameHandler</code>.</p>
+<div class="highlight"><pre><code><span></span><span class="c1">//install_my_handler.cpp</span>
+
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;windows.h&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;install_my_handler.h&quot;</span>
+
+<span class="c1">//C++&#39;s default exception handler</span>
+<span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span>
+
+<span class="n">EXCEPTION_DISPOSITION</span><span class="w">  </span><span class="n">__CxxFrameHandler</span><span class="p">(</span>
+<span class="w">     </span><span class="k">struct</span><span class="w"> </span><span class="nc">_EXCEPTION_RECORD</span><span class="w"> </span><span class="o">*</span><span class="n">ExceptionRecord</span><span class="p">,</span>
+<span class="w">     </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">EstablisherFrame</span><span class="p">,</span>
+<span class="w">     </span><span class="k">struct</span><span class="w"> </span><span class="nc">_CONTEXT</span><span class="w"> </span><span class="o">*</span><span class="n">ContextRecord</span><span class="p">,</span>
+<span class="w">     </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">DispatcherContext</span>
+<span class="w">     </span><span class="p">);</span>
+
+<span class="n">namespace</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="n">cpp_handler_instructions</span><span class="p">[</span><span class="mi">5</span><span class="p">];</span>
+<span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">saved_handler_instructions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="n">namespace</span><span class="w"> </span><span class="n">my_handler</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="c1">//Exception handler that replaces C++&#39;s default handler.</span>
+<span class="w">    </span><span class="n">EXCEPTION_DISPOSITION</span><span class="w"> </span><span class="nf">my_exc_handler</span><span class="p">(</span>
+<span class="w">         </span><span class="k">struct</span><span class="w"> </span><span class="nc">_EXCEPTION_RECORD</span><span class="w"> </span><span class="o">*</span><span class="n">ExceptionRecord</span><span class="p">,</span>
+<span class="w">         </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">EstablisherFrame</span><span class="p">,</span>
+<span class="w">         </span><span class="k">struct</span><span class="w"> </span><span class="nc">_CONTEXT</span><span class="w"> </span><span class="o">*</span><span class="n">ContextRecord</span><span class="p">,</span>
+<span class="w">         </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">DispatcherContext</span>
+<span class="w">         </span><span class="p">)</span><span class="w"> </span><span class="n">throw</span><span class="p">();</span>
+<span class="cp">#pragma pack(1)</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">jmp_instr</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="n">jmp</span><span class="p">;</span>
+<span class="w">        </span><span class="n">DWORD</span><span class="w">         </span><span class="n">offset</span><span class="p">;</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="cp">#pragma pack()</span>
+
+<span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="nf">WriteMemory</span><span class="p">(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">loc</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">buffer</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">size</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="n">HANDLE</span><span class="w"> </span><span class="n">hProcess</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">GetCurrentProcess</span><span class="p">();</span>
+<span class="w">        </span><span class="c1">//change the protection of pages containing range of memory </span>
+<span class="w">        </span><span class="c1">//[loc, loc+size] to READ WRITE</span>
+<span class="w">        </span><span class="n">DWORD</span><span class="w"> </span><span class="n">old_protection</span><span class="p">;</span>
+<span class="w">        </span><span class="n">BOOL</span><span class="w"> </span><span class="n">ret</span><span class="p">;</span>
+<span class="w">        </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">VirtualProtectEx</span><span class="p">(</span><span class="n">hProcess</span><span class="p">,</span><span class="w"> </span><span class="n">loc</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="p">,</span><span class="w"> </span>
+<span class="w">                         </span><span class="n">PAGE_READWRITE</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">old_protection</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="p">(</span><span class="n">ret</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">FALSE</span><span class="p">)</span>
+<span class="w">            </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">        </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">WriteProcessMemory</span><span class="p">(</span><span class="n">hProcess</span><span class="p">,</span><span class="w"> </span><span class="n">loc</span><span class="p">,</span><span class="w"> </span><span class="n">buffer</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">);</span>
+<span class="w">        </span><span class="c1">//restore old protection</span>
+<span class="w">        </span><span class="n">DWORD</span><span class="w"> </span><span class="n">o2</span><span class="p">;</span>
+<span class="w">        </span><span class="n">VirtualProtectEx</span><span class="p">(</span><span class="n">hProcess</span><span class="p">,</span><span class="w"> </span><span class="n">loc</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="p">,</span><span class="w"> </span><span class="n">old_protection</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">o2</span><span class="p">);</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="n">ret</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">TRUE</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="nf">ReadMemory</span><span class="p">(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">loc</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">buffer</span><span class="p">,</span><span class="w"> </span><span class="n">DWORD</span><span class="w"> </span><span class="n">size</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="n">HANDLE</span><span class="w"> </span><span class="n">hProcess</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">GetCurrentProcess</span><span class="p">();</span>
+<span class="w">        </span><span class="n">DWORD</span><span class="w"> </span><span class="n">bytes_read</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">        </span><span class="n">BOOL</span><span class="w"> </span><span class="n">ret</span><span class="p">;</span>
+<span class="w">        </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ReadProcessMemory</span><span class="p">(</span><span class="n">hProcess</span><span class="p">,</span><span class="w"> </span><span class="n">loc</span><span class="p">,</span><span class="w"> </span><span class="n">buffer</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">bytes_read</span><span class="p">);</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="n">ret</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">TRUE</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">bytes_read</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">size</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="nf">install_my_handler</span><span class="p">()</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">my_hdlr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">my_exc_handler</span><span class="p">;</span>
+<span class="w">        </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">cpp_hdlr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__CxxFrameHandler</span><span class="p">;</span>
+<span class="w">        </span><span class="n">jmp_instr</span><span class="w"> </span><span class="n">jmp_my_hdlr</span><span class="p">;</span><span class="w"> </span>
+<span class="w">        </span><span class="n">jmp_my_hdlr</span><span class="p">.</span><span class="n">jmp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mh">0xE9</span><span class="p">;</span>
+<span class="w">        </span><span class="c1">//We actually calculate the offset from __CxxFrameHandler+5</span>
+<span class="w">        </span><span class="c1">//as the jmp instruction is 5 byte length.</span>
+<span class="w">        </span><span class="n">jmp_my_hdlr</span><span class="p">.</span><span class="n">offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">reinterpret_cast</span><span class="o">&lt;</span><span class="kt">char</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">my_hdlr</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span>
+<span class="w">                    </span><span class="p">(</span><span class="n">reinterpret_cast</span><span class="o">&lt;</span><span class="kt">char</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">cpp_hdlr</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">5</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="p">(</span><span class="o">!</span><span class="n">saved_handler_instructions</span><span class="p">)</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">            </span><span class="k">if</span><span class="p">(</span><span class="o">!</span><span class="n">ReadMemory</span><span class="p">(</span><span class="n">cpp_hdlr</span><span class="p">,</span><span class="w"> </span><span class="n">cpp_handler_instructions</span><span class="p">,</span>
+<span class="w">                        </span><span class="k">sizeof</span><span class="p">(</span><span class="n">cpp_handler_instructions</span><span class="p">)))</span>
+<span class="w">                </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">            </span><span class="n">saved_handler_instructions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">WriteMemory</span><span class="p">(</span><span class="n">cpp_hdlr</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">jmp_my_hdlr</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">jmp_my_hdlr</span><span class="p">));</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="nf">restore_cpp_handler</span><span class="p">()</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="k">if</span><span class="p">(</span><span class="o">!</span><span class="n">saved_handler_instructions</span><span class="p">)</span>
+<span class="w">            </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">        </span><span class="k">else</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">            </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">loc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__CxxFrameHandler</span><span class="p">;</span>
+<span class="w">            </span><span class="k">return</span><span class="w"> </span><span class="n">WriteMemory</span><span class="p">(</span><span class="n">loc</span><span class="p">,</span><span class="w"> </span><span class="n">cpp_handler_instructions</span><span class="p">,</span><span class="w"> </span>
+<span class="w">                           </span><span class="k">sizeof</span><span class="p">(</span><span class="n">cpp_handler_instructions</span><span class="p">));</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The <code>#pragma pack(1)</code> directive at the definition of <code>jmp_instr</code> structure
+tells the compiler to layout the members of the structure without any padding
+between them. Without this directive, size of this structure is eight bytes.
+It is five bytes when we define this directive.</p>
+<p>Going back to exception handling, when the exception handler calls the catch
+block, the catch block may rethrow the exception or throw a completely new
+exception. If catch block throws a new exception, then the exception handler
+has to destroy the previous exception before moving ahead. If the catch block
+decides to rethrow, the exception handler has to propagate the current
+exception. At this moment, the exception handler has to tackle with two
+questions: how does the exception handler know that the exception originated
+from with in a catch block and how does it keep track of the old exception?
+The way I solved this problem is that before the handler calls the catch
+block, it stores the current exception in <code>exception_storage</code> object and
+registers a special purpose exception handler, catch_block_protector. The
+exception_storage object is available by calling <code>get_exception_storage()</code>
+function:</p>
+<div class="highlight"><pre><code><span></span><span class="n">exception_storage</span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">get_exception_storage</span><span class="p">();</span>
+<span class="n">p</span><span class="o">-&gt;</span><span class="n">set</span><span class="p">(</span><span class="n">pexc</span><span class="p">,</span><span class="w"> </span><span class="n">pexc_info</span><span class="p">);</span>
+<span class="k">register</span><span class="w"> </span><span class="n">catch_block_protector</span>
+<span class="n">call</span><span class="w"> </span><span class="n">catch</span><span class="w"> </span><span class="n">block</span>
+<span class="c1">//....</span>
+</code></pre></div>
+<p>If exception is (re)thrown from within a catch block, the control goes to
+catch_block_protector. Now this function can extract the previous exception
+from exception_storage object and destroy it if catch block threw new
+exception. If the catch block did a rethrow (which it can find out by
+inspecting first two entries of <code>ExceptionInformation</code> array, both are zero.
+See code below), then the handler needs to propagate the current exception by
+copying it in <code>ExceptionInformation</code> array. The following snippet shows
+<code>catch_block_protector()</code> function.</p>
+<div class="highlight"><pre><code><span></span><span class="c1">//-------------------------------------------------------------------</span>
+<span class="c1">// If this handler is calles, exception was (re)thrown from catch </span>
+<span class="c1">// block. The  exception  handler  (my_handler)  registers this </span>
+<span class="c1">// handler before calling the catch block. Its job is to determine</span>
+<span class="c1">// if the  catch block  threw  new  exception or did a rethrow. If </span>
+<span class="c1">// catch block threw a  new  exception, then it should destroy the </span>
+<span class="c1">// previous exception object that was passed to the catch block. If </span>
+<span class="c1">// the catch block did a rethrow, then this handler should retrieve</span>
+<span class="c1">// the original exception and save in ExceptionRecord for the </span>
+<span class="c1">// exception handlers to use it.</span>
+<span class="c1">//-------------------------------------------------------------------</span>
+<span class="n">EXCEPTION_DISPOSITION</span><span class="w">  </span><span class="nf">catch_block_protector</span><span class="p">(</span>
+<span class="w">     </span><span class="n">_EXCEPTION_RECORD</span><span class="w"> </span><span class="o">*</span><span class="n">ExceptionRecord</span><span class="p">,</span>
+<span class="w">     </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">EstablisherFrame</span><span class="p">,</span>
+<span class="w">     </span><span class="k">struct</span><span class="w"> </span><span class="nc">_CONTEXT</span><span class="w"> </span><span class="o">*</span><span class="n">ContextRecord</span><span class="p">,</span>
+<span class="w">     </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">DispatcherContext</span>
+<span class="w">     </span><span class="p">)</span><span class="w"> </span><span class="n">throw</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">EXCEPTION_REGISTRATION</span><span class="w"> </span><span class="o">*</span><span class="n">pFrame</span><span class="p">;</span>
+<span class="w">    </span><span class="n">pFrame</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">reinterpret_cast</span><span class="o">&lt;</span><span class="n">EXCEPTION_REGISTRATION</span><span class="o">*&gt;</span>
+<span class="w">    </span><span class="p">(</span><span class="n">EstablisherFrame</span><span class="p">);</span><span class="k">if</span><span class="p">(</span><span class="o">!</span><span class="p">(</span><span class="n">ExceptionRecord</span><span class="o">-&gt;</span><span class="n">ExceptionFlags</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="p">(</span><span class="w">  </span>
+<span class="w">          </span><span class="n">_EXCEPTION_UNWINDING</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">_EXCEPTION_EXIT_UNWIND</span><span class="p">)))</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">pcur_exc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">pprev_exc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">        </span><span class="k">const</span><span class="w"> </span><span class="n">excpt_info</span><span class="w"> </span><span class="o">*</span><span class="n">pexc_info</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">pprev_excinfo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">        </span><span class="n">exception_storage</span><span class="w"> </span><span class="o">*</span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span>
+<span class="w">        </span><span class="n">get_exception_storage</span><span class="p">();</span><span class="w">  </span><span class="n">pprev_exc</span><span class="o">=</span>
+<span class="w">        </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">get_exception</span><span class="p">();</span><span class="w">  </span><span class="n">pprev_excinfo</span><span class="o">=</span>
+<span class="w">        </span><span class="n">p</span><span class="o">-&gt;</span><span class="n">get_exception_info</span><span class="p">();</span><span class="n">p</span><span class="o">-&gt;</span><span class="n">set</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="w">        </span><span class="kt">bool</span><span class="w"> </span><span class="n">cpp_exc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ExceptionRecord</span><span class="o">-&gt;</span><span class="n">ExceptionCode</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">MS_CPP_EXC</span><span class="p">;</span>
+<span class="w">        </span><span class="n">get_exception</span><span class="p">(</span><span class="n">ExceptionRecord</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">pcur_exc</span><span class="p">);</span>
+<span class="w">        </span><span class="n">get_excpt_info</span><span class="p">(</span><span class="n">ExceptionRecord</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">pexc_info</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="p">(</span><span class="n">cpp_exc</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">pcur_exc</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">==</span><span class="w">   </span><span class="n">pexc_info</span><span class="p">)</span>
+<span class="w">        </span><span class="c1">//rethrow</span>
+<span class="w">            </span><span class="p">{</span><span class="n">ExceptionRecord</span><span class="o">-&gt;</span><span class="n">ExceptionInformation</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span>
+<span class="w">                </span><span class="n">reinterpret_cast</span><span class="o">&lt;</span><span class="n">DWORD</span><span class="o">&gt;</span>
+<span class="w">            </span><span class="p">(</span><span class="n">pprev_exc</span><span class="p">);</span><span class="n">ExceptionRecord</span><span class="o">-&gt;</span><span class="n">ExceptionInformation</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span>
+<span class="w">                </span><span class="n">reinterpret_cast</span><span class="o">&lt;</span><span class="n">DWORD</span><span class="o">&gt;</span><span class="p">(</span><span class="n">pprev_excinfo</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="k">else</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">            </span><span class="n">exception_helper</span><span class="o">::</span><span class="n">destroy</span><span class="p">(</span><span class="n">pprev_exc</span><span class="p">,</span><span class="w"> </span><span class="n">pprev_excinfo</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">ExceptionContinueSearch</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Consider one possible implementation of get_exception_storage() function:</p>
+<div class="highlight"><pre><code><span></span><span class="n">exception_storage</span><span class="o">*</span><span class="w"> </span><span class="nf">get_exception_storage</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="n">exception_storage</span><span class="w"> </span><span class="n">es</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="o">&amp;</span><span class="n">es</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>This would be a perfect implementation except in a multithreaded world.
+Consider more than one thread getting hold of this object and trying to store
+exception object in it. This will be disasterous. Every thread has its own
+stack and own exception handling chain. What we need is a thread specific
+exception_storage object. Every thread has its own object which is created
+when the thread begins its life and destroyed when the threads ends. Windows
+provides thread local storage for this purpose. Thread local storage enables
+each object to have its own private copy of an object accesible through a
+global key. It provides <code>TLSGetValue()</code> and <code>TLSSetValue()</code> functions for this
+purpose.</p>
+<p>Excptstorage.cpp file defines <code>get_exception_storage()</code> function. This file is
+built as a DLL. This is due to the fact that it enables us to know whenever a
+thread is created or destroyed. Every time a thread is created or destroyed,
+Windows calls every DLL's (that is loaded in this process's address space)
+<code>DllMain()</code> function. This function is called in the thread that is created.
+This gives us a chance to initialize thread specific data, <code>exception_storage</code>
+object in our case.</p>
+<div class="highlight"><pre><code><span></span><span class="c1">//excptstorage.cpp</span>
+
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;excptstorage.h&quot;</span>
+</code></pre></div>
+<h3>Conclusion</h3>
+<p>As discussed above, the C++ compiler and the runtime exception library, with
+support from the Operating System, cooperate to perform exception handling.</p>
+<h3>Notes and References</h3>
+<ol>
+<li>As of this discussion, Visual Studio 7.0 is released. I compiled and tested the exception handling library primarily with VC++ 6.0 on Windows 2000 running on pentium processors. I also tested it with VC++ 5.0 and VC++ 7.0 beta release. There is small difference between 6.0 and 7.0. 6.0 first copies the exception (or its reference) on catch block's frame and then performs stack unwinding before calling the catch block. 7.0 library first performs stack unwinding. The behavior of my library is similar to 6.0 library in this respect.</li>
+<li>See excellent article on MSDN by Matt Pietrek on <a href="http://www.microsoft.com/msj/defaultframe.asp?page=/msj/0197/exception/exception.htm&nav=/msj/0197/newnav.htm"> structured exception handling</a>. </li>
+<li>The compiler may not generate any exception related data for a function that does not have a try block and does not define any object that has a non-trivial destructor.</li>
+</ol>
+<h3>License</h3>
+<p>This article, along with any associated source code and files, is licensed
+under <a href="http://www.codeproject.com/info/cpol10.aspx">The Code Project Open License(CPOL)</a></p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "How a C++ compiler implements exception handling.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

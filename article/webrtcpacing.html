@@ -1,0 +1,797 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>WebRTC Pacing - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="WebRTC Pacing,WebRTC,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="WebRTC Pacing之IntervalBudget分析<br/>WebRTC Pacing之RoundRobinPacketQueue分析<br/>WebRTC Pacing模块" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>WebRTC Pacing</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2022-02-24 14:40
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_webrtc.html' class='article_tag'>WebRTC</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://zhuanlan.zhihu.com/p/184944074' target='blank'>WebRTC Pacing之IntervalBudget分析</a></p></h4>
+<p>WebRTC中Pacing等模块需要按照指定的码率发送报文，保证码率稳定，会用到<code>IntervalBudget</code>这个类，这个类是控制码率平稳的核心。本篇将介绍<code>IntervalBudget</code>这个类。</p>
+<h2>1. IntervalBudget原理</h2>
+<p><code>IntervalBudget</code>顾名思义，就是一段时间内的发送码率预算。 <code>IntervalBudget</code>根据时间流逝增加budget，报文发送后减少budget，每次发送报文前判断剩余budget是否足够，如果不足则取消本次发送。</p>
+<p>举个例子 :</p>
+<ul>
+<li>当前目标码率设置为1000kbps，剩余预算100bytes。</li>
+<li>距离上次更新相隔50ms，那么budget就多了<code>1000kbps*50/8=600bytes</code>， 剩余<code>100+600=700bytes</code>；</li>
+<li>如果当前发送一个1000bytes的报文，先判断是否有剩余budget，当前700bytes肯定有剩余，因此可以发送，并减少budget，剩余<code>700-1000=-300bytes</code>。</li>
+</ul>
+<p><code>IntervalBudget</code>这个类比较小，因此这里直接贴上其声明：</p>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">IntervalBudget</span><span class="w"> </span><span class="p">{</span>
+<span class="w"> </span><span class="k">public</span><span class="o">:</span>
+<span class="w">  </span><span class="k">explicit</span><span class="w"> </span><span class="n">IntervalBudget</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">initial_target_rate_kbps</span><span class="p">);</span>
+<span class="w">  </span><span class="n">IntervalBudget</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">initial_target_rate_kbps</span><span class="p">,</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">can_build_up_underuse</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 设置目标发送码率</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">set_target_rate_kbps</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">target_rate_kbps</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 时间流逝后增加budget</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">IncreaseBudget</span><span class="p">(</span><span class="kt">int64_t</span><span class="w"> </span><span class="n">delta_time_ms</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 发送数据后减少budget</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">UseBudget</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">bytes</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 剩余budget</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="nf">bytes_remaining</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 剩余budget占当前窗口数据量比例</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="nf">budget_ratio</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 目标发送码率</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="nf">target_rate_kbps</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+
+<span class="w"> </span><span class="k">private</span><span class="o">:</span>
+<span class="w">  </span><span class="c1">// 设置的目标码率，按照这个码率控制数据发送</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">target_rate_kbps_</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 窗口内（500ms）对应的最大字节数=窗口大小*target_rate_kbps_/8</span>
+<span class="w">  </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">max_bytes_in_budget_</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 剩余可发送字节数，限制范围:[-max_bytes_in_budget_, max_bytes_in_budget_]</span>
+<span class="w">  </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">bytes_remaining_</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 上个周期underuse，本周期是否可以借用上个周期的剩余量</span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">can_build_up_underuse_</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<h2>2. budget增加</h2>
+<p>如果距离上次更新时间相隔<code>delta_time_ms</code>，那么随着时间流逝，那么这段时间增长的budget为<code>delta_time_ms * target_rate_kbps_</code>：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">IntervalBudget::IncreaseBudget</span><span class="p">(</span><span class="kt">int64_t</span><span class="w"> </span><span class="n">delta_time_ms</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">bytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">target_rate_kbps_</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">delta_time_ms</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">8</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 一般来说，can_build_up_underuse_都会关闭，关于这个开关的介绍见最后一部分介绍</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">can_build_up_underuse_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// We overused last interval, compensate this interval.</span>
+<span class="w">    </span><span class="c1">// 如果上次发送的过多（bytes_remaining_ &lt; 0），那么本次发送的数据量会变少</span>
+<span class="w">    </span><span class="c1">// 如果开启can_build_up_underuse_，则表明可以累积之前没有用完的预算</span>
+<span class="w">    </span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">bytes</span><span class="p">,</span><span class="w"> </span><span class="n">max_bytes_in_budget_</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// If we underused last interval we can&#39;t use it this interval.</span>
+<span class="w">    </span><span class="c1">// 1） 如果上次的budget没有用完（bytes_remaining_ &gt; 0），如果没有设置can_build_up_underuse_</span>
+<span class="w">    </span><span class="c1">// 不会对上次的补偿，直接清空所有预算，开始新的一轮</span>
+
+<span class="w">    </span><span class="c1">// 2） 如果设置了can_build_up_underuse_标志，那意味着要考虑上次的underuse，</span>
+<span class="w">    </span><span class="c1">// 如果上次没有发送完，则本次需要补偿，见上面if逻辑</span>
+<span class="w">    </span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">bytes</span><span class="p">,</span><span class="w"> </span><span class="n">max_bytes_in_budget_</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<h2>3. 减少budget</h2>
+<p>发送了数据后需要减少budget，直接减去发送字节数即可：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">IntervalBudget::UseBudget</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">bytes</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">(</span><span class="n">bytes_remaining_</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">bytes</span><span class="p">),</span>
+<span class="w">                              </span><span class="o">-</span><span class="n">max_bytes_in_budget_</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<h2>4. 谈谈IntervalBudget窗口大小</h2>
+<p>这里的窗口目前主要是用来控制<code>can_build_up_underuse_</code>开关打开下，<code>build_up</code>的上限。 考虑到存在这样的情况，随着时间流逝，我们每5ms都有5ms的budget可供使用，但是并不是每一个5ms我们都能够完全使用掉这5ms的budget，这里称作underuse。因此，<code>can_build
+_up_underuse_</code>开关允许我们将这些没有用完的预算累计起来，以供后续使用。<code>kWindowMs = 500ms</code>意味着我们可以累积500ms这么多没有用完的预算。</p>
+<p>打开这个开关好处在于某些时刻，我们短时间内可供发送的预算更多，在码率抖动较大的时候，我们可以更快地将数据发送出去。带来的缺陷是，短时间内的码率控制不够平滑，
+在一些低带宽场景影响更大。</p>
+<hr>
+
+<h4><p>原文出处：<a href='https://zhuanlan.zhihu.com/p/185032135' target='blank'>WebRTC Pacing之RoundRobinPacketQueue分析</a></p></h4>
+<p>WebRTC中Pacing模块实现了一个优先级队列<code>RoundRobinPacketQueue</code>，它可以push不同优先级的报文，然后可以按照优先级pop并发送出去。<code>RoundRobinPacketQueue</code>总结来说有几点需要注意：</p>
+<ol>
+<li><code>RoundRobinPacketQueue</code>每一路Stream单独调度，每一路stream有不同优先级，由其packet决定，优先级相同时，发送数据量少的stream有更高的调度优先级</li>
+<li>Stream的优先级保存在<code>RoundRobinPacketQueue</code>中，每次发送报文后都需要更新</li>
+<li>同一个Stream的报文保存在一个优先级队列中，队列中的数据重传包有更高优先级，先插入的数据有更高优先级</li>
+<li>音频报可能不参与调度</li>
+</ol>
+<h2>1. 对外接口以及相关定义</h2>
+<p>老规矩，了解一个类的功能前，我们先了解其对外接口：</p>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">RoundRobinPacketQueue</span><span class="w"> </span><span class="p">{</span>
+<span class="w"> </span><span class="k">public</span><span class="o">:</span>
+<span class="w">  </span><span class="p">...</span>
+<span class="w">  </span><span class="c1">// 插入不同优先级的报文</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="n">Push</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">priority</span><span class="p">,</span>
+<span class="w">            </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">enqueue_time</span><span class="p">,</span>
+<span class="w">            </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">enqueue_order</span><span class="p">,</span>
+<span class="w">            </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">RtpPacketToSend</span><span class="o">&gt;</span><span class="w"> </span><span class="n">packet</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 弹出一个即将发送的报文</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">RtpPacketToSend</span><span class="o">&gt;</span><span class="w"> </span><span class="n">Pop</span><span class="p">();</span>
+<span class="w">  </span><span class="c1">// queue是否empty</span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="nf">Empty</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 报文总数</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="nf">SizeInPackets</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 报文总字节数</span>
+<span class="w">  </span><span class="n">DataSize</span><span class="w"> </span><span class="nf">Size</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 下一个pop的报文如果是音频包，则返回该包时间戳，非音频包则返回nullopt</span>
+<span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="n">Timestamp</span><span class="o">&gt;</span><span class="w"> </span><span class="n">LeadingAudioPacketEnqueueTime</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 队列中最旧的报文时间戳</span>
+<span class="w">  </span><span class="n">Timestamp</span><span class="w"> </span><span class="nf">OldestEnqueueTime</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 队列中的报文按照当前码率发送出去所用到的时间</span>
+<span class="w">  </span><span class="n">TimeDelta</span><span class="w"> </span><span class="nf">AverageQueueTime</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 更新内部状态</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">UpdateQueueTime</span><span class="p">(</span><span class="n">Timestamp</span><span class="w"> </span><span class="n">now</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 暂停queue处理</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">SetPauseState</span><span class="p">(</span><span class="kt">bool</span><span class="w"> </span><span class="n">paused</span><span class="p">,</span><span class="w"> </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">now</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 计算是考虑传输层overhead，默认不考虑</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">SetIncludeOverhead</span><span class="p">();</span>
+<span class="w">  </span><span class="c1">// 设置传输层的overhead大小</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">SetTransportOverhead</span><span class="p">(</span><span class="n">DataSize</span><span class="w"> </span><span class="n">overhead_per_packet</span><span class="p">);</span>
+<span class="w">  </span><span class="p">...</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>最重要的接口应该数push和pop，从接口上我们大致了解了其功能，但是实际上其内部处理还是要深入到这个函数里面。</p>
+<p><strong>Stream</strong></p>
+<p><code>RoundRobinPacketQueue</code> 中定义了<code>Stream</code>来区分不同的流，每一路有自己的一个优先级队列，以及这路流对应的优先级：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">Stream</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="p">...</span>
+<span class="w">  </span><span class="c1">// 已经发送的报文总大小，发送较少的stream通常会优先调度</span>
+<span class="w">  </span><span class="n">DataSize</span><span class="w"> </span><span class="n">size</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 该路流对应的ssrc</span>
+<span class="w">  </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">ssrc</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 一个根据StreamPrioKey确定优先级的优先队列</span>
+<span class="w">  </span><span class="n">PriorityPacketQueue</span><span class="w"> </span><span class="n">packet_queue</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// stream_priorities_的一个iterator，可以理解成一个指针</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">multimap</span><span class="o">&lt;</span><span class="n">StreamPrioKey</span><span class="p">,</span><span class="w"> </span><span class="kt">uint32_t</span><span class="o">&gt;::</span><span class="n">iterator</span><span class="w"> </span><span class="n">priority_it</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p><strong>StreamPrioKey</strong></p>
+<p><code>Stream</code>之间优先级比较主要是根据优先级以及stream中报文总大小，因此这里增加了一个<code>StreamPrioKey</code>来简化优先级比较：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">StreamPrioKey</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">StreamPrioKey</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">priority</span><span class="p">,</span><span class="w"> </span><span class="n">DataSize</span><span class="w"> </span><span class="n">size</span><span class="p">)</span>
+<span class="w">      </span><span class="o">:</span><span class="w"> </span><span class="n">priority</span><span class="p">(</span><span class="n">priority</span><span class="p">),</span><span class="w"> </span><span class="n">size</span><span class="p">(</span><span class="n">size</span><span class="p">)</span><span class="w"> </span><span class="p">{}</span>
+
+<span class="w">  </span><span class="c1">// 优先级不等时比较优先级，优先级相等时，发送过较少的stream优先级更高</span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="k">operator</span><span class="o">&lt;</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">StreamPrioKey</span><span class="o">&amp;</span><span class="w"> </span><span class="n">other</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">priority</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">other</span><span class="p">.</span><span class="n">priority</span><span class="p">)</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">priority</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">other</span><span class="p">.</span><span class="n">priority</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">size</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">other</span><span class="p">.</span><span class="n">size</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">priority</span><span class="p">;</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">DataSize</span><span class="w"> </span><span class="n">size</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p><strong>PriorityPacketQueue</strong></p>
+<p><code>PriorityPacketQueue</code>是一个继承于<code>std::priority_queue&lt;QueuedPacket&gt;</code>的优先队列，不同stream的数据最终是保存在该优先队列中，建议大家先看看标准库里面的优先队列<code>std::priority_queue</code>的操作。 该优先队列内的数据比较方法：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">bool</span><span class="w"> </span><span class="n">RoundRobinPacketQueue</span><span class="o">::</span><span class="n">QueuedPacket</span><span class="o">::</span><span class="k">operator</span><span class="o">&lt;</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">RoundRobinPacketQueue</span><span class="o">::</span><span class="n">QueuedPacket</span><span class="o">&amp;</span><span class="w"> </span><span class="n">other</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 先判断优先级，优先级相等时判断重传，重传包更高优先级，否则判断插入顺序（order）</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">priority_</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">other</span><span class="p">.</span><span class="n">priority_</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">priority_</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">other</span><span class="p">.</span><span class="n">priority_</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_retransmission_</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">other</span><span class="p">.</span><span class="n">is_retransmission_</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">other</span><span class="p">.</span><span class="n">is_retransmission_</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">enqueue_order_</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">other</span><span class="p">.</span><span class="n">enqueue_order_</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>最后看看<code>RoundRobinPacketQueue</code>几个重要的成员变量：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// StreamPrioKey-ssrc map，Stream中有保存该iterator</span>
+<span class="n">std</span><span class="o">::</span><span class="n">multimap</span><span class="o">&lt;</span><span class="n">StreamPrioKey</span><span class="p">,</span><span class="w"> </span><span class="kt">uint32_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">stream_priorities_</span><span class="p">;</span>
+
+<span class="c1">// SSRC Stream map</span>
+<span class="n">std</span><span class="o">::</span><span class="n">map</span><span class="o">&lt;</span><span class="kt">uint32_t</span><span class="p">,</span><span class="w"> </span><span class="n">Stream</span><span class="o">&gt;</span><span class="w"> </span><span class="n">streams_</span><span class="p">;</span>
+
+<span class="c1">// 报文入队时间，用于找到最老的报文时间</span>
+<span class="n">std</span><span class="o">::</span><span class="n">multiset</span><span class="o">&lt;</span><span class="n">Timestamp</span><span class="o">&gt;</span><span class="w"> </span><span class="n">enqueue_times_</span><span class="p">;</span>
+
+<span class="c1">// 存一个报文的queue</span>
+<span class="n">absl</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="n">QueuedPacket</span><span class="o">&gt;</span><span class="w"> </span><span class="n">single_packet_queue_</span><span class="p">;</span>
+</code></pre></div>
+<h2>2. Push数据</h2>
+<p><code>RoundRobinPacketQueue</code>对插入的数据稍微做了一下封装，<code>QueuedPacket</code>增加了优先级、入队列时间、次序、是否是重传、入队时间set的iterator，数据存在</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">RoundRobinPacketQueue::Push</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">priority</span><span class="p">,</span>
+<span class="w">                                 </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">enqueue_time</span><span class="p">,</span>
+<span class="w">                                 </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">enqueue_order</span><span class="p">,</span>
+<span class="w">                                 </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">RtpPacketToSend</span><span class="o">&gt;</span><span class="w"> </span><span class="n">packet</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 没有存储任何报文时直接存在single_packet_queue_中，不进队列</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">size_packets_</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Single packet fast-path.</span>
+<span class="w">    </span><span class="n">single_packet_queue_</span><span class="p">.</span><span class="n">emplace</span><span class="p">(</span>
+<span class="w">        </span><span class="n">QueuedPacket</span><span class="p">(</span><span class="n">priority</span><span class="p">,</span><span class="w"> </span><span class="n">enqueue_time</span><span class="p">,</span><span class="w"> </span><span class="n">enqueue_order</span><span class="p">,</span>
+<span class="w">                     </span><span class="n">enqueue_times_</span><span class="p">.</span><span class="n">end</span><span class="p">(),</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">packet</span><span class="p">)));</span>
+<span class="w">    </span><span class="n">UpdateQueueTime</span><span class="p">(</span><span class="n">enqueue_time</span><span class="p">);</span>
+<span class="w">    </span><span class="n">single_packet_queue_</span><span class="o">-&gt;</span><span class="n">SubtractPauseTime</span><span class="p">(</span><span class="n">pause_time_sum_</span><span class="p">);</span>
+<span class="w">    </span><span class="n">size_packets_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">    </span><span class="n">size_</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">PacketSize</span><span class="p">(</span><span class="o">*</span><span class="n">single_packet_queue_</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 如果single_packet_queue_有数据，先push到queue中</span>
+<span class="w">    </span><span class="n">MaybePromoteSinglePacketToNormalQueue</span><span class="p">();</span>
+<span class="w">    </span><span class="c1">// 调用另外一个Push函数插入到队列中</span>
+<span class="w">    </span><span class="n">Push</span><span class="p">(</span><span class="n">QueuedPacket</span><span class="p">(</span><span class="n">priority</span><span class="p">,</span><span class="w"> </span><span class="n">enqueue_time</span><span class="p">,</span><span class="w"> </span><span class="n">enqueue_order</span><span class="p">,</span>
+<span class="w">                      </span><span class="n">enqueue_times_</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">enqueue_time</span><span class="p">),</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">packet</span><span class="p">)));</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Push插入数据逻辑总结来说是：</p>
+<ul>
+<li>根据ssrc找到对应stream，没有则创建stream且暂不调度，优先级指向null</li>
+<li>根据stream是否被调度，或者stream优先级是否要刷新，重新调度stream</li>
+<li>将报文插入队列，报文可能是从<code>single_packet_queue_</code>中提升过来的，逻辑稍有不同</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">RoundRobinPacketQueue::Push</span><span class="p">(</span><span class="n">QueuedPacket</span><span class="w"> </span><span class="n">packet</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 根据报文ssrc找到对应的stream，没有找到则创建一个新的stream</span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">stream_info_it</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">streams_</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">packet</span><span class="p">.</span><span class="n">Ssrc</span><span class="p">());</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">stream_info_it</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">streams_</span><span class="p">.</span><span class="n">end</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">stream_info_it</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">streams_</span><span class="p">.</span><span class="n">emplace</span><span class="p">(</span><span class="n">packet</span><span class="p">.</span><span class="n">Ssrc</span><span class="p">(),</span><span class="w"> </span><span class="n">Stream</span><span class="p">()).</span><span class="n">first</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// 暂时没有确定该stream的优先级，即没有被调度</span>
+<span class="w">    </span><span class="n">stream_info_it</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">.</span><span class="n">priority_it</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">stream_priorities_</span><span class="p">.</span><span class="n">end</span><span class="p">();</span>
+<span class="w">    </span><span class="n">stream_info_it</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">.</span><span class="n">ssrc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">Ssrc</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">Stream</span><span class="o">*</span><span class="w"> </span><span class="n">stream</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">stream_info_it</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 如果该stream没有被调度，则加入到stream_priorities_中</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">priority_it</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">stream_priorities_</span><span class="p">.</span><span class="n">end</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// If the SSRC is not currently scheduled, add it to |stream_priorities_|.</span>
+<span class="w">    </span><span class="n">RTC_CHECK</span><span class="p">(</span><span class="o">!</span><span class="n">IsSsrcScheduled</span><span class="p">(</span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">ssrc</span><span class="p">));</span>
+<span class="w">    </span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">priority_it</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">stream_priorities_</span><span class="p">.</span><span class="n">emplace</span><span class="p">(</span>
+<span class="w">        </span><span class="n">StreamPrioKey</span><span class="p">(</span><span class="n">packet</span><span class="p">.</span><span class="n">Priority</span><span class="p">(),</span><span class="w"> </span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">size</span><span class="p">),</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">Ssrc</span><span class="p">());</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">packet</span><span class="p">.</span><span class="n">Priority</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">priority_it</span><span class="o">-&gt;</span><span class="n">first</span><span class="p">.</span><span class="n">priority</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 当前报文优先级比之前的小，说明优先级有变化，需要更新其优先级</span>
+<span class="w">    </span><span class="n">stream_priorities_</span><span class="p">.</span><span class="n">erase</span><span class="p">(</span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">priority_it</span><span class="p">);</span>
+<span class="w">    </span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">priority_it</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">stream_priorities_</span><span class="p">.</span><span class="n">emplace</span><span class="p">(</span>
+<span class="w">        </span><span class="n">StreamPrioKey</span><span class="p">(</span><span class="n">packet</span><span class="p">.</span><span class="n">Priority</span><span class="p">(),</span><span class="w"> </span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">size</span><span class="p">),</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">Ssrc</span><span class="p">());</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">RTC_CHECK</span><span class="p">(</span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">priority_it</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">stream_priorities_</span><span class="p">.</span><span class="n">end</span><span class="p">());</span>
+
+<span class="w">  </span><span class="c1">// 还没有入队时间，说明是从single_packe_queue_中提升过来的</span>
+<span class="w">  </span><span class="c1">// 注意packet只保存了一个enqueue_times_的iterator</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">packet</span><span class="p">.</span><span class="n">EnqueueTimeIterator</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">enqueue_times_</span><span class="p">.</span><span class="n">end</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Promotion from single-packet queue. Just add to enqueue times.</span>
+<span class="w">    </span><span class="n">packet</span><span class="p">.</span><span class="n">UpdateEnqueueTimeIterator</span><span class="p">(</span>
+<span class="w">        </span><span class="n">enqueue_times_</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">packet</span><span class="p">.</span><span class="n">EnqueueTime</span><span class="p">()));</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// In order to figure out how much time a packet has spent in the queue</span>
+<span class="w">    </span><span class="c1">// while not in a paused state, we subtract the total amount of time the</span>
+<span class="w">    </span><span class="c1">// queue has been paused so far, and when the packet is popped we subtract</span>
+<span class="w">    </span><span class="c1">// the total amount of time the queue has been paused at that moment. This</span>
+<span class="w">    </span><span class="c1">// way we subtract the total amount of time the packet has spent in the</span>
+<span class="w">    </span><span class="c1">// queue while in a paused state.</span>
+<span class="w">    </span><span class="n">UpdateQueueTime</span><span class="p">(</span><span class="n">packet</span><span class="p">.</span><span class="n">EnqueueTime</span><span class="p">());</span>
+<span class="w">    </span><span class="n">packet</span><span class="p">.</span><span class="n">SubtractPauseTime</span><span class="p">(</span><span class="n">pause_time_sum_</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">size_packets_</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">    </span><span class="n">size_</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">PacketSize</span><span class="p">(</span><span class="n">packet</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 插入到stream的queue中</span>
+<span class="w">  </span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">packet_queue</span><span class="p">.</span><span class="n">push</span><span class="p">(</span><span class="n">packet</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<h2>3. pop数据</h2>
+<p>Pop数据的逻辑大致如下：</p>
+<ul>
+<li>如果<code>single_packet_queue_</code>中有数据，则直接返回该数据，否则</li>
+<li>返回优先级最高的stream，获取最前面的数据</li>
+<li>更新stream发送字节数、优先级等</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">RtpPacketToSend</span><span class="o">&gt;</span><span class="w"> </span><span class="n">RoundRobinPacketQueue</span><span class="o">::</span><span class="n">Pop</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 如果single_packe_queue_中有数据，则直接从single_packet_queue_中返回数据</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">single_packet_queue_</span><span class="p">.</span><span class="n">has_value</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">stream_priorities_</span><span class="p">.</span><span class="n">empty</span><span class="p">());</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">RtpPacketToSend</span><span class="o">&gt;</span><span class="w"> </span><span class="n">rtp_packet</span><span class="p">(</span>
+<span class="w">        </span><span class="n">single_packet_queue_</span><span class="o">-&gt;</span><span class="n">RtpPacket</span><span class="p">());</span>
+<span class="w">    </span><span class="n">single_packet_queue_</span><span class="p">.</span><span class="n">reset</span><span class="p">();</span>
+<span class="w">    </span><span class="n">queue_time_sum_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TimeDelta</span><span class="o">::</span><span class="n">Zero</span><span class="p">();</span>
+<span class="w">    </span><span class="n">size_packets_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="n">size_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">DataSize</span><span class="o">::</span><span class="n">Zero</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">rtp_packet</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="o">!</span><span class="n">Empty</span><span class="p">());</span>
+<span class="w">  </span><span class="c1">// 每次都是返回优先级最高的stream的报文</span>
+<span class="w">  </span><span class="n">Stream</span><span class="o">*</span><span class="w"> </span><span class="n">stream</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">GetHighestPriorityStream</span><span class="p">();</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">QueuedPacket</span><span class="o">&amp;</span><span class="w"> </span><span class="n">queued_packet</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">packet_queue</span><span class="p">.</span><span class="n">top</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// 因为有弹出报文，优先级需要更新，更新部分见最后</span>
+<span class="w">  </span><span class="n">stream_priorities_</span><span class="p">.</span><span class="n">erase</span><span class="p">(</span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">priority_it</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 计算报文在queue中的时间</span>
+<span class="w">  </span><span class="n">TimeDelta</span><span class="w"> </span><span class="n">time_in_non_paused_state</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">time_last_updated_</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">queued_packet</span><span class="p">.</span><span class="n">EnqueueTime</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">pause_time_sum_</span><span class="p">;</span>
+<span class="w">  </span><span class="n">queue_time_sum_</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="n">time_in_non_paused_state</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// 删除该报文的queue time</span>
+<span class="w">  </span><span class="n">RTC_CHECK</span><span class="p">(</span><span class="n">queued_packet</span><span class="p">.</span><span class="n">EnqueueTimeIterator</span><span class="p">()</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">enqueue_times_</span><span class="p">.</span><span class="n">end</span><span class="p">());</span>
+<span class="w">  </span><span class="n">enqueue_times_</span><span class="p">.</span><span class="n">erase</span><span class="p">(</span><span class="n">queued_packet</span><span class="p">.</span><span class="n">EnqueueTimeIterator</span><span class="p">());</span>
+
+<span class="w">  </span><span class="c1">// 报文发送后，更新stream发送的报文字节数，发送较少的stream应该有更高的调度优先级</span>
+<span class="w">  </span><span class="c1">// 为了避免发送码率较低的stream一致处于较高优先级发送过多，限制了最低发送字节数</span>
+<span class="w">  </span><span class="n">DataSize</span><span class="w"> </span><span class="n">packet_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">PacketSize</span><span class="p">(</span><span class="n">queued_packet</span><span class="p">);</span>
+<span class="w">  </span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">size</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">(</span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">size</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">packet_size</span><span class="p">,</span><span class="w"> </span><span class="n">max_size_</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">kMaxLeadingSize</span><span class="p">);</span>
+<span class="w">  </span><span class="n">max_size_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">(</span><span class="n">max_size_</span><span class="p">,</span><span class="w"> </span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">size</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">size_</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="n">packet_size</span><span class="p">;</span>
+<span class="w">  </span><span class="n">size_packets_</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">  </span><span class="n">RTC_CHECK</span><span class="p">(</span><span class="n">size_packets_</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">queue_time_sum_</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">TimeDelta</span><span class="o">::</span><span class="n">Zero</span><span class="p">());</span>
+
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">RtpPacketToSend</span><span class="o">&gt;</span><span class="w"> </span><span class="n">rtp_packet</span><span class="p">(</span><span class="n">queued_packet</span><span class="p">.</span><span class="n">RtpPacket</span><span class="p">());</span>
+<span class="w">  </span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">packet_queue</span><span class="p">.</span><span class="n">pop</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// 如果剩余报文需要发送，更新调度优先级</span>
+<span class="w">  </span><span class="n">RTC_CHECK</span><span class="p">(</span><span class="o">!</span><span class="n">IsSsrcScheduled</span><span class="p">(</span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">ssrc</span><span class="p">));</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">packet_queue</span><span class="p">.</span><span class="n">empty</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">priority_it</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">stream_priorities_</span><span class="p">.</span><span class="n">end</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">priority</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">packet_queue</span><span class="p">.</span><span class="n">top</span><span class="p">().</span><span class="n">Priority</span><span class="p">();</span>
+<span class="w">    </span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">priority_it</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">stream_priorities_</span><span class="p">.</span><span class="n">emplace</span><span class="p">(</span>
+<span class="w">        </span><span class="n">StreamPrioKey</span><span class="p">(</span><span class="n">priority</span><span class="p">,</span><span class="w"> </span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">size</span><span class="p">),</span><span class="w"> </span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">ssrc</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">rtp_packet</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<hr>
+
+<h4><p>原文出处：<a href='https://zhuanlan.zhihu.com/p/184924220' target='blank'>WebRTC Pacing模块</a></p></h4>
+<p>今天聊一下WebRTC中的Pacing模块，它的代码位于webrtc源码的<code>src/modules/pacing</code>目录，请结合源码阅读本文，加深对pacing的理解。</p>
+<p>pacing、pacer、pace，顾名思义，有节奏、按照节奏发送报文的含义，一般我们也称作<code>平滑发送</code>。 pacing是拥塞控制中重要的一个环节，它受拥塞控制输出的估计带宽、拥塞窗口大小控制，按照节奏（一般是5ms）保证报文匀速地发送到网络中，可以避免短时间大量报文造成网络情况恶化。</p>
+<p>本文将带着大家通过读代码方式深入pacing模块，了解pacing原理。</p>
+<h2>1. 为什么需要pacing</h2>
+<p>pacing和拥塞控制紧密相关，我们经常需要面对发送超过网络实际带宽出现拥塞的情况。</p>
+<ul>
+<li>避免突发流量对网络造成冲击</li>
+</ul>
+<p>我们知道视频编码经过压缩后，随着画面复杂性变化，帧大小差异较大从几十k到几M都有（4k桌面共享可能会到几M）。如果将2M的视频编码输出数据在1ms内全部发送到网络中，对于很多网络会造成较大冲击。首先是客户端的socket buffer的输入远远大于输出，socket buffer满了后就会出现丢包；网络中路由器可能无法处理超过的突发流量，会造成网络拥塞甚至是突发的百分之几十的大丢包。</p>
+<ul>
+<li>良好的拥塞控制机制依赖pacing</li>
+</ul>
+<p>突发流量对网络的冲击造成的拥塞会造成发送端的评估带宽降低，会压制编码码率造成视频质量下降。一般来说，gcc的带宽估计机制也需要依赖pacing，如probing，一些机制可能会将发送码率hold在目标探测带宽，这需要依赖pacing来做到。</p>
+<p>如果当前网络带宽存在瓶颈，我们必须要保证当前的发送码率不超过瓶颈，避免发送过多数据造成瞬间的拥塞。pacing可以将瞬间的码率（如1ms）平滑到长窗口中，牺牲发送时间换不拥塞。</p>
+<ul>
+<li>pacing控制发送优先级</li>
+</ul>
+<p>在带宽不够的时候，我们可以在pacing中对报文根据优先级排队，优先保证重要的媒体流。</p>
+<h2>2. 阅读代码前</h2>
+<p>pacing模块涉及到几个比较独立的类，控制发送码率的<code>IntervalBudget</code> 、一个优先队列<code>RoundRobinPacketQueue</code>，在深入pacing模块时，在了解pacing大致流程后可以深入了解下这两个类，可以了解更精细的算法：</p>
+<p><a href="https://zhuanlan.zhihu.com/p/184944074">言剑：WebRTC IntervalBudget</a></p>
+<p><a href="https://zhuanlan.zhihu.com/p/185032135">言剑：WebRTC RoundRobinPacketQueue</a></p>
+<p>新的代码里面， 有两种处理模式，周期调度方式（kPeriodic）、动态调度（kDynamic）。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// Periodic mode uses the IntervalBudget class for tracking bitrate</span>
+<span class="c1">// budgets, and expected ProcessPackets() to be called a fixed rate,</span>
+<span class="c1">// e.g. every 5ms as implemented by PacedSender.</span>
+<span class="c1">// Dynamic mode allows for arbitrary time delta between calls to</span>
+<span class="c1">// ProcessPackets.</span>
+<span class="k">enum</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">ProcessMode</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">kPeriodic</span><span class="p">,</span><span class="w"> </span><span class="n">kDynamic</span><span class="w"> </span><span class="p">};</span>
+</code></pre></div>
+<p>比较传统的是继承Module，周期调用方式来调度；新的代码支持动态调度。最新的的代码Pacer有两个实现：</p>
+<ul>
+<li><code>PacedSender</code>，支持Module方式的周期调度（如5ms）以及自定义<code>ProcessThread</code> 的调度方式（可以动态调度）；</li>
+<li><code>TaskQueuePacedSender</code>，只支持动态调度 。</li>
+</ul>
+<p>以下介绍先不介绍<code>TaskQueuePacedSender</code>这种新的Pacer，只关注传统的<code>PacedSender</code>周期调度方式。所以，后面涉及到<code>kDynamic</code>动态方式的代码都跳过了。</p>
+<h2>3. pacing模块对外接口</h2>
+<p>pacing模块接收输入的报文（继承<code>RtpPacketSender</code>）以及受目标码率控制（<code>RtpPacketPacer</code>），经过调度后输出要发送的报文（入参<code>PacketRouter</code>）。因此，<code>PacedSender</code>的实现如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">PacedSender</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">Module</span><span class="p">,</span>
+<span class="w">                    </span><span class="k">public</span><span class="w"> </span><span class="n">RtpPacketPacer</span><span class="p">,</span>
+<span class="w">                    </span><span class="k">public</span><span class="w"> </span><span class="n">RtpPacketSender</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">PacedSender</span><span class="p">(</span><span class="n">Clock</span><span class="o">*</span><span class="w"> </span><span class="n">clock</span><span class="p">,</span>
+<span class="w">        </span><span class="n">PacketRouter</span><span class="o">*</span><span class="w"> </span><span class="n">packet_router</span><span class="p">,</span>
+<span class="w">        </span><span class="n">RtcEventLog</span><span class="o">*</span><span class="w"> </span><span class="n">event_log</span><span class="p">,</span>
+<span class="w">        </span><span class="k">const</span><span class="w"> </span><span class="n">WebRtcKeyValueConfig</span><span class="o">*</span><span class="w"> </span><span class="n">field_trials</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">,</span>
+<span class="w">        </span><span class="n">ProcessThread</span><span class="o">*</span><span class="w"> </span><span class="n">process_thread</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">);</span>
+<span class="w">    </span><span class="p">...</span><span class="w"> </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>PacedSender实现了三个接口：</p>
+<ul>
+<li><code>Module</code>，表明<code>PacedSender</code>作为一个模块，实现Process等接口，按照周期处理，后续可能要去掉Module实现，用入参ProcessThread来代替Module的线程处理功能。</li>
+<li><code>RtpPacketPacer</code>，作为一个Pacer需要实现的接口，主要包括拥塞窗口、pacing rate设置等</li>
+<li><code>RTPPacketSender</code>，目前只有一个函数<code>EnqueuePackets</code>，输入rtp packet</li>
+</ul>
+<p><code>PacedSender</code>其参数<code>PacketRouter</code>，可以将pacing后的rtp报文路由到不同模块去做实际发送。<code>PacketRouter</code>实际上是继承了<code>PacingController::PacketSender</code>。</p>
+<h2>4. pacing工作流程</h2>
+<p>我们从一个包插入pacing后的处理看一下pacing的工作流程。该部分主要包含<code>PacedSender</code>、<code>PacingController</code>等类的处理，随着代码变迁，<code>PacedSender</code>基本包含什么逻辑，都直接通过<code>PacingController</code>中处理了， 因此一下重点关注这个类。</p>
+<h3>4.1 输入报文：PacedSender::EnqueuePackets</h3>
+<p><code>EnquuePackts</code>也是直接把报文交给<code>PacingController::EnqueuePacket</code>处理。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">PacedSender::EnqueuePackets</span><span class="p">(</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">RtpPacketToSend</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">packets</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">rtc</span><span class="o">::</span><span class="n">CritScope</span><span class="w"> </span><span class="n">cs</span><span class="p">(</span><span class="o">&amp;</span><span class="n">critsect_</span><span class="p">);</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">packet</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">packets</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">pacing_controller_</span><span class="p">.</span><span class="n">EnqueuePacket</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">packet</span><span class="p">));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">MaybeWakupProcessThread</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>4.2 决策优先级并插入queue：PacingController::EnqueuePacket</h3>
+<p><code>PacingController::EnqueuePacket</code>中会根据报文类型，给报文赋予发送优先级，并进行后续处理。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">PacingController::EnqueuePacket</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">RtpPacketToSend</span><span class="o">&gt;</span><span class="w"> </span><span class="n">packet</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Get priority first and store in temporary, to avoid chance of object being</span>
+<span class="w">  </span><span class="c1">// moved before GetPriorityForType() being called.</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">priority</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">GetPriorityForType</span><span class="p">(</span><span class="o">*</span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">packet_type</span><span class="p">());</span>
+<span class="w">  </span><span class="n">EnqueuePacketInternal</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">packet</span><span class="p">),</span><span class="w"> </span><span class="n">priority</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>优先级的处理也比较简单：</p>
+<ul>
+<li>音频总是第一优先级，通话中音频关注度更高，优先级很高这个很好理解；</li>
+<li>重传包优先级为2，因为如果重传耗时太长，重传就失去其效果，所以优先级比较高；</li>
+<li>视频包和FEC报文优先级为3；</li>
+<li>无关紧要的padding优先级最低。</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">GetPriorityForType</span><span class="p">(</span><span class="n">RtpPacketMediaType</span><span class="w"> </span><span class="n">type</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Lower number takes priority over higher.</span>
+<span class="w">  </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">type</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">RtpPacketMediaType</span><span class="o">::</span><span class="no">kAudio</span><span class="p">:</span>
+<span class="w">      </span><span class="c1">// Audio is always prioritized over other packet types.</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">kFirstPriority</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">RtpPacketMediaType</span><span class="o">::</span><span class="no">kRetransmission</span><span class="p">:</span>
+<span class="w">      </span><span class="c1">// Send retransmissions before new media.</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">kFirstPriority</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">RtpPacketMediaType</span><span class="o">::</span><span class="no">kVideo</span><span class="p">:</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">RtpPacketMediaType</span><span class="o">::</span><span class="no">kForwardErrorCorrection</span><span class="p">:</span>
+<span class="w">      </span><span class="c1">// Video has &quot;normal&quot; priority, in the old speak.</span>
+<span class="w">      </span><span class="c1">// Send redundancy concurrently to video. If it is delayed it might have a</span>
+<span class="w">      </span><span class="c1">// lower chance of being useful.</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">kFirstPriority</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">3</span><span class="p">;</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">RtpPacketMediaType</span><span class="o">::</span><span class="no">kPadding</span><span class="p">:</span>
+<span class="w">      </span><span class="c1">// Packets that are in themselves likely useless, only sent to keep the</span>
+<span class="w">      </span><span class="c1">// BWE high.</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">kFirstPriority</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>最终通过<code>PacingController::EnqueuePacketInternal</code>插入queue。在插入queue之前先需要做probing相关处理（probing、和padding功能暂且按下不表），以及会根据Pacing的处理模式（动态和周期两种模式）做budget的更新。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">PacingController::EnqueuePacketInternal</span><span class="p">(</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">RtpPacketToSend</span><span class="o">&gt;</span><span class="w"> </span><span class="n">packet</span><span class="p">,</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">priority</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">prober_</span><span class="p">.</span><span class="n">OnIncomingPacket</span><span class="p">(</span><span class="n">DataSize</span><span class="o">::</span><span class="n">Bytes</span><span class="p">(</span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">payload_size</span><span class="p">()));</span>
+<span class="w">  </span><span class="c1">// TODO(sprang): Make sure tests respect this, replace with DCHECK.</span>
+<span class="w">  </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">now</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">CurrentTime</span><span class="p">();</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">capture_time_ms</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">set_capture_time_ms</span><span class="p">(</span><span class="n">now</span><span class="p">.</span><span class="n">ms</span><span class="p">());</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="p">...</span>
+<span class="w">  </span><span class="c1">// 直接插入优先队列中</span>
+<span class="w">  </span><span class="n">packet_queue_</span><span class="p">.</span><span class="n">Push</span><span class="p">(</span><span class="n">priority</span><span class="p">,</span><span class="w"> </span><span class="n">now</span><span class="p">,</span><span class="w"> </span><span class="n">packet_counter_</span><span class="o">++</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">packet</span><span class="p">));</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>4.3 Pacing模式以及budget处理</h3>
+<p>插入到queue中，报文插入就告一段落，pacing是另外一个线程中处理。 周期处理方式中用到两个budget来分配media和padding的带宽：</p>
+<div class="highlight"><pre><code><span></span><span class="n">IntervalBudget</span><span class="w"> </span><span class="n">media_budget_</span><span class="p">;</span>
+<span class="n">IntervalBudget</span><span class="w"> </span><span class="n">padding_budget_</span><span class="p">;</span>
+</code></pre></div>
+<p>关于IntervalBudget可以参考另一篇：</p>
+<p><a href="https://zhuanlan.zhihu.com/p/184944074">言剑：WebRTC IntervalBudget</a></p>
+<p>从上面的IntervalBudget介绍可以知道，随着时间流逝，budget增加；报文发送后budget减少。pacing根据是否有budget剩余决定是否可以发送，如果有的话从<code>RoundRobinQueue</code>中取最高优先级的报文发送，通过这种方式可以控制发送码率为设置的码率。</p>
+<p>budget如何控制：</p>
+<ul>
+<li>设置目标码率：<code>IntervalBudget::set_target_rate_kbps</code></li>
+<li>获取需要发送的报文：<code>GetPendingPacket</code> ，先判断budget是否足够，足够则调用<code>RoundRobinPacketQueue::Pop</code>得到需要发送的报文</li>
+<li>随着时间流逝（如设置拥塞窗口、插入报文、发送报文时检测），增加窗口<code>UpdateBudgetWithElapsedTime</code>-&gt;<code>IntervalBudget::IncreaseBudget</code>。 </li>
+<li>报文发送完成后，需要减少budget：<code>UpdateBudgetWithSentData</code>-&gt;<code>IntervalBudget::UseBudget</code>。 </li>
+</ul>
+<h3>4.4 pacing核心逻辑：PacingController::ProcessPackets</h3>
+<p>报文插入到queue中，pacer需要周期调度，在budget足够的时候，从queue中取出报文发送，处理逻辑主要看<code>PacingController::ProcessPackets</code>，函数比较长，这里带着大家啃下来。至于怎么从queue取出报文，先发送哪个可以看<code>RoundRobinPacketQueue</code>介绍：</p>
+<p><a href="https://zhuanlan.zhihu.com/p/185032135">言剑：WebRTC RoundRobinPacketQueue</a></p>
+<p>删除了动态处理的代码后如下，主要逻辑可以总结为：根据拥塞状态以及budget是否足够，从queue中获取需要发送的报文，可以发送则发送媒体报文，否则判断是否发送padding；如果队列中数据过多，可能需要增大码率做排空处理；</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">PacingController::ProcessPackets</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">now</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">CurrentTime</span><span class="p">();</span>
+<span class="w">  </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">target_send_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">now</span><span class="p">;</span>
+<span class="w">  </span><span class="p">...</span>
+
+<span class="w">  </span><span class="n">Timestamp</span><span class="w"> </span><span class="n">previous_process_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">last_process_time_</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 距离上次处理的时间，限制不超过2s</span>
+<span class="w">  </span><span class="n">TimeDelta</span><span class="w"> </span><span class="n">elapsed_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">UpdateTimeAndGetElapsed</span><span class="p">(</span><span class="n">now</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 1） 保活，没啥好讲的</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">ShouldSendKeepalive</span><span class="p">(</span><span class="n">now</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// We can not send padding unless a normal packet has first been sent. If</span>
+<span class="w">    </span><span class="c1">// we do, timestamps get messed up.</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">packet_counter_</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">last_send_time_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">now</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">DataSize</span><span class="w"> </span><span class="n">keepalive_data_sent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">DataSize</span><span class="o">::</span><span class="n">Zero</span><span class="p">();</span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">RtpPacketToSend</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">keepalive_packets</span><span class="w"> </span><span class="o">=</span>
+<span class="w">          </span><span class="n">packet_sender_</span><span class="o">-&gt;</span><span class="n">GeneratePadding</span><span class="p">(</span><span class="n">DataSize</span><span class="o">::</span><span class="n">Bytes</span><span class="p">(</span><span class="mi">1</span><span class="p">));</span>
+<span class="w">      </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">packet</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">keepalive_packets</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">keepalive_data_sent</span><span class="w"> </span><span class="o">+=</span>
+<span class="w">            </span><span class="n">DataSize</span><span class="o">::</span><span class="n">Bytes</span><span class="p">(</span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">payload_size</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">padding_size</span><span class="p">());</span>
+<span class="w">        </span><span class="n">packet_sender_</span><span class="o">-&gt;</span><span class="n">SendPacket</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">packet</span><span class="p">),</span><span class="w"> </span><span class="n">PacedPacketInfo</span><span class="p">());</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="n">OnPaddingSent</span><span class="p">(</span><span class="n">keepalive_data_sent</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">paused_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 2） 如果开启了drain_large_queues_，queue中的数据难以以当前速率在剩余时间内发送出去</span>
+<span class="w">  </span><span class="c1">// 则适当提高当前发送码率（通过修改budget）</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">elapsed_time</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">TimeDelta</span><span class="o">::</span><span class="n">Zero</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">DataRate</span><span class="w"> </span><span class="n">target_rate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pacing_bitrate_</span><span class="p">;</span>
+<span class="w">    </span><span class="n">DataSize</span><span class="w"> </span><span class="n">queue_size_data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packet_queue_</span><span class="p">.</span><span class="n">Size</span><span class="p">();</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">queue_size_data</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">DataSize</span><span class="o">::</span><span class="n">Zero</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Assuming equal size packets and input/output rate, the average packet</span>
+<span class="w">      </span><span class="c1">// has avg_time_left_ms left to get queue_size_bytes out of the queue, if</span>
+<span class="w">      </span><span class="c1">// time constraint shall be met. Determine bitrate needed for that.</span>
+<span class="w">      </span><span class="n">packet_queue_</span><span class="p">.</span><span class="n">UpdateQueueTime</span><span class="p">(</span><span class="n">now</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">drain_large_queues_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">TimeDelta</span><span class="w"> </span><span class="n">avg_time_left</span><span class="w"> </span><span class="o">=</span>
+<span class="w">            </span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">(</span><span class="n">TimeDelta</span><span class="o">::</span><span class="n">Millis</span><span class="p">(</span><span class="mi">1</span><span class="p">),</span>
+<span class="w">                     </span><span class="n">queue_time_limit</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">packet_queue_</span><span class="p">.</span><span class="n">AverageQueueTime</span><span class="p">());</span>
+<span class="w">        </span><span class="n">DataRate</span><span class="w"> </span><span class="n">min_rate_needed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">queue_size_data</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">avg_time_left</span><span class="p">;</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">min_rate_needed</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">target_rate</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="n">target_rate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">min_rate_needed</span><span class="p">;</span>
+<span class="w">          </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_VERBOSE</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;bwe:large_pacing_queue pacing_rate_kbps=&quot;</span>
+<span class="w">                              </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">target_rate</span><span class="p">.</span><span class="n">kbps</span><span class="p">();</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 提高当前budget，用于尽快排空</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">mode_</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">ProcessMode</span><span class="o">::</span><span class="n">kPeriodic</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// In periodic processing mode, the IntevalBudget allows positive budget</span>
+<span class="w">      </span><span class="c1">// up to (process interval duration) * (target rate), so we only need to</span>
+<span class="w">      </span><span class="c1">// update it once before the packet sending loop.</span>
+<span class="w">      </span><span class="n">media_budget_</span><span class="p">.</span><span class="n">set_target_rate_kbps</span><span class="p">(</span><span class="n">target_rate</span><span class="p">.</span><span class="n">kbps</span><span class="p">());</span>
+<span class="w">      </span><span class="n">UpdateBudgetWithElapsedTime</span><span class="p">(</span><span class="n">elapsed_time</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">media_rate_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">target_rate</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 3） 获取probing大小</span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">first_packet_in_probe</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">is_probing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">prober_</span><span class="p">.</span><span class="n">is_probing</span><span class="p">();</span>
+<span class="w">  </span><span class="n">PacedPacketInfo</span><span class="w"> </span><span class="n">pacing_info</span><span class="p">;</span>
+<span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="n">DataSize</span><span class="o">&gt;</span><span class="w"> </span><span class="n">recommended_probe_size</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_probing</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">pacing_info</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">prober_</span><span class="p">.</span><span class="n">CurrentCluster</span><span class="p">();</span>
+<span class="w">    </span><span class="n">first_packet_in_probe</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pacing_info</span><span class="p">.</span><span class="n">probe_cluster_bytes_sent</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="n">recommended_probe_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">DataSize</span><span class="o">::</span><span class="n">Bytes</span><span class="p">(</span><span class="n">prober_</span><span class="p">.</span><span class="n">RecommendedMinProbeSize</span><span class="p">());</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">DataSize</span><span class="w"> </span><span class="n">data_sent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">DataSize</span><span class="o">::</span><span class="n">Zero</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// The paused state is checked in the loop since it leaves the critical</span>
+<span class="w">  </span><span class="c1">// section allowing the paused state to be changed from other code.</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">paused_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+
+<span class="w">    </span><span class="c1">// 4） 第一次probing，padding包比较小，更可靠的探测</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">small_first_probe_packet_</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">first_packet_in_probe</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// If first packet in probe, insert a small padding packet so we have a</span>
+<span class="w">      </span><span class="c1">// more reliable start window for the rate estimation.</span>
+<span class="w">      </span><span class="k">auto</span><span class="w"> </span><span class="n">padding</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packet_sender_</span><span class="o">-&gt;</span><span class="n">GeneratePadding</span><span class="p">(</span><span class="n">DataSize</span><span class="o">::</span><span class="n">Bytes</span><span class="p">(</span><span class="mi">1</span><span class="p">));</span>
+<span class="w">      </span><span class="c1">// If no RTP modules sending media are registered, we may not get a</span>
+<span class="w">      </span><span class="c1">// padding packet back.</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">padding</span><span class="p">.</span><span class="n">empty</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Insert with high priority so larger media packets don&#39;t preempt it.</span>
+<span class="w">        </span><span class="n">EnqueuePacketInternal</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">padding</span><span class="p">[</span><span class="mi">0</span><span class="p">]),</span><span class="w"> </span><span class="n">kFirstPriority</span><span class="p">);</span>
+<span class="w">        </span><span class="c1">// We should never get more than one padding packets with a requested</span>
+<span class="w">        </span><span class="c1">// size of 1 byte.</span>
+<span class="w">        </span><span class="n">RTC_DCHECK_EQ</span><span class="p">(</span><span class="n">padding</span><span class="p">.</span><span class="n">size</span><span class="p">(),</span><span class="w"> </span><span class="mi">1u</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="n">first_packet_in_probe</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="p">...</span>
+
+<span class="w">    </span><span class="c1">// 5） 获取需要发送的报文，需要检查是否拥塞、budget是否足够</span>
+<span class="w">    </span><span class="c1">// Fetch the next packet, so long as queue is not empty or budget is not</span>
+<span class="w">    </span><span class="c1">// exhausted.</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">RtpPacketToSend</span><span class="o">&gt;</span><span class="w"> </span><span class="n">rtp_packet</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">GetPendingPacket</span><span class="p">(</span><span class="n">pacing_info</span><span class="p">,</span><span class="w"> </span><span class="n">target_send_time</span><span class="p">,</span><span class="w"> </span><span class="n">now</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// 6） 当前无法发送媒体包，检查是否发送padding</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">rtp_packet</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="k">nullptr</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// No packet available to send, check if we should send padding.</span>
+<span class="w">      </span><span class="n">DataSize</span><span class="w"> </span><span class="n">padding_to_add</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">PaddingToAdd</span><span class="p">(</span><span class="n">recommended_probe_size</span><span class="p">,</span><span class="w"> </span><span class="n">data_sent</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">padding_to_add</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">DataSize</span><span class="o">::</span><span class="n">Zero</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">RtpPacketToSend</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">padding_packets</span><span class="w"> </span><span class="o">=</span>
+<span class="w">            </span><span class="n">packet_sender_</span><span class="o">-&gt;</span><span class="n">GeneratePadding</span><span class="p">(</span><span class="n">padding_to_add</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">padding_packets</span><span class="p">.</span><span class="n">empty</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="c1">// No padding packets were generated, quite send loop.</span>
+<span class="w">          </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">packet</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">padding_packets</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="n">EnqueuePacket</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">packet</span><span class="p">));</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="c1">// Continue loop to send the padding that was just added.</span>
+<span class="w">        </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+
+<span class="w">      </span><span class="c1">// Can&#39;t fetch new packet and no padding to send, exit send loop.</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 7） 封装发送报文，通过回调发送报文</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">RtpPacketMediaType</span><span class="w"> </span><span class="n">packet_type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">rtp_packet</span><span class="o">-&gt;</span><span class="n">packet_type</span><span class="p">();</span>
+<span class="w">    </span><span class="n">DataSize</span><span class="w"> </span><span class="n">packet_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">DataSize</span><span class="o">::</span><span class="n">Bytes</span><span class="p">(</span><span class="n">rtp_packet</span><span class="o">-&gt;</span><span class="n">payload_size</span><span class="p">()</span><span class="w"> </span><span class="o">+</span>
+<span class="w">                                           </span><span class="n">rtp_packet</span><span class="o">-&gt;</span><span class="n">padding_size</span><span class="p">());</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">include_overhead_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">packet_size</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">DataSize</span><span class="o">::</span><span class="n">Bytes</span><span class="p">(</span><span class="n">rtp_packet</span><span class="o">-&gt;</span><span class="n">headers_size</span><span class="p">())</span><span class="w"> </span><span class="o">+</span>
+<span class="w">                     </span><span class="n">transport_overhead_per_packet_</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">packet_sender_</span><span class="o">-&gt;</span><span class="n">SendPacket</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">rtp_packet</span><span class="p">),</span><span class="w"> </span><span class="n">pacing_info</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">data_sent</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">packet_size</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">//  8） 发送完成后，更新一些统计以及budget</span>
+<span class="w">    </span><span class="c1">// Send done, update send/process time to the target send time.</span>
+<span class="w">    </span><span class="n">OnPacketSent</span><span class="p">(</span><span class="n">packet_type</span><span class="p">,</span><span class="w"> </span><span class="n">packet_size</span><span class="p">,</span><span class="w"> </span><span class="n">target_send_time</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">recommended_probe_size</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">data_sent</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">recommended_probe_size</span><span class="p">)</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">last_process_time_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">(</span><span class="n">last_process_time_</span><span class="p">,</span><span class="w"> </span><span class="n">previous_process_time</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 9） 更新probing状态</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_probing</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">probing_send_failure_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">data_sent</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">DataSize</span><span class="o">::</span><span class="n">Zero</span><span class="p">();</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">probing_send_failure_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">prober_</span><span class="p">.</span><span class="n">ProbeSent</span><span class="p">(</span><span class="n">CurrentTime</span><span class="p">(),</span><span class="w"> </span><span class="n">data_sent</span><span class="p">.</span><span class="n">bytes</span><span class="p">());</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>细细啃下来，其实逻辑并不复杂。后面关注一下其他细节，比如拥塞窗口、probing等。</p>
+<h2>5. 拥塞窗口</h2>
+<p>在决定是否发送报文的时候（<code>GetPendingPacket</code>），我们发现有判断是否拥塞，因此有必要讲解下拥塞窗口：</p>
+<p><strong>发送报文过多会导致拥塞</strong>，这句话其实已经给了我们答案。一下代码里面的<code>outstanding_data_</code>就是正在网络中正在发送的报文， <code>congestion_window_size_</code>是一个阈值，如果正在网络中发送的报文超过这个阈值就认为是会导致拥塞：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">bool</span><span class="w"> </span><span class="nf">PacingController::Congested</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">congestion_window_size_</span><span class="p">.</span><span class="n">IsFinite</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">outstanding_data_</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">congestion_window_size_</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>outstanding_data_</code>在发送报文的时候增加，当对端收到通过FeedBack Ack后， <code>outstanding_data_</code>减小。而 <code>congestion_window_size_</code>是拥塞控制模块决策出来的一个阈值，此处先不深入挖掘。</p>
+<h2>6. Probing</h2>
+<p>Pacing模块里面有一个绕不开的功能是probing，对应bitrate_prober.h文件里面定义的<code>BitrateProber</code>。probing和带宽探测部分是紧密相关的，用于在发送带宽比较低的时候，可以探测到一个比较高的带宽。probing功能通过<code>PacedSender::CreateProbeCluster</code>暴露出去， pacing模块会根据当前probing状态，发送合适的padding包，达到目标探测码率。</p>
+<p>关于probing的功能，后续会有一个专题专门介绍，此处不多介绍。</p>
+<h2>7. Packet发送</h2>
+<p>最后就剩下报文发送，我们知道pacing模块只保存了报文信息，真正的报文发送还需要通过上层模块完成。曾几何时，引入了<code>PacketRouter</code>这个，pacing模块调用<code>PacketRouter::SendPacket</code>完成报文发送。</p>
+<p>大致看下这个函数，主要完成TransportSequenceNumber自增，通过报文ssrc找到合适的RtpRtcp模块去做进一步发送处理。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">PacketRouter::SendPacket</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">RtpPacketToSend</span><span class="o">&gt;</span><span class="w"> </span><span class="n">packet</span><span class="p">,</span>
+<span class="w">                              </span><span class="k">const</span><span class="w"> </span><span class="n">PacedPacketInfo</span><span class="o">&amp;</span><span class="w"> </span><span class="n">cluster_info</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">MutexLock</span><span class="w"> </span><span class="n">lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">modules_mutex_</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// Transport Sequence Number是在这个地方赋值的！！</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">HasExtension</span><span class="o">&lt;</span><span class="n">TransportSequenceNumber</span><span class="o">&gt;</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">SetExtension</span><span class="o">&lt;</span><span class="n">TransportSequenceNumber</span><span class="o">&gt;</span><span class="p">((</span><span class="o">++</span><span class="n">transport_seq_</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mh">0xFFFF</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 找到对应的模块去发送</span>
+<span class="w">  </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">ssrc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">Ssrc</span><span class="p">();</span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">kv</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">send_modules_map_</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">ssrc</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">kv</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">send_modules_map_</span><span class="p">.</span><span class="n">end</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_WARNING</span><span class="p">)</span>
+<span class="w">        </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Failed to send packet, matching RTP module not found &quot;</span>
+<span class="w">           </span><span class="s">&quot;or transport error. SSRC = &quot;</span>
+<span class="w">        </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">Ssrc</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;, sequence number &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">packet</span><span class="o">-&gt;</span><span class="n">SequenceNumber</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">RtpRtcpInterface</span><span class="o">*</span><span class="w"> </span><span class="n">rtp_module</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kv</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">rtp_module</span><span class="o">-&gt;</span><span class="n">TrySendPacket</span><span class="p">(</span><span class="n">packet</span><span class="p">.</span><span class="n">get</span><span class="p">(),</span><span class="w"> </span><span class="n">cluster_info</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_WARNING</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Failed to send packet, rejected by RTP module.&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">rtp_module</span><span class="o">-&gt;</span><span class="n">SupportsRtxPayloadPadding</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// This is now the last module to send media, and has the desired</span>
+<span class="w">    </span><span class="c1">// properties needed for payload based padding. Cache it for later use.</span>
+<span class="w">    </span><span class="n">last_send_module_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rtp_module</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>PacketRouter</code>提供了RtpRtcp模块的注册：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">AddSendRtpModule</span><span class="p">(</span><span class="n">RtpRtcpInterface</span><span class="o">*</span><span class="w"> </span><span class="n">rtp_module</span><span class="p">,</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">remb_candidate</span><span class="p">);</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">RemoveSendRtpModule</span><span class="p">(</span><span class="n">RtpRtcpInterface</span><span class="o">*</span><span class="w"> </span><span class="n">rtp_module</span><span class="p">);</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">AddReceiveRtpModule</span><span class="p">(</span><span class="n">RtcpFeedbackSenderInterface</span><span class="o">*</span><span class="w"> </span><span class="n">rtcp_sender</span><span class="p">,</span>
+<span class="w">                         </span><span class="kt">bool</span><span class="w"> </span><span class="n">remb_candidate</span><span class="p">);</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">RemoveReceiveRtpModule</span><span class="p">(</span><span class="n">RtcpFeedbackSenderInterface</span><span class="o">*</span><span class="w"> </span><span class="n">rtcp_sender</span><span class="p">);</span>
+</code></pre></div>
+<p><code>PacketRouter</code>是<code>RtpTransportControllerSend</code>的一个成员，通过参数方式传入<code>PacedSender</code>。这个类也比较简单，想深入了解报文发送，可以结合文件分析下。</p>
+<h2>8. 写在最后</h2>
+<p>pacing模块算是啃完了，内容比较多，因此最后总结下，pacing模块的重点。</p>
+<ul>
+<li>报文插入队列、弹出队列的线程；</li>
+<li>报文队列的实现，<code>RoundRobinPacketQueue</code>，不同stream报文有不同优先级，重传包和普通包有不同优先级，它的实现决定了哪个报文先发送；</li>
+<li>发送budget是外部设置，发送需要判断budget是否足够、是否出现拥塞；</li>
+<li>pacing模块需要收到外部控制probing，需要probing的时候可以发送padding数据；</li>
+<li>pacing之后的报文发送通过<code>PacketRouter</code>，它通过参数传入pacing模块，需要了解报文后续处理可以通过这个类跟踪。 </li>
+</ul>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "WebRTC Pacing.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

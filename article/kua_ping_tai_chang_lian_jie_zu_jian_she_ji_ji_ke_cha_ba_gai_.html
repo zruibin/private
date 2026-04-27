@@ -1,0 +1,598 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>跨平台长连接组件设计及可插拔改造 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="跨平台长连接组件设计及可插拔改造,架构,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="跨平台长连接组件设计及可插拔改造" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>跨平台长连接组件设计及可插拔改造</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2018-05-02 09:19
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_jia_gou.html' class='article_tag'>架构</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='http://zeeyang.com/2018/04/03/cross-platform-architecture%20design-and-pluggable/' target='blank'>跨平台长连接组件设计及可插拔改造.</a></p></h4>
+<p>我们在提出开发跨平台组件之前， iOS 和 Android客户端分别使用一套长连接组件，需要双倍的人力开发和维护；在产品需求调整上，为了在实现细节上保持一致性也具有一定的难度；Web端与客户端长连接的形式不同，前者使用 WebSocket，后者使用 Socket ，无形中也增加了后端的维护成本。为了解决这些问题，我们基于WebSocket 协议开发了一套跨平台的长连接组件。</p>
+<h3>架构介绍</h3>
+<p>组件自上而下分为五层：</p>
+<ul>
+<li><strong>Native层</strong>：负责业务请求封装和数据解析，与原生进行交互</li>
+<li><strong>Chat层</strong>：负责提供底层通信使用的 c 接口，包含连接、读写和关闭</li>
+<li><strong>WebSocket层</strong>：实现 WebSocket 协议及维护心跳</li>
+<li><strong>TLS层</strong>：基于 mbedTLS 实现 TLS 协议及数据加解密</li>
+<li><strong>TCP层</strong>：基于 libuv 实现 TCP 连接和数据的读写</li>
+</ul>
+<p>整体架构如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/201805020919-01.jpg" alt=""></p>
+<h4>TCP层</h4>
+<p>TCP 层我们是基于libuv进行开发， libuv 是一个异步 I/O 库，并且支持了多个平台（ Linux ，Windows 和 Darwin ），一开始主要应用于开发 Node.js ，后来逐渐在其他项目也开始使用。文件、 网络和管道 等操作是 I/O 操作 ，libuv 为此抽象出了相关的接口，底层使用各平台上最优的 I/O 模型实现。</p>
+<p>它的核心是提供了一个 event loop ，每个 event loop 包含了六个阶段：</p>
+<ul>
+<li>timers 阶段：这个阶段执行 timer（ setTimeout 、 setInterval ）的回调</li>
+<li>I/O callbacks 阶段：执行一些系统调用错误，比如网络通信的错误回调
+idle , prepare 阶段：仅 node 内部使用 </li>
+<li>poll 阶段：获取新的 I/O 事件, 适当的条件下 node 将阻塞在这里</li>
+<li>check 阶段：执行 setImmediate() 的回调</li>
+<li>close callbacks 阶段：执行 socket 的 close 事件回调</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/201805020919-02.png" alt=""></p>
+<h4>TLS层</h4>
+<p>mbedTLS（前身PolarSSL）是实现了一套易用的加解密算法和 SSL / TLS 库。TLS 以及前身 SSL 是传输层安全协议，给网络通信提供安全和数据完整性的保障，所以它能很好的解决数据明文和劫持篡改的问题。并且其分为记录层和传输层，记录层用来确定传输层数据的封装格式，传输层则用于数据传输，而在传输之前，通信双方需要经过握手，其包含了双方身份验证，协商加密算法，交换加密密钥。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/201805020919-03.png" alt=""></p>
+<h4>WebSocket 层</h4>
+<p>WebSocket 层包含了对协议的实现和心跳的维护。</p>
+<p>其最新的协议是 13 RFC 6455。协议的实现分为握手，数据发送/读取，关闭连接。</p>
+<h5>握手</h5>
+<p>握手要从请求头去理解。</p>
+<p>WebSocket 首先发起一个 HTTP 请求，在请求头加上 Upgrade 字段，该字段用于改变 HTTP 协议版本或者是换用其他协议，这里我们把 Upgrade 的值设为 websocket ，将它升级为 WebSocket 协议。</p>
+<p>同时要注意 Sec-WebSocket-Key 字段，它由客户端生成并发给服务端，用于证明服务端接收到的是一个可受信的连接握手，可以帮助服务端排除自身接收到的由非 WebSocket 客户端发起的连接，该值是一串随机经过 base64 编码的字符串。</p>
+<div class="highlight"><pre><code><span></span><span class="n">GET</span><span class="w"> </span><span class="o">/</span><span class="n">chat</span><span class="w"> </span><span class="n">HTTP</span><span class="o">/</span><span class="mf">1.1</span>
+<span class="nl">Host</span><span class="p">:</span><span class="w"> </span><span class="n">server</span><span class="p">.</span><span class="n">example</span><span class="p">.</span><span class="n">com</span>
+<span class="nl">Upgrade</span><span class="p">:</span><span class="w"> </span><span class="n">websocket</span>
+<span class="nl">Connection</span><span class="p">:</span><span class="w"> </span><span class="n">Upgrade</span>
+<span class="n">Sec</span><span class="o">-</span><span class="n">WebSocket</span><span class="o">-</span><span class="n">Key</span><span class="o">:</span><span class="w"> </span><span class="n">dGhlIHNhbXBsZSBub25jZQ</span><span class="o">==</span>
+<span class="nl">Origin</span><span class="p">:</span><span class="w"> </span><span class="n">http</span><span class="o">:</span><span class="c1">//example.com</span>
+<span class="n">Sec</span><span class="o">-</span><span class="n">WebSocket</span><span class="o">-</span><span class="n">Protocol</span><span class="o">:</span><span class="w"> </span><span class="n">chat</span><span class="p">,</span><span class="w"> </span><span class="n">superchat</span>
+<span class="n">Sec</span><span class="o">-</span><span class="n">WebSocket</span><span class="o">-</span><span class="n">Version</span><span class="o">:</span><span class="w"> </span><span class="mi">13</span>
+</code></pre></div>
+<p>收到请求后，服务端也会做一次响应：</p>
+<div class="highlight"><pre><code><span></span><span class="n">HTTP</span><span class="o">/</span><span class="mf">1.1</span><span class="w"> </span><span class="mi">101</span><span class="w"> </span><span class="n">Switching</span><span class="w"> </span><span class="n">Protocols</span>
+<span class="nl">Upgrade</span><span class="p">:</span><span class="w"> </span><span class="n">websocket</span>
+<span class="nl">Connection</span><span class="p">:</span><span class="w"> </span><span class="n">Upgrade</span>
+<span class="n">Sec</span><span class="o">-</span><span class="n">WebSocket</span><span class="o">-</span><span class="n">Accept</span><span class="o">:</span><span class="w"> </span><span class="n">s3pPLMBiTxaQ9kYGzzhZRbK</span><span class="o">+</span><span class="n">xOo</span><span class="o">=</span>
+</code></pre></div>
+<p>里面重要的是 Sec-WebSocket-Accept ，服务端通过从客户端请求头中读取 Sec-WebSocket-Key 与一串全局唯一的标识字符串（俗称魔串）“258EAFA5-E914-47DA- 95CA-C5AB0DC85B11”做拼接，生成长度为160位的 SHA-1 字符串，然后进行 base64 编码，作为 Sec-WebSocket-Accept 的值回传给客户端，客户端再去解析这个值，与自己加密编码后的字符串进行比较。</p>
+<p>处理握手 HTTP 响应解析的时候，可以用 http-paser ，解析方式也比较简单，就是对头信息的逐字读取再处理，具体处理你可以看一下它的状态机实现。解析完成后你需要对其内容进行解析，看返回是否正确，同时去管理你的握手状态。</p>
+<h4>数据发送/读取</h4>
+<p>数据的处理需要用帧协议图来说明：</p>
+<div class="highlight"><pre><code><span></span><span class="mi">0</span><span class="w">                   </span><span class="mi">1</span><span class="w">                   </span><span class="mi">2</span><span class="w">                   </span><span class="mi">3</span>
+<span class="mi">0</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="mi">6</span><span class="w"> </span><span class="mi">7</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="mi">6</span><span class="w"> </span><span class="mi">7</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="mi">6</span><span class="w"> </span><span class="mi">7</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">1</span>
+<span class="o">+-+-+-+-+-------+-+-------------+-------------------------------+</span>
+<span class="o">|</span><span class="n">F</span><span class="o">|</span><span class="n">R</span><span class="o">|</span><span class="n">R</span><span class="o">|</span><span class="n">R</span><span class="o">|</span><span class="w"> </span><span class="n">opcode</span><span class="o">|</span><span class="n">M</span><span class="o">|</span><span class="w"> </span><span class="n">Payload</span><span class="w"> </span><span class="n">len</span><span class="w"> </span><span class="o">|</span><span class="w">    </span><span class="n">Extended</span><span class="w"> </span><span class="n">payload</span><span class="w"> </span><span class="n">length</span><span class="w">    </span><span class="o">|</span>
+<span class="o">|</span><span class="n">I</span><span class="o">|</span><span class="n">S</span><span class="o">|</span><span class="n">S</span><span class="o">|</span><span class="n">S</span><span class="o">|</span><span class="w">  </span><span class="p">(</span><span class="mi">4</span><span class="p">)</span><span class="w">  </span><span class="o">|</span><span class="n">A</span><span class="o">|</span><span class="w">     </span><span class="p">(</span><span class="mi">7</span><span class="p">)</span><span class="w">     </span><span class="o">|</span><span class="w">             </span><span class="p">(</span><span class="mi">16</span><span class="o">/</span><span class="mi">64</span><span class="p">)</span><span class="w">           </span><span class="o">|</span>
+<span class="o">|</span><span class="n">N</span><span class="o">|</span><span class="n">V</span><span class="o">|</span><span class="n">V</span><span class="o">|</span><span class="n">V</span><span class="o">|</span><span class="w">       </span><span class="o">|</span><span class="n">S</span><span class="o">|</span><span class="w">             </span><span class="o">|</span><span class="w">   </span><span class="p">(</span><span class="k">if</span><span class="w"> </span><span class="n">payload</span><span class="w"> </span><span class="n">len</span><span class="o">==</span><span class="mi">126</span><span class="o">/</span><span class="mi">127</span><span class="p">)</span><span class="w">   </span><span class="o">|</span>
+<span class="o">|</span><span class="w"> </span><span class="o">|</span><span class="mi">1</span><span class="o">|</span><span class="mi">2</span><span class="o">|</span><span class="mi">3</span><span class="o">|</span><span class="w">       </span><span class="o">|</span><span class="n">K</span><span class="o">|</span><span class="w">             </span><span class="o">|</span><span class="w">                               </span><span class="o">|</span>
+<span class="o">+-+-+-+-+-------+-+-------------+</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">+</span>
+<span class="o">|</span><span class="w">     </span><span class="n">Extended</span><span class="w"> </span><span class="n">payload</span><span class="w"> </span><span class="n">length</span><span class="w"> </span><span class="n">continued</span><span class="p">,</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">payload</span><span class="w"> </span><span class="n">len</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">127</span><span class="w">  </span><span class="o">|</span>
+<span class="o">+</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">+-------------------------------+</span>
+<span class="o">|</span><span class="w">                               </span><span class="o">|</span><span class="n">Masking</span><span class="o">-</span><span class="n">key</span><span class="p">,</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">MASK</span><span class="w"> </span><span class="n">set</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="mi">1</span><span class="w">  </span><span class="o">|</span>
+<span class="o">+-------------------------------+-------------------------------+</span>
+<span class="o">|</span><span class="w"> </span><span class="n">Masking</span><span class="o">-</span><span class="n">key</span><span class="w"> </span><span class="p">(</span><span class="n">continued</span><span class="p">)</span><span class="w">       </span><span class="o">|</span><span class="w">          </span><span class="n">Payload</span><span class="w"> </span><span class="n">Data</span><span class="w">         </span><span class="o">|</span>
+<span class="o">+--------------------------------</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">+</span>
+<span class="o">:</span><span class="w">                     </span><span class="n">Payload</span><span class="w"> </span><span class="n">Data</span><span class="w"> </span><span class="n">continued</span><span class="w"> </span><span class="p">...</span><span class="w">                </span><span class="o">:</span>
+<span class="o">+</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">+</span>
+<span class="o">|</span><span class="w">                     </span><span class="n">Payload</span><span class="w"> </span><span class="n">Data</span><span class="w"> </span><span class="n">continued</span><span class="w"> </span><span class="p">...</span><span class="w">                </span><span class="o">|</span>
+<span class="o">+---------------------------------------------------------------+</span>
+</code></pre></div>
+<p>首先我们来看看数字的含义，数字表示位，0-7表示有8位，等于1个字节。</p>
+<div class="highlight"><pre><code><span></span><span class="mi">0</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="mi">6</span><span class="w"> </span><span class="mi">7</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="mi">6</span><span class="w"> </span><span class="mi">7</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="mi">6</span><span class="w"> </span><span class="mi">7</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">1</span>
+</code></pre></div>
+<p>所以如果要组装一个帧数据可以这样子：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">rev</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">rev</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">malloc</span><span class="p">(</span><span class="mi">4</span><span class="p">);</span>
+<span class="n">rev</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">char</span><span class="p">)(</span><span class="mh">0x81</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mh">0xff</span><span class="p">);</span>
+<span class="n">rev</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">126</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mh">0x7f</span><span class="p">;</span>
+<span class="n">rev</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="n">rev</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+</code></pre></div>
+<p>ok，了解了帧数据的样子，我们反过来去理解值对应的帧字段。</p>
+<p>首先0x81是什么，这个是十六进制数据，转换成二进制就是1000 0001， 是一个字节的长度，也就是这一段里面每一位的值：</p>
+<div class="highlight"><pre><code><span></span><span class="mi">0</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="mi">6</span><span class="w"> </span><span class="mi">7</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span>
+<span class="o">+-+-+-+-+-------+</span>
+<span class="o">|</span><span class="n">F</span><span class="o">|</span><span class="n">R</span><span class="o">|</span><span class="n">R</span><span class="o">|</span><span class="n">R</span><span class="o">|</span><span class="w"> </span><span class="n">opcode</span><span class="o">|</span>
+<span class="o">|</span><span class="n">I</span><span class="o">|</span><span class="n">S</span><span class="o">|</span><span class="n">S</span><span class="o">|</span><span class="n">S</span><span class="o">|</span><span class="w">  </span><span class="p">(</span><span class="mi">4</span><span class="p">)</span><span class="w">  </span><span class="o">|</span>
+<span class="o">|</span><span class="n">N</span><span class="o">|</span><span class="n">V</span><span class="o">|</span><span class="n">V</span><span class="o">|</span><span class="n">V</span><span class="o">|</span><span class="w">       </span><span class="o">|</span>
+<span class="o">|</span><span class="w"> </span><span class="o">|</span><span class="mi">1</span><span class="o">|</span><span class="mi">2</span><span class="o">|</span><span class="mi">3</span><span class="o">|</span><span class="w">       </span><span class="o">|</span>
+<span class="o">+-+-+-+-+-------+</span>
+</code></pre></div>
+<ul>
+<li><p>FIN 表示该帧是不是消息的最后一帧，1表示结束，0表示还有下一帧。</p>
+</li>
+<li><p>RSV1, RSV2, RSV3 必须为0，除非扩展协商定义了一个非0的值，如果没有定义非0值，且收到了非0的 RSV ，那么 WebSocket 的连接会失效，建议是断开连接。</p>
+</li>
+<li><p>opcode 用来描述 Payload data 的定义，如果收到了一个未知的 opcode ，同样会使 WebSocket 连接失效，协议定义了以下值：</p>
+<ul>
+<li>%x0 表示连续的帧</li>
+<li>%x1 表示 text 帧</li>
+<li>%x2 表示二进制帧</li>
+<li>%x3-7 预留给非控制帧</li>
+<li>%x8 表示关闭连接帧</li>
+<li>%x9 表示 ping</li>
+<li>%xA 表示 pong</li>
+<li>%xB-F 预留给控制帧</li>
+</ul>
+</li>
+</ul>
+<p>连续帧是和 FIN 值相关联的，它表明可能由于消息分片的原因，将原本一个帧的数据分为多个帧，这时候前一帧的 opcode 就是0，FIN 也是0，最后一帧的 opcode 就不再是0，FIN 就是1了。</p>
+<p>再可以看到 opcode 预留了非控制帧和控制帧，这两个又是什么？</p>
+<p>控制帧表示 WebSocket 的状态信息，像是定义的分片，关闭连接，ping和pong。</p>
+<p>非控制帧就是数据帧，像是 text 帧，二进制帧。</p>
+<p>0xff 作用就是取出需要的二进制值。</p>
+<p>下面再来看126，126则表示的是 Payload len ，也就是 Payload 的长度：</p>
+<div class="highlight"><pre><code><span></span><span class="mi">8</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="mi">6</span><span class="w"> </span><span class="mi">7</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="mi">6</span><span class="w"> </span><span class="mi">7</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">1</span>
+<span class="w">                </span><span class="o">+-+-------------+-------------------------------+</span>
+<span class="w">                </span><span class="o">|</span><span class="n">M</span><span class="o">|</span><span class="w"> </span><span class="n">Payload</span><span class="w"> </span><span class="n">len</span><span class="w"> </span><span class="o">|</span><span class="w">    </span><span class="n">Extended</span><span class="w"> </span><span class="n">payload</span><span class="w"> </span><span class="n">length</span><span class="w">    </span><span class="o">|</span>
+<span class="w">                </span><span class="o">|</span><span class="n">A</span><span class="o">|</span><span class="w">     </span><span class="p">(</span><span class="mi">7</span><span class="p">)</span><span class="w">     </span><span class="o">|</span><span class="w">             </span><span class="p">(</span><span class="mi">16</span><span class="o">/</span><span class="mi">64</span><span class="p">)</span><span class="w">           </span><span class="o">|</span>
+<span class="w">                </span><span class="o">|</span><span class="n">S</span><span class="o">|</span><span class="w">             </span><span class="o">|</span><span class="w">   </span><span class="p">(</span><span class="k">if</span><span class="w"> </span><span class="n">payload</span><span class="w"> </span><span class="n">len</span><span class="o">==</span><span class="mi">126</span><span class="o">/</span><span class="mi">127</span><span class="p">)</span><span class="w">   </span><span class="o">|</span>
+<span class="w">                </span><span class="o">|</span><span class="n">K</span><span class="o">|</span><span class="w">             </span><span class="o">|</span><span class="w">                               </span><span class="o">|</span>
+<span class="o">+-+-+-+-+-------+-+-------------+</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">+</span>
+<span class="o">|</span><span class="w">     </span><span class="n">Extended</span><span class="w"> </span><span class="n">payload</span><span class="w"> </span><span class="n">length</span><span class="w"> </span><span class="n">continued</span><span class="p">,</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">payload</span><span class="w"> </span><span class="n">len</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">127</span><span class="w">  </span><span class="o">|</span>
+<span class="o">+</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">+-------------------------------+</span>
+<span class="o">|</span><span class="w">                               </span><span class="o">|</span><span class="n">Masking</span><span class="o">-</span><span class="n">key</span><span class="p">,</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">MASK</span><span class="w"> </span><span class="n">set</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="mi">1</span><span class="w">  </span><span class="o">|</span>
+<span class="o">+-------------------------------+-------------------------------+</span>
+<span class="o">|</span><span class="w"> </span><span class="n">Masking</span><span class="o">-</span><span class="n">key</span><span class="w"> </span><span class="p">(</span><span class="n">continued</span><span class="p">)</span><span class="w">       </span><span class="o">|</span><span class="w">           </span><span class="n">Payload</span><span class="w"> </span><span class="n">Data</span><span class="w">        </span><span class="o">|</span>
+<span class="o">+--------------------------------</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">+</span>
+<span class="o">:</span><span class="w">                     </span><span class="n">Payload</span><span class="w"> </span><span class="n">Data</span><span class="w"> </span><span class="n">continued</span><span class="w"> </span><span class="p">...</span><span class="w">                </span><span class="o">:</span>
+<span class="o">+</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">+</span>
+<span class="o">|</span><span class="w">                     </span><span class="n">Payload</span><span class="w"> </span><span class="n">Data</span><span class="w"> </span><span class="n">continued</span><span class="w"> </span><span class="p">...</span><span class="w">                </span><span class="o">|</span>
+<span class="o">+---------------------------------------------------------------+</span>
+</code></pre></div>
+<ul>
+<li><p>MASK 表示Playload data 是否要加掩码，如果设成1，则需要赋值 Masking-key 。所有从客户端发到服务端的帧都要加掩码</p>
+</li>
+<li><p>Playload le 表示 Payload 的长度，这里分为三种情况</p>
+<ul>
+<li>长度小于126，则只需要7位</li>
+<li>长度是126，则需要额外2个字节的大小，也就是 Extended payload length</li>
+<li>长度是127，则需要额外8个字节的大小，也就是 Extended payload 
+length + Extended payload length continued ，Extended payload length 是2个字节，Extended payload length continued 是6个字节</li>
+</ul>
+</li>
+<li><p>Extended Playload len 则表示 Extension data 与 Application data 的和</p>
+</li>
+<li><p>Masking-key 是在 MASK 设置成1之后，随机生成的4字节长度的数据，然后和 Payload Data做异或运算</p>
+</li>
+<li><p>Payload Data 就是我们发送的数据</p>
+</li>
+</ul>
+<p>而数据的发送和读取就是对帧的封装和解析。</p>
+<h4>关闭连接</h4>
+<p>关闭连接分为两种：服务端发起关闭和客户端主动关闭。</p>
+<p>服务端跟客户端的处理基本一致，以服务端为例：</p>
+<p>服务端发起关闭的时候，会客户端发送一个关闭帧，客户端在接收到帧的时候通过解析出帧的opcode来判断是否是关闭帧，然后同样向服务端再发送一个关闭帧作为回应。</p>
+<h3>Chat 层</h3>
+<p>Chat 层比较简单，只是提供一些通用的连接、读写数据和断开接口和回调，同时维护一个 loop 用于重连。</p>
+<h3>Native 层</h3>
+<p>这一层负责和原生进行交互，由于组件是用 c 代码编写的，所以为了调用原生方法，Android 采用 JNI 的方式，iOS 采用 runtime 的方式来实现。</p>
+<p>JNI ：</p>
+<div class="highlight"><pre><code><span></span><span class="n">JNIEXPORT</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">JNICALL</span>
+<span class="n">Java_com_youzan_mobile_im_network_Channel_nativeDisconnect</span><span class="p">(</span><span class="n">JNIEnv</span><span class="w"> </span><span class="o">*</span><span class="n">env</span><span class="p">,</span><span class="w"> </span><span class="n">jobject</span><span class="w"> </span><span class="n">jobj</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">jclass</span><span class="w"> </span><span class="n">clazz</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">env</span><span class="o">-&gt;</span><span class="n">GetObjectClass</span><span class="p">(</span><span class="n">jobj</span><span class="p">);</span>
+<span class="w">    </span><span class="n">jfieldID</span><span class="w"> </span><span class="n">fieldID</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">env</span><span class="o">-&gt;</span><span class="n">GetFieldID</span><span class="p">(</span><span class="n">clazz</span><span class="p">,</span><span class="w"> </span><span class="n">CONTEXT_VARIABLE</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;J&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="n">context</span><span class="w"> </span><span class="o">*</span><span class="n">c</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">context</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="n">env</span><span class="o">-&gt;</span><span class="n">GetLongField</span><span class="p">(</span><span class="n">jobj</span><span class="p">,</span><span class="w"> </span><span class="n">fieldID</span><span class="p">);</span>
+<span class="w">    </span><span class="n">im_close</span><span class="p">(</span><span class="n">c</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>runtime:</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="n">sendData</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">cId</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">mId</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">version</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">mv</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">req_id</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">data</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">context</span><span class="w"> </span><span class="o">*</span><span class="n">ctx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">context</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">objc_msgSend</span><span class="p">(</span><span class="n">g_obj</span><span class="p">,</span><span class="w"> </span><span class="n">sel_registerName</span><span class="p">(</span><span class="s">&quot;ctx&quot;</span><span class="p">));</span>
+<span class="w">    </span><span class="n">send_request</span><span class="p">(</span><span class="n">ctx</span><span class="p">,</span><span class="w"> </span><span class="n">cId</span><span class="p">,</span><span class="w"> </span><span class="n">mId</span><span class="p">,</span><span class="w"> </span><span class="n">version</span><span class="p">,</span><span class="w"> </span><span class="n">mv</span><span class="p">,</span><span class="w"> </span><span class="n">req_id</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>插拔式架构改造</h3>
+<p>在实现了一套跨端长连接组件之后，最近我们又完成了其插件化的改造，为什么要做这样的改造呢？由于业务环境复杂和运维的相关限制，有的业务方可以配置 TLS 组成 WSS；有的业务方不能配置，只能以明文 WebSocket 的方式传输；有的业务方甚至连 WebSocket 的承载也不要，转而使用自定义的协议。随着对接的业务方增多，我们没办法进行为他们一一定制。我们当初设计的结构是 Worker (负责和业务层通信) -&gt; WebSocket -&gt; TLS -&gt; TCP ，这四层结构是耦合在一起的，这时候如果需要剔除 TLS 或者扩展一个新的功能，就会改动相当多的代码。基于以上几点，我们发现，原先的定向设计完全不符合要求，为了接下来可能会有新增协议解析的预期，同时又不改变使用 libuv 进行跨平台的初衷，所以我们就实施了插件化的改造，最重要的目的是为了解耦，同时也为了提高组件的灵活性，实现可插拔（冷插拔）。</p>
+<h3>解耦</h3>
+<p>首先我们要对四层结构的职责进行明确</p>
+<ul>
+<li>Worker ：提供业务接口和回调</li>
+<li>WebSocket ：负责 WebSocket 握手，封装/解析帧数据和维护心跳</li>
+<li>TLS ：负责 TLS 握手和数据的加解密</li>
+<li>TCP：TCP 连接和数据的读写</li>
+</ul>
+<p>以及整理出结构间的执行调用：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/201805020919-04.png" alt=""></p>
+<p>其中 connect 包含了连接和握手两个过程。在完成链路层连接后，我们认为协议层握手完成，才算是真正的连接成功。</p>
+<p>同样的，数据读写、连接关闭、连接销毁和重置都会严格按照结构的顺序依次调用。</p>
+<h3>可插拔改造</h3>
+<p>解耦完成之后我们发现对于接口的调用都是显式的，比如 Worker send data 中调用 WebSocket send data ， WebSocket send data 中又调用 TLS send data ，这样的显式调用是因为我们知道这些接口是可用的，但在插件化中某个插件可能没有被使用，这样接口的调用会在某一层中断而导致整个组件的不可用。</p>
+<h3>结构体改造</h3>
+<p>所以我们首先考虑到的是抽象出一个结构体，将插件的接口及回调统一，然后利用函数指针实现插件方法的调用，以下是对函数指针声明：</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/* handle */</span>
+<span class="k">typedef</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">node_init</span><span class="p">)(</span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">node</span><span class="p">,</span><span class="w"> </span><span class="n">map_t</span><span class="w"> </span><span class="n">params</span><span class="p">);</span>
+<span class="k">typedef</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">node_conn</span><span class="p">)(</span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">node</span><span class="p">);</span><span class="w">  </span>
+<span class="k">typedef</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">node_write_data</span><span class="p">)(</span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">node</span><span class="p">,</span>
+<span class="w">                                </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">payload</span><span class="p">,</span>
+<span class="w">                                </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">payload_size</span><span class="p">,</span>
+<span class="w">                                </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">params</span><span class="p">);</span>
+<span class="k">typedef</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">node_read_data</span><span class="p">)(</span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">node</span><span class="p">,</span><span class="w"> </span>
+<span class="w">                              </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">params</span><span class="p">,</span><span class="w"> </span>
+<span class="w">                              </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">payload</span><span class="p">,</span><span class="w"> </span>
+<span class="w">                              </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">size</span><span class="p">);</span><span class="w">                    </span>
+<span class="k">typedef</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">node_close</span><span class="p">)(</span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">node</span><span class="p">);</span><span class="w">                           </span>
+<span class="k">typedef</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">node_destroy</span><span class="p">)(</span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">node</span><span class="p">);</span>
+<span class="k">typedef</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">node_reset</span><span class="p">)(</span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">node</span><span class="p">);</span>
+
+<span class="cm">/* callback */</span>
+<span class="k">typedef</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">node_conn_cb</span><span class="p">)(</span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">node</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">status</span><span class="p">);</span>
+<span class="k">typedef</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">node_write_cb</span><span class="p">)(</span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">node</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">status</span><span class="p">);</span><span class="w">                         </span>
+<span class="k">typedef</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">node_recv_cb</span><span class="p">)(</span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">node</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">params</span><span class="p">,</span><span class="w"> </span><span class="n">uv_buf_t</span><span class="w"> </span><span class="o">*</span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="kt">ssize_t</span><span class="w"> </span><span class="n">size</span><span class="p">);</span>
+<span class="k">typedef</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">node_close_cb</span><span class="p">)(</span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">node</span><span class="p">);</span>
+</code></pre></div>
+<p>但如果仅仅声明这些函数指针，在使用时还必须知道插件的结构体类型才能调用到函数的实现，这样插件之间仍然是耦合的。所以我们必须将插件提前关联起来，通过结构体指针来寻找上一个或者下一个插件，OK，这样就很容易联想到双向链表正好能够满足我们的需求。所以加上 pre 、 next 以及一些必要参数后，最终我们整理的结构体为：</p>
+<div class="highlight"><pre><code><span></span><span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">dul_node_s</span><span class="w"> </span><span class="p">{</span>
+<span class="w">     </span><span class="c1">// 前、后插件</span>
+<span class="w">    </span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">pre</span><span class="p">;</span>
+<span class="w">    </span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">next</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// 必要参数</span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">host</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">port</span><span class="p">;</span>
+<span class="w">    </span><span class="n">map_t</span><span class="w"> </span><span class="n">params</span><span class="p">;</span>
+
+<span class="w">    </span><span class="n">node_init</span><span class="w"> </span><span class="n">init</span><span class="p">;</span>
+<span class="w">    </span><span class="n">node_conn</span><span class="w"> </span><span class="n">conn</span><span class="p">;</span>
+<span class="w">    </span><span class="n">node_write_data</span><span class="w"> </span><span class="n">write_data</span><span class="p">;</span>
+<span class="w">    </span><span class="n">node_read_data</span><span class="w"> </span><span class="n">read_data</span><span class="p">;</span>
+<span class="w">    </span><span class="n">node_close</span><span class="w"> </span><span class="n">close</span><span class="p">;</span>
+<span class="w">    </span><span class="n">node_destroy</span><span class="w"> </span><span class="n">destroy</span><span class="p">;</span>
+<span class="w">    </span><span class="n">node_reset</span><span class="w"> </span><span class="n">reset</span><span class="p">;</span>
+
+<span class="w">    </span><span class="n">node_conn_cb</span><span class="w"> </span><span class="n">conn_cb</span><span class="p">;</span>
+<span class="w">    </span><span class="n">node_write_cb</span><span class="w"> </span><span class="n">write_cb</span><span class="p">;</span>
+<span class="w">    </span><span class="n">node_recv_cb</span><span class="w"> </span><span class="n">recv_cb</span><span class="p">;</span>
+<span class="w">    </span><span class="n">node_close_cb</span><span class="w"> </span><span class="n">close_cb</span><span class="p">;</span>
+<span class="p">}</span><span class="w"> </span><span class="n">dul_node_t</span><span class="p">;</span>
+</code></pre></div>
+<p>接着我们再对原有的结构体进行调整，将结构体前面的成员调整为 dul_node_s 结构体的成员，后面再加上自己的成员。这样在插件初始化的时候统一以 dul_node_s 结构体初始化，而在用到具体某一个插件时我们进行结构体类型强转即可，这里有点像继承里父类和子类的概念。</p>
+<h3>插件注册</h3>
+<p>在插件使用前我们按需配置好用到的插件，但如果把插件接口直接暴露给业务方来配置，就需要让业务方接触到 C 代码，这点比较难以控制。基于这个原因，我们讨论了一下，想到前端里面 webpack 对于插件配置的相关操作，于是我们查阅了 webpack 的相关文档，最终我们仿照这个方式实现了我们的插件配置："ws?path=/!tls!uv" 。不同插件以 ! 分割，通过循环将插件依次创建：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">separate_loaders</span><span class="p">(</span><span class="n">tokenizer_t</span><span class="w"> </span><span class="o">*</span><span class="n">tokenizer</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">loaders</span><span class="p">,</span><span class="w"> </span><span class="n">context</span><span class="w"> </span><span class="o">*</span><span class="n">c</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">outer_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">strtok_r</span><span class="p">(</span><span class="n">loaders</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;!&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">outer_ptr</span><span class="p">);</span>
+<span class="w">    </span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">pre_loader</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">c</span><span class="p">;</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">pre_loader</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">processor_loader</span><span class="p">(</span><span class="n">tokenizer</span><span class="p">,</span><span class="w"> </span><span class="n">p</span><span class="p">,</span><span class="w"> </span><span class="n">pre_loader</span><span class="p">);</span>
+<span class="w">        </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">strtok_r</span><span class="p">(</span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;!&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">outer_ptr</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>单个插件所需要额外的 params 以 query string 形式拼接，在插件创建中用 ? 分割出来 ，以 kv 形式放入到一个 hashmap 中。再根据插件的名称调用对应的初始化方法，并根据传入的 pre_loader 绑定双向链表的前后关系：</p>
+<div class="highlight"><pre><code><span></span><span class="n">voidd</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">oper_func</span><span class="p">[])(</span><span class="n">oper_func</span><span class="p">[</span><span class="w"> </span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">**</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">ws_alloc</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tls_alloc</span><span class="p">,</span>
+<span class="w">    </span><span class="n">uv_alloc</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kt">char</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="o">*</span><span class="n">loaders</span><span class="p">[]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="s">&quot;ws&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;tls&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;uv&quot;</span>
+<span class="p">};</span>
+
+<span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="nf">processor_loader</span><span class="p">(</span><span class="n">tokenizer_t</span><span class="w"> </span><span class="o">*</span><span class="n">tokenizer</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">loader</span><span class="p">,</span><span class="w"> </span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">pre_loader</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">loader</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">inner_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+
+<span class="w">    </span><span class="cm">/* params 提取组装 */</span>
+<span class="w">    </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">strtok_r</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;?&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">inner_ptr</span><span class="p">);</span>
+<span class="w">    </span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">node</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">    </span><span class="n">map_t</span><span class="w"> </span><span class="n">params</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">hashmap_new</span><span class="p">();</span>
+<span class="w">    </span><span class="n">params_parser</span><span class="p">(</span><span class="n">inner_ptr</span><span class="p">,</span><span class="w"> </span><span class="n">params</span><span class="p">);</span>
+
+<span class="w">    </span><span class="cm">/* 这里采用转移表，进行插件初始化 */</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">strcmp</span><span class="p">(</span><span class="n">loaders</span><span class="p">[</span><span class="n">sqe</span><span class="p">],</span><span class="w"> </span><span class="n">p</span><span class="p">)</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">sqe</span><span class="o">++</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">oper_func</span><span class="p">[</span><span class="n">sqe</span><span class="p">](</span><span class="o">&amp;</span><span class="n">node</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">node</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nb">NULL</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">node</span><span class="o">-&gt;</span><span class="n">init</span><span class="p">(</span><span class="n">node</span><span class="p">,</span><span class="w"> </span><span class="n">params</span><span class="p">);</span>
+<span class="w">    </span><span class="n">hashmap_free</span><span class="p">(</span><span class="n">params</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// 双向链表前后关系绑定</span>
+<span class="w">    </span><span class="n">pre_loader</span><span class="o">-&gt;</span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">node</span><span class="p">;</span>
+<span class="w">    </span><span class="n">node</span><span class="o">-&gt;</span><span class="n">pre</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pre_loader</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">node</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="cm">/* params string 解析 */</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">params_parser</span><span class="p">(</span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">query</span><span class="p">,</span><span class="w"> </span><span class="n">map_t</span><span class="w"> </span><span class="n">params</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">outer_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">strtok_r</span><span class="p">(</span><span class="n">query</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&amp;&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">outer_ptr</span><span class="p">);</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">inner_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">        </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">key</span><span class="w"> </span><span class="o">=</span><span class="w">  </span><span class="n">strtok_r</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;=&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">inner_ptr</span><span class="p">);</span>
+<span class="w">        </span><span class="n">hashmap_put</span><span class="p">(</span><span class="n">params</span><span class="p">,</span><span class="w"> </span><span class="n">key</span><span class="p">,</span><span class="w"> </span><span class="n">inner_ptr</span><span class="p">);</span>
+<span class="w">        </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">strtok_r</span><span class="p">(</span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&amp;&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">outer_ptr</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Tips：随着插件的增加，对应初始化的代码也会越来越多，而且都是重复代码，为了减少这部分工作，我们可以采取宏来定义函数。后续如果增加一个插件，只需要在底下加一行 LOADER_ALLOC(zim_xx, xx) 即可。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#define LOADER_ALLOC(type, name)                    \</span>
+<span class="cp">    void name##_alloc(dul_node_t **ctx) {           \</span>
+<span class="cp">        type##_t **loader = (type##_t **)ctx;       \</span>
+<span class="cp">        (*loader) = malloc(sizeof(type##_t));       \</span>
+<span class="cp">        (*loader)-&gt;init = &amp;name##_init;             \</span>
+<span class="cp">        (*loader)-&gt;next = NULL;                     \</span>
+<span class="cp">        (*loader)-&gt;pre = NULL;                      \</span>
+<span class="cp">    }                       </span>
+
+<span class="n">LOADER_ALLOC</span><span class="p">(</span><span class="n">websocket</span><span class="p">,</span><span class="w"> </span><span class="n">ws</span><span class="p">);</span>
+<span class="n">LOADER_ALLOC</span><span class="p">(</span><span class="n">zim_tls</span><span class="p">,</span><span class="w"> </span><span class="n">tls</span><span class="p">);</span>
+<span class="n">LOADER_ALLOC</span><span class="p">(</span><span class="n">zim_uv</span><span class="p">,</span><span class="w"> </span><span class="n">uv</span><span class="p">);</span>
+</code></pre></div>
+<h3>接口调用</h3>
+<p>再回到一开始我们思考接口调用的问题，由于有了函数指针变量，我们就需要在插件的初始化中把函数的地址存储在这些变量中：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">ws_init</span><span class="p">(</span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">ctx</span><span class="p">,</span><span class="w"> </span><span class="n">map_t</span><span class="w"> </span><span class="n">params</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">websocket_t</span><span class="w"> </span><span class="o">*</span><span class="n">ws</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">websocket_t</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">ctx</span><span class="p">;</span>
+<span class="w">    </span><span class="n">bzero</span><span class="p">(</span><span class="n">ws</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">websocket_t</span><span class="p">));</span>
+
+<span class="w">    </span><span class="c1">// 省略中间初始化过程</span>
+
+<span class="w">    </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">init</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">ws_init</span><span class="p">;</span>
+<span class="w">    </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">conn</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">ws_connect</span><span class="p">;</span>
+<span class="w">    </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">close</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">ws_close</span><span class="p">;</span>
+<span class="w">    </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">destroy</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">ws_destroy</span><span class="p">;</span>
+<span class="w">    </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">reset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">ws_reset</span><span class="p">;</span>
+<span class="w">    </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">write_data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">ws_send</span><span class="p">;</span>
+<span class="w">    </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">read_data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">ws_read</span><span class="p">;</span>
+<span class="w">    </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">conn_cb</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">ws_conn_cb</span><span class="p">;</span>
+<span class="w">    </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">write_cb</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">ws_send_cb</span><span class="p">;</span>
+<span class="w">    </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">recv_cb</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">ws_recv_cb</span><span class="p">;</span>
+<span class="w">    </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">close_cb</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">ws_close_cb</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">OK</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>对比接口前后调用的方式，前者需要知道下一个 connect 函数，并进行显式调用，如果在 TLS 和 TCP 中新增一层，就需要改动 connect 函数的调用。但后者完全没有这个顾虑，不论是新增还是删除插件，它都可以通过指针找到对应的结构体，调用其 connect 函数，插件内部无需任何改动，岂不妙哉。</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/* 改造前 */</span>
+<span class="kt">int</span><span class="w"> </span><span class="nf">tls_ws_connect</span><span class="p">(</span><span class="n">tls_ws_t</span><span class="w"> </span><span class="o">*</span><span class="n">handle</span><span class="p">,</span>
+<span class="w">                   </span><span class="n">tls_ws_conn_cb</span><span class="w"> </span><span class="n">conn_cb</span><span class="p">,</span>
+<span class="w">                   </span><span class="n">tls_ws_close_cb</span><span class="w"> </span><span class="n">close_cb</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">...</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">uv_tls_connect</span><span class="p">(</span><span class="n">tls</span><span class="p">,</span>
+<span class="w">                          </span><span class="n">handle</span><span class="o">-&gt;</span><span class="n">host</span><span class="p">,</span>
+<span class="w">                          </span><span class="n">handle</span><span class="o">-&gt;</span><span class="n">port</span><span class="p">,</span>
+<span class="w">                          </span><span class="n">on__tls_connect</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="cm">/* 改造后 */</span>
+<span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">tls_connect</span><span class="p">(</span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">zim_tls_t</span><span class="w"> </span><span class="o">*</span><span class="n">tls</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">zim_tls_t</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">ctx</span><span class="p">;</span>
+
+<span class="w">    </span><span class="p">...</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">tls</span><span class="o">-&gt;</span><span class="n">next</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">tls</span><span class="o">-&gt;</span><span class="n">next</span><span class="o">-&gt;</span><span class="n">conn</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">tls</span><span class="o">-&gt;</span><span class="n">next</span><span class="o">-&gt;</span><span class="n">host</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tls</span><span class="o">-&gt;</span><span class="n">host</span><span class="p">;</span>
+<span class="w">        </span><span class="n">tls</span><span class="o">-&gt;</span><span class="n">next</span><span class="o">-&gt;</span><span class="n">port</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tls</span><span class="o">-&gt;</span><span class="n">port</span><span class="p">;</span>
+<span class="w">        </span><span class="n">tls</span><span class="o">-&gt;</span><span class="n">next</span><span class="o">-&gt;</span><span class="n">conn</span><span class="p">(</span><span class="n">tls</span><span class="o">-&gt;</span><span class="n">next</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>新增插件</h3>
+<p>基于改造后组件，新增插件只需要改动三处，以日志插件为例：</p>
+<ul>
+<li>增加日志文件</li>
+</ul>
+<p>在头文件中定义 zim_log_s 结构体（这里没有额外的成员）：</p>
+<div class="highlight"><pre><code><span></span><span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">zim_log_s</span><span class="w"> </span><span class="n">zim_log_t</span><span class="p">;</span>
+
+<span class="k">struct</span><span class="w"> </span><span class="nc">zim_log_s</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">pre</span><span class="p">;</span>
+<span class="w">    </span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">next</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">host</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">port</span><span class="p">;</span>
+<span class="w">    </span><span class="n">map_t</span><span class="w"> </span><span class="n">params</span><span class="p">;</span>
+
+<span class="w">    </span><span class="n">node_init</span><span class="w"> </span><span class="n">init</span><span class="p">;</span>
+<span class="w">    </span><span class="n">node_conn</span><span class="w"> </span><span class="n">conn</span><span class="p">;</span>
+<span class="w">    </span><span class="n">node_write_data</span><span class="w"> </span><span class="n">write_data</span><span class="p">;</span>
+<span class="w">    </span><span class="n">node_read_data</span><span class="w"> </span><span class="n">read_data</span><span class="p">;</span>
+<span class="w">    </span><span class="n">node_close</span><span class="w"> </span><span class="n">close</span><span class="p">;</span>
+<span class="w">    </span><span class="n">node_destroy</span><span class="w"> </span><span class="n">destroy</span><span class="p">;</span>
+<span class="w">    </span><span class="n">node_reset</span><span class="w"> </span><span class="n">reset</span><span class="p">;</span>
+
+<span class="w">    </span><span class="n">node_conn_cb</span><span class="w"> </span><span class="n">conn_cb</span><span class="p">;</span>
+<span class="w">    </span><span class="n">node_write_cb</span><span class="w"> </span><span class="n">write_cb</span><span class="p">;</span>
+<span class="w">    </span><span class="n">node_recv_cb</span><span class="w"> </span><span class="n">recv_cb</span><span class="p">;</span>
+<span class="w">    </span><span class="n">node_close_cb</span><span class="w"> </span><span class="n">close_cb</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>在实现文件中实现接口及回调，注意：即使接口或回调内没有额外的操作，仍然需要实现，例如此处的 log_conn_cb 和 log_connect ，否则上一个插件或下一个插件在日志层调用时会中断：</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/* callback */</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">log_conn_cb</span><span class="p">(</span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">ctx</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">status</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">zim_log_t</span><span class="w"> </span><span class="o">*</span><span class="n">log</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">zim_log_t</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">ctx</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">log</span><span class="o">-&gt;</span><span class="n">pre</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">pre</span><span class="o">-&gt;</span><span class="n">conn_cb</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">pre</span><span class="o">-&gt;</span><span class="n">conn_cb</span><span class="p">(</span><span class="n">log</span><span class="o">-&gt;</span><span class="n">pre</span><span class="p">,</span><span class="w"> </span><span class="n">status</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="cm">/* 省略中间直接回调 */</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">log_recv_cb</span><span class="p">(</span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">ctx</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">params</span><span class="p">,</span><span class="w"> </span><span class="n">uv_buf_t</span><span class="w"> </span><span class="o">*</span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="kt">ssize_t</span><span class="w"> </span><span class="n">size</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="cm">/* 收集接收到的数据 */</span>
+<span class="w">    </span><span class="n">recv_data_from_server</span><span class="p">(</span><span class="n">buf</span><span class="o">-&gt;</span><span class="n">base</span><span class="p">,</span><span class="w"> </span><span class="n">params</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="p">);</span>
+
+<span class="w">    </span><span class="cm">/* 继续向上一层插件回调接收到的数据 */</span>
+<span class="w">    </span><span class="n">zim_log_t</span><span class="w"> </span><span class="o">*</span><span class="n">log</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">zim_log_t</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">ctx</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">log</span><span class="o">-&gt;</span><span class="n">pre</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">pre</span><span class="o">-&gt;</span><span class="n">recv_cb</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">pre</span><span class="o">-&gt;</span><span class="n">recv_cb</span><span class="p">(</span><span class="n">log</span><span class="o">-&gt;</span><span class="n">pre</span><span class="p">,</span><span class="w"> </span><span class="n">opcode</span><span class="p">,</span><span class="w"> </span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">OK</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="cm">/* log hanlder */</span>
+<span class="kt">int</span><span class="w"> </span><span class="nf">log_init</span><span class="p">(</span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">ctx</span><span class="p">,</span><span class="w"> </span><span class="n">map_t</span><span class="w"> </span><span class="n">params</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">zim_log_t</span><span class="w"> </span><span class="o">*</span><span class="n">log</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">zim_log_t</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">ctx</span><span class="p">;</span>
+<span class="w">    </span><span class="n">bzero</span><span class="p">(</span><span class="n">log</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">zim_log_t</span><span class="p">));</span>
+
+<span class="w">    </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">init</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">log_init</span><span class="p">;</span>
+<span class="w">    </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">conn</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">log_connect</span><span class="p">;</span>
+<span class="w">    </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">write_data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">log_write</span><span class="p">;</span>
+<span class="w">    </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">read_data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">log_read</span><span class="p">;</span>
+<span class="w">    </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">close</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">log_close</span><span class="p">;</span>
+<span class="w">    </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">destroy</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">log_destroy</span><span class="p">;</span>
+<span class="w">    </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">reset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">log_reset</span><span class="p">;</span>
+<span class="w">    </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">conn_cb</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">log_conn_cb</span><span class="p">;</span>
+<span class="w">    </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">write_cb</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">log_write_cb</span><span class="p">;</span>
+<span class="w">    </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">recv_cb</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">log_recv_cb</span><span class="p">;</span>
+<span class="w">    </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">close_cb</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">log_close_cb</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">OK</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">log_connect</span><span class="p">(</span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">zim_log_t</span><span class="w"> </span><span class="o">*</span><span class="n">log</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">zim_log_t</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">ctx</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">log</span><span class="o">-&gt;</span><span class="n">next</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">next</span><span class="o">-&gt;</span><span class="n">conn</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">next</span><span class="o">-&gt;</span><span class="n">host</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">host</span><span class="p">;</span>
+<span class="w">        </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">next</span><span class="o">-&gt;</span><span class="n">port</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">port</span><span class="p">;</span>
+<span class="w">        </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">next</span><span class="o">-&gt;</span><span class="n">conn</span><span class="p">(</span><span class="n">log</span><span class="o">-&gt;</span><span class="n">next</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="cm">/* 省略中间直接调用 */</span>
+
+<span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">log_write</span><span class="p">(</span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">*</span><span class="n">ctx</span><span class="p">,</span><span class="w"> </span>
+<span class="w">                      </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">payload</span><span class="p">,</span><span class="w"> </span>
+<span class="w">                      </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">payload_size</span><span class="p">,</span>
+<span class="w">                      </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">params</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="cm">/* 收集发送数据 */</span>
+<span class="w">    </span><span class="n">send_data_to_server</span><span class="p">(</span><span class="n">payload</span><span class="p">,</span><span class="w"> </span><span class="n">payload_size</span><span class="p">,</span><span class="w"> </span><span class="n">params</span><span class="p">);</span>
+
+<span class="w">    </span><span class="cm">/* 继续往下一层插件写入数据 */</span>
+<span class="w">    </span><span class="n">zim_log_t</span><span class="w"> </span><span class="o">*</span><span class="n">log</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">zim_log_t</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">ctx</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">log</span><span class="o">-&gt;</span><span class="n">next</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">next</span><span class="o">-&gt;</span><span class="n">write_data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">log</span><span class="o">-&gt;</span><span class="n">next</span><span class="o">-&gt;</span><span class="n">write_data</span><span class="p">(</span><span class="n">log</span><span class="o">-&gt;</span><span class="n">next</span><span class="p">,</span><span class="w"> </span><span class="n">payload</span><span class="p">,</span><span class="w"> </span><span class="n">payload_size</span><span class="p">,</span><span class="w"> </span><span class="n">flags</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w">                           </span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>增加日志初始化函数及修改转移表</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">LOADER_ALLOC</span><span class="p">(</span><span class="n">zim_log</span><span class="p">,</span><span class="w"> </span><span class="n">log</span><span class="p">);</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">oper_func</span><span class="p">[])(</span><span class="n">dul_node_t</span><span class="w"> </span><span class="o">**</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">ws_alloc</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tls_alloc</span><span class="p">,</span>
+<span class="w">    </span><span class="n">uv_alloc</span><span class="p">,</span>
+<span class="w">    </span><span class="n">log_alloc</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kt">char</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="o">*</span><span class="n">loaders</span><span class="p">[]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="s">&quot;ws&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;tls&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;uv&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;log&quot;</span>
+<span class="p">};</span>
+</code></pre></div>
+<ul>
+<li>修改插件注册</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="cm">/* 增加日志前 */</span>
+<span class="kt">char</span><span class="w"> </span><span class="n">loaders</span><span class="p">[]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">&quot;ws?path=/!tls!uv&quot;</span><span class="p">;</span>
+<span class="n">context_init</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;127.0.0.1&quot;</span><span class="p">,</span><span class="w"> </span><span class="mi">443</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="n">loaders</span><span class="p">);</span>
+
+<span class="cm">/* 增加日志后 */</span>
+<span class="kt">char</span><span class="w"> </span><span class="n">loaders</span><span class="p">[]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">&quot;log!ws?path=/!log!tls!uv&quot;</span><span class="p">;</span>
+<span class="n">context_init</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;127.0.0.1&quot;</span><span class="p">,</span><span class="w"> </span><span class="mi">443</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="n">loaders</span><span class="p">);</span>
+</code></pre></div>
+<p>我们重新运行程序，就能发现日志功能已经成功的配置上去，能够将接受和发送的数据上报：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/201805020919-05.png" alt=""></p>
+<h3>总结</h3>
+<p>回顾一下跨平台长连接组件的设计，我们使用 libuv 和 mbedtls 分别实现 TCP 和 TLS ，参照 WebSocket 协议实现了其握手及数据读写，同时抽象出通信接口及回调，为了和原生层交互，iOS 和 Android 分别采用 runtime 消息发送和 JNI 进行原生方法调用。</p>
+<p>但这样的定向设计完全不符合后期可能会有新增协议解析的预期，所以我们进行了插件化改造，其三个核心点是结构体改造、双向链表和函数指针。</p>
+<p>我们通过将插件行为抽象出一个结构体，利用双向链表将前后插件绑定在一起，使用函数指针调用具体插件的函数或回调。</p>
+<p>这样做的优点是使得插件之间不存在耦合关系，只需保持逻辑顺序上的关系，同时通过修改插件的注册提高了灵活性，使得组件具有可插拔性（冷插拔）。</p>
+<p>但在新增组件中我们需要实现所有的接口和回调，如果数量多的话，这还真是一件比较繁琐的事情。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "跨平台长连接组件设计及可插拔改造.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

@@ -1,0 +1,381 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>一文读懂Xcode代码索引原理 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="一文读懂Xcode代码索引原理,iOS,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="一文读懂Xcode代码索引原理" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>一文读懂Xcode代码索引原理</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2024-02-25 12:00
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_ios.html' class='article_tag'>iOS</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://cloud.tencent.com/developer/article/2204613?areaSource=102001.18&traceId=EI_rLraLXoc6jzEs8CZlN' target='blank'>一文读懂Xcode代码索引原理</a></p></h4>
+<blockquote><p>导语：Xcode 作为 iOS 开发绕不开的 IDE 代码编辑功能很强大，但是在编辑大型工程时总是遇到代码高亮、代码提示失效，建立代码索引慢等问题。本文抽丝剥茧，介绍了 Xcode 代码索引的工作原理，并提出了一种跨设备共享代码索引的方案，在企微落地后优化了90%的全量索引耗时。</p>
+</blockquote>
+<h2>一、背景介绍</h2>
+<p>Xcode 作为 iOS 开发绕不开的 IDE，深受大家的“喜爱”，作为一款成熟的 IDE，大家对于它的期待还是挺高的。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240225-1200-2.png" alt=""></p>
+<p>Xcode 在面对体量巨大的工程时还是显得力不从心，你可能也有以下困惑：</p>
+<ol>
+<li>正在修紧急 bug，Xcode 代码高亮怎么没了？代码提示、代码跳转统统失效，关键时刻掉链子；</li>
+<li>面对海量代码，Xcode 的 Open Quickly 功能能够通过关键词迅速定位到想要找到的代码，背后原理究竟是什么？</li>
+<li>代码索引总是耗时很长，在后台占用大量CPU，能不能提前预生成索引数据，跨设备共享。</li>
+</ol>
+<p>带着上面的问题，笔者阅读了并整理了网上可以找到的相关资料，然后进行了大量的实验，最后完成了本文。本文基于 Xcode 14.0 (14A309) 进行研究（各个版本 Xcode 构建索引策略可能有所差异，但是思路是大体一致的），如有错误或者遗漏之处望各位大佬指正。</p>
+<h2>二、Xcode Index 工作流程</h2>
+<p>Xcode 的代码高亮、代码补全、代码跳转、查找调用链、重构、Open Quickly 等功能都是 Xcode Index 的一部分，打开 Xcode 工程可以在顶部 bar 看到 Index 的进度信息。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240225-1200-3.png" alt=""></p>
+<p>Xcode Index 是如何工作的呢？这就要引入一个新的工具 SourceKit，上述的 Xcode 代码操作相关功能，都是基于 SourceKit 实现的。SourceKit 和 Xcode 通过 XPC 进行通信，SourceKit 是 Xcode 代码索引功能的幕后主角，Xcode 是客户端，负责收集用户操作，转换成请求发给 SourceKit，最后展示计算结果；SourceKit 是后端，负责生成索引数据，计算 Xcode 请求。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240225-1200-4.png" alt=""></p>
+<p>整个工作流程如下图所示，Xcode 是前端，SourceKit 是驱动引擎，Clang 是实际产生索引数据的，索引<a href="https://cloud.tencent.com/product/cdcs?from_column=20065&from=20065">数据存储</a>在 Index Store。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240225-1200-5.png" alt=""></p>
+<p>Xcode 生成 Index Store 有两条路径：</p>
+<p>路径一、Xcode 在闲时自动调用 SourceKit 在后台生成数据。SourceKit 最终调用 Clang 生成数据，使用编译参数 <code>-index-store-path -fsyntax-only</code> ，生成 Index 数据只需完成语法分析即可得到结果，不需要进行完整编译流程。</p>
+<p>路径二、开启 <code>Index-While-Building</code>，如果将该配置项打开，会在编译过程中新增参数 <code>-index-store-path</code>，在编译时同时生成 Index 数据，由于编译时本来就需要进行词法分析、语法分析，因此中间产物是可以复用的。开启该功能会对编译速度产生影响，官方给出的数据是慢 2-5%。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240225-1200-6.png" alt=""></p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240225-1200-7.png" alt=""></p>
+<h2>三、SourceKit - 代码索引幕后主角</h2>
+<h3>3.1 SKAgent</h3>
+<p>了解了整个工作流程，接下来我们来讲讲 SourceKit 的一些工作细节。运行 Xcode 时在活动监视器里可以看到一个进程
+<code>com.apple.dt.SKAgent</code> ，SKAgent 是 SourceKit 的 XPC 服务，负责和Xcode 进行通信，它的路径是：/Applications/Xcode.app/Contents/SharedFrameworks/SourceKit.framework/Versions/A/XPCServices/com.apple.dt.SKAgent.xpc/Contents/MacOS/com.apple.dt.SKAgent。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240225-1200-8.png" alt=""></p>
+<h3>3.2 SourceKit 通信协议探索</h3>
+<p>为了进一步探索 SourceKit 在背后究竟做了什么，我们将 Xcode 和 SourceKit 通信日志打印出来分析，通过以下命令启动Xcode，可以将日志打印到指定文件。</p>
+<div class="highlight"><pre><code><span></span><span class="n">SOURCEKIT_LOGGING</span><span class="o">=</span><span class="mi">3</span><span class="w"> </span><span class="o">/</span><span class="n">Applications</span><span class="o">/</span><span class="n">Xcode</span><span class="p">.</span><span class="n">app</span><span class="o">/</span><span class="n">Contents</span><span class="o">/</span><span class="n">MacOS</span><span class="o">/</span><span class="n">Xcode</span><span class="w"> </span><span class="o">&amp;&gt;</span><span class="w"> </span><span class="o">~/</span><span class="n">Downloads</span><span class="o">/</span><span class="n">xcode</span><span class="p">.</span><span class="n">log</span>
+</code></pre></div>
+<p>SourceKit 支持哪些命令可以查看这个文件：</p>
+<div class="highlight"><pre><code><span></span><span class="o">/</span><span class="n">Xcode</span><span class="p">.</span><span class="n">app</span><span class="o">/</span><span class="n">Contents</span><span class="o">/</span><span class="n">SharedFrameworks</span><span class="o">/</span><span class="n">SourceKit</span><span class="p">.</span><span class="n">framework</span><span class="o">/</span><span class="n">Versions</span><span class="o">/</span><span class="n">A</span><span class="o">/</span><span class="n">XPCServices</span><span class="o">/</span><span class="n">com</span><span class="p">.</span><span class="n">apple</span><span class="p">.</span><span class="n">dt</span><span class="p">.</span><span class="n">SKAgent</span><span class="p">.</span><span class="n">xpc</span><span class="o">/</span><span class="n">Contents</span><span class="o">/</span><span class="n">Frameworks</span><span class="o">/</span><span class="n">SKIPC</span><span class="p">.</span><span class="n">dylib</span>
+</code></pre></div>
+<h4>3.2.1 索引进度更新</h4>
+<p>索引进度更新相关的命令主要有以下几条：</p>
+<ul>
+<li>更新索引进度：indexer.callback.on-is-indexing-workspace</li>
+<li>索引建立完毕：indexer.callback.on-did-index-workspace</li>
+<li>建立索引任务中断：indexer.callback.on-did-suspend-indexing-workspace</li>
+<li>建立索引任务恢复：indexer.callback.on-did-resume-indexing-workspace</li>
+</ul>
+<p>下面是一个实际案例，命令为 <code>indexer.callback.on-is-indexing-workspace</code> ，在 <code>key.indexer.callback.on-is-indexing-workspace.user-info</code> 的 XML 结构中，包含了已经完成索引文件数量 ：<code>IDEIndexingFilesCompletedKey</code>、索引剩余文件数量：<code>IDEIndexingFilesRemainingKey</code> 等信息，Xcode 根据进度信息更新 UI 进度。</p>
+<div class="highlight"><pre><code><span></span><span class="n">SourceKit</span><span class="o">-</span><span class="n">client</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="mi">2</span><span class="o">:</span><span class="n">notification</span><span class="o">:</span><span class="mi">66619</span><span class="o">:</span><span class="mf">169.3069</span><span class="p">]</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">key</span><span class="p">.</span><span class="n">notification</span><span class="o">:</span><span class="w"> </span><span class="n">indexer</span><span class="p">.</span><span class="n">callback</span><span class="p">,</span>
+<span class="w">  </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">indexer</span><span class="o">-</span><span class="n">token</span><span class="o">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">callback</span><span class="p">.</span><span class="n">kind</span><span class="o">:</span><span class="w"> </span><span class="n">indexer</span><span class="p">.</span><span class="n">callback</span><span class="p">.</span><span class="n">on</span><span class="o">-</span><span class="n">is</span><span class="o">-</span><span class="n">indexing</span><span class="o">-</span><span class="n">workspace</span><span class="p">,</span>
+<span class="w">  </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">callback</span><span class="p">.</span><span class="n">on</span><span class="o">-</span><span class="n">is</span><span class="o">-</span><span class="n">indexing</span><span class="o">-</span><span class="n">workspace</span><span class="p">.</span><span class="n">user</span><span class="o">-</span><span class="n">info</span><span class="o">:</span><span class="w"> </span><span class="s">&quot;&lt;?xml version=</span><span class="se">\&quot;</span><span class="s">1.0</span><span class="se">\&quot;</span><span class="s"> encoding=</span><span class="se">\&quot;</span><span class="s">UTF-8</span><span class="se">\&quot;</span><span class="s">?&gt;</span><span class="se">\n</span><span class="s">&lt;!DOCTYPE plist PUBLIC </span><span class="se">\&quot;</span><span class="s">-//Apple//DTD PLIST 1.0//EN</span><span class="se">\&quot;</span><span class="s"> </span><span class="se">\&quot;</span><span class="s">http://www.apple.com/DTDs/PropertyList-1.0.dtd</span><span class="se">\&quot;</span><span class="s">&gt;</span><span class="se">\n</span><span class="s">&lt;plist version=</span><span class="se">\&quot;</span><span class="s">1.0</span><span class="se">\&quot;</span><span class="s">&gt;</span><span class="se">\n</span><span class="s">&lt;dict&gt;</span><span class="se">\n\t</span><span class="s">&lt;key&gt;IDEIndexingFilesCompletedKey&lt;/key&gt;</span><span class="se">\n\t</span><span class="s">&lt;integer&gt;8740&lt;/integer&gt;</span><span class="se">\n\t</span><span class="s">&lt;key&gt;IDEIndexingFilesRemainingKey&lt;/key&gt;</span><span class="se">\n\t</span><span class="s">&lt;integer&gt;8262&lt;/integer&gt;</span><span class="se">\n\t</span><span class="s">&lt;key&gt;IDEIndexingHotFilesKey&lt;/key&gt;</span><span class="se">\n\t</span><span class="s">&lt;integer&gt;0&lt;/integer&gt;</span><span class="se">\n\t</span><span class="s">&lt;key&gt;IDEIndexingLoadingProgressKey&lt;/key&gt;</span><span class="se">\n\t</span><span class="s">&lt;real&gt;0.0&lt;/real&gt;</span><span class="se">\n\t</span><span class="s">&lt;key&gt;IDEIndexingQueueWidthKey&lt;/key&gt;</span><span class="se">\n\t</span><span class="s">&lt;integer&gt;8&lt;/integer&gt;</span><span class="se">\n\t</span><span class="s">&lt;key&gt;IDEIndexingWaitingForPrebuildKey&lt;/key&gt;</span><span class="se">\n\t</span><span class="s">&lt;false/&gt;</span><span class="se">\n</span><span class="s">&lt;/dict&gt;</span><span class="se">\n</span><span class="s">&lt;/plist&gt;</span><span class="se">\n</span><span class="s">&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+<h4>3.2.2 编辑文件</h4>
+<p>接下来的案例场景是打开文件 ViewController.mm 编辑，首先 Xcode 会发送命令<code>source.request.indexer.editor-moved-focus-to-file</code> 告诉 SourceKit 用户正在编辑ViewController.mm，优先响应该文件的请求。</p>
+<div class="highlight"><pre><code><span></span><span class="n">SourceKit</span><span class="o">-</span><span class="n">client</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="mi">2</span><span class="o">:</span><span class="n">request</span><span class="o">:</span><span class="mi">259</span><span class="o">:</span><span class="mf">29.8311</span><span class="p">]</span><span class="w"> </span><span class="p">[</span><span class="mi">78</span><span class="p">]</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">key</span><span class="p">.</span><span class="n">request</span><span class="o">:</span><span class="w"> </span><span class="n">source</span><span class="p">.</span><span class="n">request</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">editor</span><span class="o">-</span><span class="n">moved</span><span class="o">-</span><span class="n">focus</span><span class="o">-</span><span class="n">to</span><span class="o">-</span><span class="n">file</span><span class="p">,</span>
+<span class="w">  </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">indexer</span><span class="o">-</span><span class="n">token</span><span class="o">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">occurrence</span><span class="p">.</span><span class="n">file</span><span class="o">:</span><span class="w"> </span><span class="s">&quot;/Users/link/Desktop/Demo/src/ViewController.mm&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>然后 Xcode 会发送命令 <code>source.request.document.symbol-occurrences</code>，获取当前文件的所有符号信息，包含符号名、符号类型、语言、代码行列等信息，Xcode 通过这些信息进行代码高亮。</p>
+<div class="highlight"><pre><code><span></span><span class="n">SourceKit</span><span class="o">-</span><span class="n">client</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="mi">2</span><span class="o">:</span><span class="n">request</span><span class="o">:</span><span class="mi">259</span><span class="o">:</span><span class="mf">29.9688</span><span class="p">]</span><span class="w"> </span><span class="p">[</span><span class="mi">80</span><span class="p">]</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">key</span><span class="p">.</span><span class="n">request</span><span class="o">:</span><span class="w"> </span><span class="n">source</span><span class="p">.</span><span class="n">request</span><span class="p">.</span><span class="n">document</span><span class="p">.</span><span class="n">symbol</span><span class="o">-</span><span class="n">occurrences</span><span class="p">,</span>
+<span class="w">  </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">indexer</span><span class="o">-</span><span class="n">token</span><span class="o">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">query</span><span class="p">.</span><span class="n">doc</span><span class="o">-</span><span class="n">location</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">doc</span><span class="o">-</span><span class="n">loc</span><span class="p">.</span><span class="n">url</span><span class="o">:</span><span class="w"> </span><span class="s">&quot;file:///Users/link/Desktop/Demo/src/ViewController.mm&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">doc</span><span class="o">-</span><span class="n">loc</span><span class="p">.</span><span class="n">start</span><span class="o">-</span><span class="n">line</span><span class="o">:</span><span class="w"> </span><span class="mi">18</span><span class="p">,</span>
+<span class="w">    </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">doc</span><span class="o">-</span><span class="n">loc</span><span class="p">.</span><span class="n">start</span><span class="o">-</span><span class="n">col</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">doc</span><span class="o">-</span><span class="n">loc</span><span class="p">.</span><span class="n">end</span><span class="o">-</span><span class="n">line</span><span class="o">:</span><span class="w"> </span><span class="mi">33</span><span class="p">,</span>
+<span class="w">    </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">doc</span><span class="o">-</span><span class="n">loc</span><span class="p">.</span><span class="n">end</span><span class="o">-</span><span class="n">col</span><span class="o">:</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span>
+<span class="w">    </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">doc</span><span class="o">-</span><span class="n">loc</span><span class="p">.</span><span class="n">range</span><span class="o">-</span><span class="n">loc</span><span class="o">:</span><span class="w"> </span><span class="mi">233</span><span class="p">,</span>
+<span class="w">    </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">doc</span><span class="o">-</span><span class="n">loc</span><span class="p">.</span><span class="n">range</span><span class="o">-</span><span class="n">count</span><span class="o">:</span><span class="w"> </span><span class="mi">324</span><span class="p">,</span>
+<span class="w">    </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">doc</span><span class="o">-</span><span class="n">loc</span><span class="p">.</span><span class="n">encoding</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">query</span><span class="p">.</span><span class="n">file</span><span class="o">-</span><span class="n">content</span><span class="o">:</span><span class="w"> </span><span class="s">&quot;&lt;DATA&gt;&quot;</span>
+<span class="p">}</span>
+<span class="n">SourceKit</span><span class="o">-</span><span class="n">client</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="mi">2</span><span class="o">:</span><span class="n">response</span><span class="o">:</span><span class="mi">75571</span><span class="o">:</span><span class="mf">29.9700</span><span class="p">]</span><span class="w"> </span><span class="p">[</span><span class="mi">80</span><span class="p">]</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">key</span><span class="p">.</span><span class="n">symbols</span><span class="o">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">key</span><span class="p">.</span><span class="n">symbol</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">symbol</span><span class="p">.</span><span class="n">name</span><span class="o">:</span><span class="w"> </span><span class="s">&quot;viewDidLoad&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">symbol</span><span class="p">.</span><span class="n">kind</span><span class="o">:</span><span class="w"> </span><span class="s">&quot;Xcode.SourceCodeSymbolKind.InstanceMethod&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">symbol</span><span class="p">.</span><span class="n">language</span><span class="o">:</span><span class="w"> </span><span class="s">&quot;Xcode.SourceCodeLanguage.Objective-C&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">symbol</span><span class="p">.</span><span class="n">resolution</span><span class="o">:</span><span class="w"> </span><span class="s">&quot;c:objc(cs)UIViewController(im)viewDidLoad&quot;</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">occurrence</span><span class="p">.</span><span class="n">role</span><span class="o">:</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span>
+<span class="w">      </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">occurrence</span><span class="p">.</span><span class="n">location</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">doc</span><span class="o">-</span><span class="n">loc</span><span class="p">.</span><span class="n">url</span><span class="o">:</span><span class="w"> </span><span class="s">&quot;file:///Users/link/Desktop/Demo/src/ViewController.mm&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">doc</span><span class="o">-</span><span class="n">loc</span><span class="p">.</span><span class="n">start</span><span class="o">-</span><span class="n">line</span><span class="o">:</span><span class="w"> </span><span class="mi">18</span><span class="p">,</span>
+<span class="w">        </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">doc</span><span class="o">-</span><span class="n">loc</span><span class="p">.</span><span class="n">start</span><span class="o">-</span><span class="n">col</span><span class="o">:</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span>
+<span class="w">        </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">doc</span><span class="o">-</span><span class="n">loc</span><span class="p">.</span><span class="n">end</span><span class="o">-</span><span class="n">line</span><span class="o">:</span><span class="w"> </span><span class="mi">18</span><span class="p">,</span>
+<span class="w">        </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">doc</span><span class="o">-</span><span class="n">loc</span><span class="p">.</span><span class="n">end</span><span class="o">-</span><span class="n">col</span><span class="o">:</span><span class="w"> </span><span class="mi">10</span><span class="p">,</span>
+<span class="w">        </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">doc</span><span class="o">-</span><span class="n">loc</span><span class="p">.</span><span class="n">range</span><span class="o">-</span><span class="n">loc</span><span class="o">:</span><span class="w"> </span><span class="mi">9223372036854775807</span><span class="p">,</span>
+<span class="w">        </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">doc</span><span class="o">-</span><span class="n">loc</span><span class="p">.</span><span class="n">range</span><span class="o">-</span><span class="n">count</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">        </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">doc</span><span class="o">-</span><span class="n">loc</span><span class="p">.</span><span class="n">encoding</span><span class="o">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">occurrence</span><span class="p">.</span><span class="n">line</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">      </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">occurrence</span><span class="p">.</span><span class="n">col</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">      </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">occurrence</span><span class="p">.</span><span class="n">file</span><span class="o">:</span><span class="w"> </span><span class="s">&quot;/Users/link/Desktop/Demo/src/ViewController.mm&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">symbol</span><span class="p">.</span><span class="n">display</span><span class="o">-</span><span class="n">name</span><span class="o">:</span><span class="w"> </span><span class="s">&quot;-viewDidLoad&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">symbol</span><span class="p">.</span><span class="n">is</span><span class="o">-</span><span class="n">in</span><span class="o">-</span><span class="n">project</span><span class="o">:</span><span class="w"> </span><span class="nb">false</span><span class="p">,</span>
+<span class="w">      </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">symbol</span><span class="p">.</span><span class="n">is</span><span class="o">-</span><span class="n">virtual</span><span class="o">:</span><span class="w"> </span><span class="nb">true</span><span class="p">,</span>
+<span class="w">      </span><span class="n">key</span><span class="p">.</span><span class="n">indexer</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">symbol</span><span class="p">.</span><span class="n">is</span><span class="o">-</span><span class="n">system</span><span class="o">:</span><span class="w"> </span><span class="nb">true</span><span class="p">,</span>
+<span class="w">      </span><span class="n">key</span><span class="p">.</span><span class="n">is</span><span class="o">-</span><span class="n">implicit</span><span class="o">:</span><span class="w"> </span><span class="nb">false</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+<h2>四、Index Store 解析</h2>
+<p>接下来我们看看 Index Store 是怎么存储的，如下图所示，主要由两个目录，DataStore(records + units)、UniDB。DataStore 存储了 Clang 编译的产物，是索引原始数据，UniDB 是为了加速查询建立的表，存储了经过处理后的信息。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240225-1200-9.png" alt=""></p>
+<blockquote><p>Index Store 存储路径 Xcode14：~/Library/Developer/Xcode/DerivedData/project-xxx/Index.noindex Xcode13：~/Library/Developer/Xcode/DerivedData/project-xxx/Index</p>
+</blockquote>
+<h3>4.1 DataStore</h3>
+<p>units 记录了源码文件的路径、依赖的文件路径、依赖的 records 文件的路径，它的命名规则是 <code>test.o-hash</code> （Hash of output file path），如果文件名、路径等不变化文件名则不会变化。</p>
+<p>records 记录了每个源码文件由哪些符号构成，它主要由 Symbol、Occurence 两部分构成。它的命名规则是 <code>test.m-hash</code>（Hash of output file path），如果代码变更文件名就会变化。</p>
+<p>我们可以借助 LLVM 的工具 <code>c-index-test</code> 打印它们的数据结构：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">## 打印 unit 数据结构</span>
+<span class="n">c</span><span class="o">-</span><span class="n">index</span><span class="o">-</span><span class="n">test</span><span class="w"> </span><span class="n">core</span><span class="w"> </span><span class="o">--</span><span class="n">print</span><span class="o">-</span><span class="n">unit</span><span class="w"> </span><span class="o">/</span><span class="n">path</span><span class="o">/</span><span class="n">DataStore</span><span class="o">/</span><span class="n">v5</span><span class="o">/</span><span class="n">units</span><span class="o">/</span><span class="n">ModelA</span><span class="p">.</span><span class="n">o</span><span class="mi">-2</span><span class="n">D1ATXD2A198H</span>
+<span class="cp">## 打印 record 数据结构</span>
+<span class="n">c</span><span class="o">-</span><span class="n">index</span><span class="o">-</span><span class="n">test</span><span class="w"> </span><span class="n">core</span><span class="w"> </span><span class="o">--</span><span class="n">print</span><span class="o">-</span><span class="n">record</span><span class="w"> </span><span class="o">/</span><span class="n">records</span><span class="o">/</span><span class="n">D4</span><span class="o">/</span><span class="n">ModelA</span><span class="p">.</span><span class="n">m</span><span class="mi">-1</span><span class="n">S1A5O0O7K4D4</span>
+</code></pre></div>
+<p>接下来看一个实际的案例，有一个源码文件 ModelA.mm，代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#import &quot;ModelA.h&quot;</span>
+<span class="err">@</span><span class="n">implementation</span><span class="w"> </span><span class="n">ModelA</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">sayHello</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">[</span><span class="n">super</span><span class="w"> </span><span class="n">sayHello</span><span class="p">];</span>
+<span class="w">    </span><span class="n">NSLog</span><span class="p">(</span><span class="err">@</span><span class="s">&quot;ModelA %@&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">name</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="err">@</span><span class="n">end</span>
+</code></pre></div>
+<p>Unit 数据结构如下：</p>
+<div class="highlight"><pre><code><span></span><span class="nl">provider</span><span class="p">:</span><span class="w"> </span><span class="n">clang</span><span class="mf">-1400.0.29.102</span>
+<span class="n">is</span><span class="o">-</span><span class="n">system</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span>
+<span class="n">is</span><span class="o">-</span><span class="n">module</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span>
+<span class="n">module</span><span class="o">-</span><span class="n">name</span><span class="o">:</span><span class="w"> </span><span class="o">&lt;</span><span class="n">none</span><span class="o">&gt;</span>
+<span class="n">has</span><span class="o">-</span><span class="n">main</span><span class="o">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="n">main</span><span class="o">-</span><span class="n">path</span><span class="o">:</span><span class="w"> </span><span class="o">/</span><span class="n">path</span><span class="o">/</span><span class="n">Demo2</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">ModelA</span><span class="p">.</span><span class="n">m</span>
+<span class="n">work</span><span class="o">-</span><span class="n">dir</span><span class="o">:</span><span class="w"> </span><span class="o">/</span><span class="n">path</span><span class="o">/</span><span class="n">Demo2</span>
+<span class="n">out</span><span class="o">-</span><span class="n">file</span><span class="o">:</span><span class="w"> </span><span class="o">/</span><span class="n">SourceKitDemo</span><span class="p">.</span><span class="n">build</span><span class="o">/</span><span class="n">Debug</span><span class="o">-</span><span class="n">iphoneos</span><span class="o">/</span><span class="n">Demo</span><span class="p">.</span><span class="n">build</span><span class="o">/</span><span class="n">Objects</span><span class="o">-</span><span class="n">normal</span><span class="o">/</span><span class="n">arm64</span><span class="o">/</span><span class="n">ModelA</span><span class="p">.</span><span class="n">o</span>
+<span class="nl">target</span><span class="p">:</span><span class="w"> </span><span class="n">arm64</span><span class="o">-</span><span class="n">apple</span><span class="o">-</span><span class="n">ios13</span><span class="mf">.0.0</span>
+<span class="n">is</span><span class="o">-</span><span class="n">debug</span><span class="o">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="n">DEPEND</span><span class="w"> </span><span class="n">START</span>
+<span class="n">Unit</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">system</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">Foundation</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="o">/</span><span class="n">Users</span><span class="o">/</span><span class="n">link</span><span class="o">/</span><span class="n">Library</span><span class="o">/</span><span class="n">Developer</span><span class="o">/</span><span class="n">Xcode</span><span class="o">/</span><span class="n">DerivedData</span><span class="o">/</span><span class="n">ModuleCache</span><span class="p">.</span><span class="n">noindex</span><span class="o">/</span><span class="mi">1</span><span class="n">SU4CTGFJJUAV</span><span class="o">/</span><span class="n">Foundation</span><span class="o">-</span><span class="n">A3SOD99KJ0S9</span><span class="p">.</span><span class="n">pcm</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">Foundation</span><span class="o">-</span><span class="n">A3SOD99KJ0S9</span><span class="p">.</span><span class="n">pcm</span><span class="o">-</span><span class="n">BVRSB7PKB109</span>
+<span class="n">Record</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">user</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="o">/</span><span class="n">path</span><span class="o">/</span><span class="n">Demo2</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">ModelA</span><span class="p">.</span><span class="n">m</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">ModelA</span><span class="p">.</span><span class="n">m</span><span class="mi">-1</span><span class="n">S1A5O0O7K4D4</span>
+<span class="n">Record</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">user</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="o">/</span><span class="n">path</span><span class="o">/</span><span class="n">Demo2</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">ModelA</span><span class="p">.</span><span class="n">h</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">ModelA</span><span class="p">.</span><span class="n">h</span><span class="mi">-1</span><span class="n">F980T5AVPZPP</span>
+<span class="n">Record</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">user</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="o">/</span><span class="n">path</span><span class="o">/</span><span class="n">Demo2</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">BaseModel</span><span class="p">.</span><span class="n">h</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">BaseModel</span><span class="p">.</span><span class="n">h</span><span class="o">-</span><span class="n">UWC84R5719GY</span>
+<span class="n">File</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">system</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="o">/</span><span class="n">Applications</span><span class="o">/</span><span class="n">Xcode</span><span class="p">.</span><span class="n">app</span><span class="o">/</span><span class="n">Contents</span><span class="o">/</span><span class="n">Developer</span><span class="o">/</span><span class="n">Platforms</span><span class="o">/</span><span class="n">iPhoneOS</span><span class="p">.</span><span class="n">platform</span><span class="o">/</span><span class="n">Developer</span><span class="o">/</span><span class="n">SDKs</span><span class="o">/</span><span class="n">iPhoneOS16</span><span class="mf">.0</span><span class="p">.</span><span class="n">sdk</span><span class="o">/</span><span class="n">System</span><span class="o">/</span><span class="n">Library</span><span class="o">/</span><span class="n">Frameworks</span><span class="o">/</span><span class="n">Foundation</span><span class="p">.</span><span class="n">framework</span><span class="o">/</span><span class="n">Modules</span><span class="o">/</span><span class="n">module</span><span class="p">.</span><span class="n">modulemap</span>
+<span class="n">File</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">system</span><span class="w"> </span><span class="o">|</span><span class="w"> </span>
+<span class="p">...</span><span class="n">省略部分</span>
+<span class="n">DEPEND</span><span class="w"> </span><span class="n">END</span><span class="w"> </span><span class="p">(</span><span class="mi">40</span><span class="p">)</span>
+<span class="n">INCLUDE</span><span class="w"> </span><span class="n">START</span>
+<span class="o">/</span><span class="n">path</span><span class="o">/</span><span class="n">Demo2</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">ModelA</span><span class="p">.</span><span class="n">m</span><span class="o">:</span><span class="mi">8</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="o">/</span><span class="n">path</span><span class="o">/</span><span class="n">Demo2</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">ModelA</span><span class="p">.</span><span class="n">h</span>
+<span class="o">/</span><span class="n">path</span><span class="o">/</span><span class="n">Demo2</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">ModelA</span><span class="p">.</span><span class="n">h</span><span class="o">:</span><span class="mi">9</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="o">/</span><span class="n">path</span><span class="o">/</span><span class="n">Demo2</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">BaseModel</span><span class="p">.</span><span class="n">h</span>
+<span class="n">INCLUDE</span><span class="w"> </span><span class="n">END</span><span class="w"> </span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+</code></pre></div>
+<p>Record 数据结构如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">class</span><span class="o">/</span><span class="n">ObjC</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">ModelA</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="n">objc</span><span class="p">(</span><span class="n">cs</span><span class="p">)</span><span class="n">ModelA</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="o">&lt;</span><span class="n">no</span><span class="o">-</span><span class="n">cgname</span><span class="o">&gt;</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">Def</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">RelChild</span>
+<span class="n">instance</span><span class="o">-</span><span class="n">method</span><span class="o">/</span><span class="n">ObjC</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">sayHello</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="n">objc</span><span class="p">(</span><span class="n">cs</span><span class="p">)</span><span class="n">ModelA</span><span class="p">(</span><span class="n">im</span><span class="p">)</span><span class="n">sayHello</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="o">&lt;</span><span class="n">no</span><span class="o">-</span><span class="n">cgname</span><span class="o">&gt;</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">Def</span><span class="p">,</span><span class="n">Dyn</span><span class="p">,</span><span class="n">RelChild</span><span class="p">,</span><span class="n">RelOver</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">RelCall</span><span class="p">,</span><span class="n">RelCont</span>
+<span class="n">instance</span><span class="o">-</span><span class="n">method</span><span class="o">/</span><span class="n">ObjC</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">sayHello</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="n">objc</span><span class="p">(</span><span class="n">cs</span><span class="p">)</span><span class="n">BaseModel</span><span class="p">(</span><span class="n">im</span><span class="p">)</span><span class="n">sayHello</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="o">&lt;</span><span class="n">no</span><span class="o">-</span><span class="n">cgname</span><span class="o">&gt;</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">Ref</span><span class="p">,</span><span class="n">Call</span><span class="p">,</span><span class="n">RelCall</span><span class="p">,</span><span class="n">RelCont</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">RelOver</span>
+<span class="n">function</span><span class="o">/</span><span class="n">C</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">NSLog</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="err">@</span><span class="n">F</span><span class="err">@</span><span class="n">NSLog</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="o">&lt;</span><span class="n">no</span><span class="o">-</span><span class="n">cgname</span><span class="o">&gt;</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">Ref</span><span class="p">,</span><span class="n">Call</span><span class="p">,</span><span class="n">RelCall</span><span class="p">,</span><span class="n">RelCont</span><span class="w"> </span><span class="o">-</span><span class="w"> </span>
+<span class="n">instance</span><span class="o">-</span><span class="n">property</span><span class="o">/</span><span class="n">ObjC</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="n">objc</span><span class="p">(</span><span class="n">cs</span><span class="p">)</span><span class="n">BaseModel</span><span class="p">(</span><span class="n">py</span><span class="p">)</span><span class="n">name</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="o">&lt;</span><span class="n">no</span><span class="o">-</span><span class="n">cgname</span><span class="o">&gt;</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">Ref</span><span class="p">,</span><span class="n">RelCont</span><span class="w"> </span><span class="o">-</span><span class="w"> </span>
+<span class="n">instance</span><span class="o">-</span><span class="n">method</span><span class="o">/</span><span class="n">acc</span><span class="o">-</span><span class="n">get</span><span class="o">/</span><span class="n">ObjC</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="n">objc</span><span class="p">(</span><span class="n">cs</span><span class="p">)</span><span class="n">BaseModel</span><span class="p">(</span><span class="n">im</span><span class="p">)</span><span class="n">name</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="o">&lt;</span><span class="n">no</span><span class="o">-</span><span class="n">cgname</span><span class="o">&gt;</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">Ref</span><span class="p">,</span><span class="n">Call</span><span class="p">,</span><span class="n">Dyn</span><span class="p">,</span><span class="n">Impl</span><span class="p">,</span><span class="n">RelRec</span><span class="p">,</span><span class="n">RelCall</span><span class="p">,</span><span class="n">RelCont</span><span class="w"> </span><span class="o">-</span><span class="w"> </span>
+<span class="n">class</span><span class="o">/</span><span class="n">ObjC</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">ModelA</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="n">objc</span><span class="p">(</span><span class="n">cs</span><span class="p">)</span><span class="n">ModelA</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="o">&lt;</span><span class="n">no</span><span class="o">-</span><span class="n">cgname</span><span class="o">&gt;</span><span class="w"> </span><span class="o">|</span><span class="w">  </span><span class="o">-</span><span class="w"> </span><span class="n">RelRec</span>
+<span class="o">------------</span>
+<span class="mi">10</span><span class="o">:</span><span class="mi">17</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">class</span><span class="o">/</span><span class="n">ObjC</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="n">objc</span><span class="p">(</span><span class="n">cs</span><span class="p">)</span><span class="n">ModelA</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">Def</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">rel</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span>
+<span class="mi">12</span><span class="o">:</span><span class="mi">9</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">instance</span><span class="o">-</span><span class="n">method</span><span class="o">/</span><span class="n">ObjC</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="n">objc</span><span class="p">(</span><span class="n">cs</span><span class="p">)</span><span class="n">ModelA</span><span class="p">(</span><span class="n">im</span><span class="p">)</span><span class="n">sayHello</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">Def</span><span class="p">,</span><span class="n">Dyn</span><span class="p">,</span><span class="n">RelChild</span><span class="p">,</span><span class="n">RelOver</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">rel</span><span class="o">:</span><span class="w"> </span><span class="mi">2</span>
+<span class="w">    </span><span class="n">RelChild</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="n">objc</span><span class="p">(</span><span class="n">cs</span><span class="p">)</span><span class="n">ModelA</span>
+<span class="w">    </span><span class="n">RelOver</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="n">objc</span><span class="p">(</span><span class="n">cs</span><span class="p">)</span><span class="n">BaseModel</span><span class="p">(</span><span class="n">im</span><span class="p">)</span><span class="n">sayHello</span>
+<span class="mi">13</span><span class="o">:</span><span class="mi">12</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">instance</span><span class="o">-</span><span class="n">method</span><span class="o">/</span><span class="n">ObjC</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="n">objc</span><span class="p">(</span><span class="n">cs</span><span class="p">)</span><span class="n">BaseModel</span><span class="p">(</span><span class="n">im</span><span class="p">)</span><span class="n">sayHello</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">Ref</span><span class="p">,</span><span class="n">Call</span><span class="p">,</span><span class="n">RelCall</span><span class="p">,</span><span class="n">RelCont</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">rel</span><span class="o">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="w">    </span><span class="n">RelCall</span><span class="p">,</span><span class="n">RelCont</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="n">objc</span><span class="p">(</span><span class="n">cs</span><span class="p">)</span><span class="n">ModelA</span><span class="p">(</span><span class="n">im</span><span class="p">)</span><span class="n">sayHello</span>
+<span class="mi">14</span><span class="o">:</span><span class="mi">5</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">function</span><span class="o">/</span><span class="n">C</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="err">@</span><span class="n">F</span><span class="err">@</span><span class="n">NSLog</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">Ref</span><span class="p">,</span><span class="n">Call</span><span class="p">,</span><span class="n">RelCall</span><span class="p">,</span><span class="n">RelCont</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">rel</span><span class="o">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="w">    </span><span class="n">RelCall</span><span class="p">,</span><span class="n">RelCont</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="n">objc</span><span class="p">(</span><span class="n">cs</span><span class="p">)</span><span class="n">ModelA</span><span class="p">(</span><span class="n">im</span><span class="p">)</span><span class="n">sayHello</span>
+<span class="mi">14</span><span class="o">:</span><span class="mi">30</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">instance</span><span class="o">-</span><span class="n">property</span><span class="o">/</span><span class="n">ObjC</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="n">objc</span><span class="p">(</span><span class="n">cs</span><span class="p">)</span><span class="n">BaseModel</span><span class="p">(</span><span class="n">py</span><span class="p">)</span><span class="n">name</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">Ref</span><span class="p">,</span><span class="n">RelCont</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">rel</span><span class="o">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="w">    </span><span class="n">RelCont</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="n">objc</span><span class="p">(</span><span class="n">cs</span><span class="p">)</span><span class="n">ModelA</span><span class="p">(</span><span class="n">im</span><span class="p">)</span><span class="n">sayHello</span>
+<span class="mi">14</span><span class="o">:</span><span class="mi">30</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">instance</span><span class="o">-</span><span class="n">method</span><span class="o">/</span><span class="n">acc</span><span class="o">-</span><span class="n">get</span><span class="o">/</span><span class="n">ObjC</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="n">objc</span><span class="p">(</span><span class="n">cs</span><span class="p">)</span><span class="n">BaseModel</span><span class="p">(</span><span class="n">im</span><span class="p">)</span><span class="n">name</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">Ref</span><span class="p">,</span><span class="n">Call</span><span class="p">,</span><span class="n">Dyn</span><span class="p">,</span><span class="n">Impl</span><span class="p">,</span><span class="n">RelRec</span><span class="p">,</span><span class="n">RelCall</span><span class="p">,</span><span class="n">RelCont</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">rel</span><span class="o">:</span><span class="w"> </span><span class="mi">2</span>
+<span class="w">    </span><span class="n">RelCall</span><span class="p">,</span><span class="n">RelCont</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="n">objc</span><span class="p">(</span><span class="n">cs</span><span class="p">)</span><span class="n">ModelA</span><span class="p">(</span><span class="n">im</span><span class="p">)</span><span class="n">sayHello</span>
+<span class="w">    </span><span class="n">RelRec</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="n">objc</span><span class="p">(</span><span class="n">cs</span><span class="p">)</span><span class="n">ModelA</span>
+</code></pre></div>
+<h3>4.2 Unit 与 Record 关系</h3>
+<p>下图通过一个案例来展示 Unit 与 Record 之间的关系，有两个源码文件，first.c 依赖了 things.h、header.h、feature.h。second.c 依赖了 header.h、feature.h。在 things.h 定义了一个宏，header.h 会判断是否定义宏展开部分代码。 建立索引完成后，会生成 2 个 Unit 和 6 个 Record 文件，由于编译 first.o、second.o 时宏定义不一样，导致 header.h 展开内容不一样，所以会产生两份 header.h。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240225-1200-10.png" alt=""></p>
+<h3>4.3 Symbol 与 Occurence</h3>
+<p>Record 主要由 Symbol、Occurence 两部分构成，Symbol 由 USR、Language、Kind 等元素构成，每个符号对应一个 Symbol。Occurence 由 Symbol、Location、Roles、Relations 等元素构成，它表示了每个 Symbol 被使用的位置。</p>
+<p>下图展示了一个案例，1 到 12 行定义了类 <code>Polygon</code>，14 到 26 行定义了 <code>Polygon</code> 的子类 <code>RegularPolygon</code>，</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240225-1200-11.png" alt=""></p>
+<p>Record 是怎么表示类定义和子类继承关系的呢？首先图中所示的两个 Symbol，Polygon、RegularPolygon 分别为两个类的符号信息，Symbol 通过 USR（Unified Symbol Resolution）来唯一标识，USR 的官方描述：</p>
+<blockquote><p>USR: A Unified Symbol Resolution is a string that identifies a particular entity (function, class, variable, etc.) within a program. USRs can be compared across translation units to determine, e.g., when references in one translation refer to an entity defined in another translation unit.</p>
+</blockquote>
+<p>这两个 Symbol 一共出现了 3 次，对应 3 个 Occurrence，其中 Polygon 出现了两次，一次是出现在 1:7 位置，角色是类定义，第二次出现在 14:31，角色是被继承；RegularPolygon 出现了一次位置在 14:7，角色是类定义。</p>
+<h3>4.4 UniDB</h3>
+<p>了解了 Unit 和 Record 的数据结构和用途，我们就可以推导出 Xcode 实现一些功能的原理，例如有这么一个场景，我们需要找到 Polygon 的所有子类，可以这么实现：</p>
+<ol>
+<li>遍历所有 Record 的 Occurrence，找到 Roles 为 RelationBaseOf 对应 Symbol 是 Polygon 的 Occurrence；</li>
+<li>通过步骤一找到的 Occurrence 就可以找到所有定义 Polygon 子类的 Occurrence，从而找到 Polygon 子类的 Symbol；</li>
+<li>最后结合 Unit 可以定位到我们要找的子类的行号、列号；</li>
+</ol>
+<p>但是线性遍历的效率较低，Xcode 为了优化查询效率引入了 LMDB 来存储中间数据结构。LMDB 全称为 Lightning Memory-Mapped Database，是高性能的内存映射型数据库，它有以下优点：</p>
+<ol>
+<li>数据读写速度快，基于内存映射方式访问文件；</li>
+<li>使用轻量，文件结构简单，包含一个数据文件和一个锁文件，数据随意复制，读写引用代码很小的 LMDB 库即可完成</li>
+</ol>
+<p>它由两个文件组成：data.mdb、lock.mdb，为了探索 Xcode 在 LMDB 里存储了什么数据，我们可以用 python 的 lmdb 库解析。</p>
+<div class="highlight"><pre><code><span></span><span class="n">import</span><span class="w"> </span><span class="n">lmdb</span>
+<span class="k">if</span><span class="w"> </span><span class="n">__name__</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="err">&#39;</span><span class="n">__main__</span><span class="err">&#39;</span><span class="o">:</span>
+<span class="w">        </span><span class="n">env</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">lmdb</span><span class="p">.</span><span class="n">open</span><span class="p">(</span><span class="s">&quot;path&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">max_dbs</span><span class="o">=</span><span class="mi">14</span><span class="p">)</span>
+<span class="w">    </span><span class="n">txn</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">env</span><span class="p">.</span><span class="n">begin</span><span class="p">()</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="n">key</span><span class="p">,</span><span class="w"> </span><span class="n">value</span><span class="w"> </span><span class="n">in</span><span class="w"> </span><span class="n">txn</span><span class="p">.</span><span class="n">cursor</span><span class="p">()</span><span class="o">:</span>
+<span class="w">        </span><span class="n">print</span><span class="p">(</span><span class="n">key</span><span class="p">,</span><span class="w"> </span><span class="n">value</span><span class="p">)</span>
+</code></pre></div>
+<p>解析结果如下图所示，可以看到它由多个表构成，很多表下还有子表。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240225-1200-12.png" alt=""></p>
+<p>还是用刚刚的案例：查询 Polygon 的所有子类，Xcode 通过下面的 key-value 表来加速查询过程：</p>
+<ol>
+<li>建立一个 key-value 表，key 是 USR，value 是 USR 出现过的 Record、Roles；</li>
+<li>计算 Polygon 的 USR，通过 USR 查找到它出现过的 Records，筛选 Roles 包含 RelationBaseOf，定位到哪些 Record 内包含 Polygon 子类定义；</li>
+<li>在 Record 文件中可以查询具体子类的信息；</li>
+</ol>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240225-1200-13.png" alt=""></p>
+<p>还有一些其它用的表：</p>
+<ol>
+<li>Search symbols by name：记录了 Symbol Name 和 USR 的对应关系，方便通过关键词搜索代码，Open Quickly 就是基于该表实现的；</li>
+<li>Remove data from unreferenced records：记录了 Record 文件被哪些 Unit 使用，如果没有 Unit 使用了，该 Record 就会被清理；</li>
+<li>Units to re-index when header changes：记录了头文件被哪些 unit 使用，用于查询头文件变化后，哪些 unit 需要重新生成索引数据；</li>
+</ol>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240225-1200-14.png" alt=""></p>
+<h2>五、Index Store 跨设备共享</h2>
+<h3>5.1 方案可行性验证</h3>
+<p>了解 Index Store 的数据结构之后，不难发现只要源码、编译选项一致，产生的 Record 其实是一样的，企微工程完整进行一次代码索引耗时 24 分钟，我们是否可以提前预生成 Unit、Record，开发直接下载产物加速代码索引。</p>
+<p>我们先用一个 Demo 工程来验证我们的猜想，工程很简单，结构如下所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240225-1200-15.png" alt=""></p>
+<p>我们将同样的工程拷贝两份，分别为：Demo1、Demo2，最终目标是在 Demo1 工程可以复用 Demo2 工程生成的 Index Store。</p>
+<p>首先在 Demo2 的 <code>Other C Flags</code> 配置编译参数 <code>-index-store-path /path/DataStore</code> ，在编译时生成 DataStore 数据到指定目录。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240225-1200-16.png" alt=""></p>
+<p>首先删除 Demo1 的 DataStore、UniDB 目录，将 Demo2 产生的 DataStore 拷贝到 Demo1 的 DerivedData 目录</p>
+<blockquote><p>DataStore 存放路径：~/Library/Developer/Xcode/DerivedData/Demo1-xxx/Index.noindex</p>
+</blockquote>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240225-1200-17.png" alt=""></p>
+<p>在命令行输入以下命令打开 Xcode Index 日志，可以确认 Xcode 对哪些文件进行了索引。</p>
+<div class="highlight"><pre><code><span></span><span class="n">defaults</span><span class="w"> </span><span class="n">write</span><span class="w"> </span><span class="n">com</span><span class="p">.</span><span class="n">apple</span><span class="p">.</span><span class="n">dt</span><span class="p">.</span><span class="n">Xcode</span><span class="w"> </span><span class="n">IDEIndexShowLog</span><span class="w"> </span><span class="o">-</span><span class="kt">bool</span><span class="w"> </span><span class="n">YES</span>
+</code></pre></div>
+<p>打开 Demo1 工程，观察日志发现还是会重新建立索引，说明复用失败。查看 Demo2 Unit 信息，可以看到它存储了 Demo2 工程的绝对路径信息，要替换成 Demo1 工程的路径。</p>
+<div class="highlight"><pre><code><span></span><span class="nl">provider</span><span class="p">:</span><span class="w"> </span><span class="n">clang</span><span class="mf">-1400.0.29.102</span>
+<span class="n">is</span><span class="o">-</span><span class="n">system</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span>
+<span class="n">is</span><span class="o">-</span><span class="n">module</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span>
+<span class="n">module</span><span class="o">-</span><span class="n">name</span><span class="o">:</span><span class="w"> </span><span class="o">&lt;</span><span class="n">none</span><span class="o">&gt;</span>
+<span class="n">has</span><span class="o">-</span><span class="n">main</span><span class="o">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="n">main</span><span class="o">-</span><span class="n">path</span><span class="o">:</span><span class="w"> </span><span class="o">/</span><span class="n">path</span><span class="o">/</span><span class="n">Demo2</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">ModelA</span><span class="p">.</span><span class="n">m</span>
+<span class="n">work</span><span class="o">-</span><span class="n">dir</span><span class="o">:</span><span class="w"> </span><span class="o">/</span><span class="n">path</span><span class="o">/</span><span class="n">Demo2</span>
+<span class="p">...</span>
+</code></pre></div>
+<p>可以使用 <code>index-import</code> 工具（<a href="https://github.com/MobileNativeFoundation/index-import">https://github.com/MobileNativeFoundation/index-import</a>）来完成替换操作。</p>
+<div class="highlight"><pre><code><span></span><span class="n">index</span><span class="o">-</span><span class="n">import</span><span class="w"> </span>\
+<span class="w">    </span><span class="o">-</span><span class="n">remap</span><span class="w"> </span><span class="s">&quot;/path/Demo2=/path/Demo&quot;</span><span class="w"> </span>\
+<span class="w">    </span><span class="s">&quot;/path/DataStore&quot;</span><span class="w"> </span>\
+<span class="w">    </span><span class="s">&quot;/path/DataStore2&quot;</span>
+</code></pre></div>
+<p>替换后再次查看 unit 信息，可以看到路径已经被修改。再次替换 Demo1 工程 DataStore，发现复用成功。</p>
+<div class="highlight"><pre><code><span></span><span class="nl">provider</span><span class="p">:</span><span class="w"> </span><span class="n">clang</span><span class="mf">-1400.0.29.102</span>
+<span class="n">is</span><span class="o">-</span><span class="n">system</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span>
+<span class="n">is</span><span class="o">-</span><span class="n">module</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span>
+<span class="n">module</span><span class="o">-</span><span class="n">name</span><span class="o">:</span><span class="w"> </span><span class="o">&lt;</span><span class="n">none</span><span class="o">&gt;</span>
+<span class="n">has</span><span class="o">-</span><span class="n">main</span><span class="o">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="n">main</span><span class="o">-</span><span class="n">path</span><span class="o">:</span><span class="w"> </span><span class="o">/</span><span class="n">path</span><span class="o">/</span><span class="n">Demo1</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">ModelA</span><span class="p">.</span><span class="n">m</span>
+<span class="n">work</span><span class="o">-</span><span class="n">dir</span><span class="o">:</span><span class="w"> </span><span class="o">/</span><span class="n">path</span><span class="o">/</span><span class="n">Demo1</span>
+</code></pre></div>
+<h3>5.2 企微落地方案</h3>
+<p>在 Demo 工程我们验证了方案可行，于是想通过这种方式提升开发本地索引效率，要让方案顺利落地，需要让整个流程自动化，并且让开发同学使用尽量简单，最终我们落地的流程如下图所示：</p>
+<ol>
+<li>在流水线上使用构建机自动构建最新代码的索引，构建完成后上传到存储服务；</li>
+<li>开发在本机触发更新索引，从存储服务下载最新的索引数据；</li>
+<li>清理历史索引数据，进行 remap 操作，将路径修改为本地路径，然后替换 DerivedData 的 DataStore；</li>
+</ol>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240225-1200-18.png" alt=""></p>
+<p>经过测试，在 M1 Max 机器上，使用索引数据缓存后，企微工程建立全量索引耗时从 24 分钟优化到了 1.5 分钟。</p>
+<h2>参考资料</h2>
+<ol>
+<li><a href="https://www.youtube.com/watch?v=jGJhnIT-D2M">https://www.youtube.com/watch?v=jGJhnIT-D2M</a></li>
+<li><a href="https://github.com/bazel-ios/rules_ios/blob/master/docs/index_while_building.md">https://github.com/bazel-ios/rules_ios/blob/master/docs/index_while_building.md</a></li>
+<li><a href="https://github.com/MobileNativeFoundation/index-import">https://github.com/MobileNativeFoundation/index-import</a></li>
+<li><a href="https://levelup.gitconnected.com/uncovering-xcode-indexing-8b3f3ff82551">https://levelup.gitconnected.com/uncovering-xcode-indexing-8b3f3ff82551</a></li>
+</ol>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "一文读懂Xcode代码索引原理.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

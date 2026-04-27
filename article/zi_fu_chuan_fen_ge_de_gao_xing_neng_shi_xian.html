@@ -1,0 +1,489 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>字符串分割的高性能实现 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="字符串分割的高性能实现,C/C++,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="C++小练习：字符串分割的高性能实现" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>字符串分割的高性能实现</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2023-10-31 10:48
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://km.woa.com/articles/show/589739' target='blank'>C++小练习：字符串分割的高性能实现</a></p></h4>
+<h2>1、背景</h2>
+<p>字符串按照分隔符拆成多个子串在日常工作中很常见，譬如：后台服务对配置的解析、模型服务对输入特征的拆分、磁盘格式索引文件转内存格式等等，通常最简单的实现是使用boost 库：</p>
+<div class="highlight"><pre><code><span></span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&gt;</span><span class="w"> </span><span class="n">output_tokens</span><span class="p">;</span>
+<span class="n">boost</span><span class="o">::</span><span class="n">split</span><span class="p">(</span><span class="n">output_tokens</span><span class="p">,</span><span class="w"> </span><span class="n">input_sentence</span><span class="p">,</span><span class="w"> </span><span class="n">boost</span><span class="o">::</span><span class="n">is_any_of</span><span class="p">(</span><span class="s">&quot; &quot;</span><span class="p">),</span><span class="w"> </span><span class="n">boost</span><span class="o">::</span><span class="n">token_compress_off</span><span class="p">);</span>
+</code></pre></div>
+<p>这是最简单也是性能最差的写法。在一些频繁做字符串拆分的场景下，部分开发者会发现用 string 会触发字符串拷贝的代价，于是改为自己使用 <code>string_view</code>，这会显著提高性能，除此之外，在使用 <code>string_view</code> 的基础上仍然有两个点需要特别注意：</p>
+<ol>
+<li>尽可能的减少分割时的计算量</li>
+<li>使用 SIMD 指令</li>
+</ol>
+<p>本文将对此做细致分析。</p>
+<h2>2、目标</h2>
+<p>针对单字符分割和任意字符分割两类场景，本文以代码案例为主，讲解如何写出高性能的字符串分割函数。在考虑高性能的情况下，最基本的要求是字符串分割不应触发拷贝，因此本文实现的多个字符串分割函数，都基于 <code>string_view</code> 消除了拷贝，在此基础上再进行性能优化分析。本文两类场景的函数签名如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">&gt;</span><span class="w"> </span><span class="n">SplitString</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">input</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="n">delimiter</span><span class="p">);</span>
+<span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">&gt;</span><span class="w"> </span><span class="n">SplitString</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">input</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">delimiters</span><span class="p">);</span>
+</code></pre></div>
+<h2>3、高性能实现</h2>
+<p>单字符分割、任意字符分割这两类场景分开介绍。</p>
+<h3>3.1、单字符分割字符串的 5 个版本</h3>
+<p>下面提供 5 种单字符分割字符串的实现，然后对其性能做总结分析。</p>
+<h4>（1）版本1-简单版本</h4>
+<p>单字符分割是最常见的场景，譬如用于日志解析、特征解析等，首先我们考虑基于遍历自行实现，实现如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">&gt;</span><span class="w"> </span><span class="n">SplitStringV1</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">input</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="n">delimiter</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">&gt;</span><span class="w"> </span><span class="n">tokens</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">start_pos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">size</span><span class="p">();</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">input</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">delimiter</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">size</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">tokens</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">input</span><span class="p">.</span><span class="n">data</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">start_pos</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="p">);</span>
+<span class="w">        </span><span class="n">size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="n">start_pos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="o">++</span><span class="n">size</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">size</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">tokens</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">input</span><span class="p">.</span><span class="n">data</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">start_pos</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">tokens</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这样的实现很好理解：遍历 input 字符串，发现有分隔符 delimiter 时，考虑生成结果子字符串，生成子字符串需要知道起点和长度，因此定义了 <code>token_start</code> 和 size 两个临时变量，并在遍历过程中维护这两临时变量。但仔细观察这个函数的实现，可以发现有三个变量：<code>token_start</code>、size、i，但通常来说，定位一个子字符串只需要两个变量（或者叫游标）：start、end 即可，这里存在性能优化空间。</p>
+<h4>（2）版本2-优化版本</h4>
+<p>基于两个游标的实现代码：</p>
+<div class="highlight"><pre><code><span></span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">&gt;</span><span class="w"> </span><span class="n">SplitStringV2</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">input</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="n">delimiter</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">&gt;</span><span class="w"> </span><span class="n">tokens</span><span class="p">;</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">token_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">data</span><span class="p">();</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">token_start</span><span class="p">;</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">end_pos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">data</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">size</span><span class="p">();</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(;</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">end_pos</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">p</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">p</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">delimiter</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">token_start</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">tokens</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">token_start</span><span class="p">,</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">token_start</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="n">token_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">      </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">token_start</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">tokens</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">token_start</span><span class="p">,</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">token_start</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">tokens</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这里 <code>token_start</code> 作为子串的起始位置，p 作为递增游标，上一份代码的 size 可以通过 <code>p - token_start</code> 获得。这个实现少维护 size 变量，因此性能更好。</p>
+<h4>（3）版本3-STL 版本</h4>
+<p>有时候，我们也会考虑使用标准库的 <code>find_first_of</code> 函数实现，代码量更少，代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">&gt;</span><span class="w"> </span><span class="n">SplitStringV3</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">input</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="n">delimiter</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">&gt;</span><span class="w"> </span><span class="n">tokens</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">token_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">token_start</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">size</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">token_end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">find_first_of</span><span class="p">(</span><span class="n">delimiter</span><span class="p">,</span><span class="w"> </span><span class="n">token_start</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">token_end</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">token_start</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">tokens</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">input</span><span class="p">.</span><span class="n">substr</span><span class="p">(</span><span class="n">token_start</span><span class="p">,</span><span class="w"> </span><span class="n">token_end</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">token_start</span><span class="p">));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">token_end</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">::</span><span class="n">npos</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">token_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">token_end</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">tokens</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>但上述实现，性能比我们自己实现遍历的 SplitStringV2 版本性能要差，毕竟 <code>find_first_of</code>的每次查找都要重新初始化起始位置，相比自己实现遍历有性能浪费。具体性能数据见总结部分。</p>
+<h4>（4）版本4-SIMD 最佳版本</h4>
+<p>字符串分割很重要的一步是逐个字符对字符串做比较，是否可以并行比较呢？是可以的，SIMD 指令可以加速这里的比较，当前 123 平台的所有机器都已支持AVX2，但还未普遍支持 AVX512，下面以 AVX2 为例。代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 编译：g++ split_string_by_char.cc -mavx2 -o split_string_by_char</span>
+<span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">&gt;</span><span class="w"> </span><span class="n">SplitStrintV4</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">input</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="n">delimiter</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">input</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">32</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">SplitStringV2</span><span class="p">(</span><span class="n">input</span><span class="p">,</span><span class="w"> </span><span class="n">delimiter</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">&gt;</span><span class="w"> </span><span class="n">tokens</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">end_pos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">5</span><span class="p">;</span>
+<span class="w">  </span><span class="n">__m256i</span><span class="w"> </span><span class="n">cmp_a</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_mm256_set1_epi8</span><span class="p">(</span><span class="n">delimiter</span><span class="p">);</span><span class="w">  </span><span class="c1">// 8bit的分隔重复32次扩充到256bit</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">data</span><span class="p">();</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">end_pos</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">last_lead_zero</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w">  </span><span class="c1">// 上一轮256bit（32个字符）处理后剩下的未拷贝进结果集的字符串个数</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">end</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">__m256i</span><span class="w"> </span><span class="n">cmp_b</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_mm256_loadu_si256</span><span class="p">(</span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="n">__m256i</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">p</span><span class="p">));</span><span class="w">  </span><span class="c1">// 32个字符加载进内存</span>
+<span class="w">    </span><span class="n">__m256i</span><span class="w"> </span><span class="n">cmp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_mm256_cmpeq_epi8</span><span class="p">(</span><span class="n">cmp_a</span><span class="p">,</span><span class="w"> </span><span class="n">cmp_b</span><span class="p">);</span><span class="w">  </span><span class="c1">// 256 bit 一次比较</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">mask</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_mm256_movemask_epi8</span><span class="p">(</span><span class="n">cmp</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">mask</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">last_lead_zero</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">32</span><span class="p">;</span>
+<span class="w">      </span><span class="n">p</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">32</span><span class="p">;</span>
+<span class="w">      </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 记录本次的头部0个数，注：mask的序和字符串序是相反的，所以这里头部的0对应字符串尾部的不匹配字符</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">lead_zero</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__builtin_clz</span><span class="p">(</span><span class="n">mask</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// 补上一次未拷贝的字符串</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">tail_zero</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__builtin_ctz</span><span class="p">(</span><span class="n">mask</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">last_lead_zero</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">tail_zero</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">tokens</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">p</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">last_lead_zero</span><span class="p">,</span><span class="w"> </span><span class="n">last_lead_zero</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">tail_zero</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">mask</span><span class="w"> </span><span class="o">&gt;&gt;=</span><span class="w"> </span><span class="p">(</span><span class="n">tail_zero</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span>
+<span class="w">    </span><span class="n">p</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">tail_zero</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// 补完，继续处理</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">mask</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">tail_zero</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__builtin_ctz</span><span class="p">(</span><span class="n">mask</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">tail_zero</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">tokens</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="w"> </span><span class="n">tail_zero</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="n">mask</span><span class="w"> </span><span class="o">&gt;&gt;=</span><span class="w"> </span><span class="p">(</span><span class="n">tail_zero</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span>
+<span class="w">      </span><span class="n">p</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">tail_zero</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="n">last_lead_zero</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">lead_zero</span><span class="p">;</span>
+<span class="w">    </span><span class="n">p</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">lead_zero</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 256 bit（32字节） 对齐之后剩下的部分</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">token_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">data</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">end_pos</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">last_lead_zero</span><span class="p">;</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">pp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">token_start</span><span class="p">;</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">sentence_end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">data</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">size</span><span class="p">();</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(;</span><span class="w"> </span><span class="n">pp</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">sentence_end</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">pp</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">pp</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">delimiter</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">pp</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">token_start</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">tokens</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">token_start</span><span class="p">,</span><span class="w"> </span><span class="n">pp</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">token_start</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="n">token_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pp</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">      </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">pp</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">token_start</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">tokens</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">token_start</span><span class="p">,</span><span class="w"> </span><span class="n">pp</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">token_start</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">tokens</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这里使用了 5 个关键的函数：</p>
+<ol>
+<li><code>_mm256_loadu_si256</code>，用于加载 256 位（32 字节）数据</li>
+<li><code>_mm256_cmpeq_epi8</code>，用于比较 256 位数据</li>
+<li><code>_mm256_movemask_epi8</code>，用于将比较的结果压缩到 32 位中，一位代表一个字节</li>
+<li><code>__builtin_clz</code>，获取头部的 0 bit 个数</li>
+<li><code>__builtin_ctz</code>，获取尾部的 0 bit 个数</li>
+</ol>
+<p>同时在代码实现上需要考虑多个细节点：</p>
+<ol>
+<li>待比较字符串小于 32 字节，此时不需要用 SIMD 指令，直接逐个字符比较</li>
+<li>在每一次比较结果的处理时，除了逐个判断 32 个字符中的分隔符之外，还要考虑上一轮 32 字节比较的尾部有部分字符没有生成结果子字符串，要和本轮次的头部字符串拼成一个子字符串</li>
+<li>多轮的 SIMD 指令比较都完成后，考虑：（1）末尾轮有部分字符没有进入结果子字符串；（2）部分字符没有对齐 32 字节，有尾巴部分的数据需要逐个字符比较垂类</li>
+</ol>
+<p>要考虑好这些细节点，代码很复杂，考虑到 SIMD 指令是单条指令，而我们代码中对 SIMD 比较完成后的 32 bit（4字节）的逐个比较是由多个单条指令组成，因此尝试让 SIMD 指令多算一些，而减少对 32 bit 的轮询判断，代码见下一节。</p>
+<h4>（5）版本5- SIMD 较差版本</h4>
+<p>减少 SIMD 比较指令执行完后的 32 bit 遍历处理，改成每次 SIMD 比较指令完成后，只取头一个分隔符的结果。代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// 编译：g++ split_string_by_char.cc -mavx2 -o split_string_by_char</span>
+<span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">&gt;</span><span class="w"> </span><span class="n">SplitStrintV5</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">input</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="n">delimiter</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">input</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">32</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">SplitStringV2</span><span class="p">(</span><span class="n">input</span><span class="p">,</span><span class="w"> </span><span class="n">delimiter</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">&gt;</span><span class="w"> </span><span class="n">tokens</span><span class="p">;</span>
+<span class="w">  </span><span class="n">__m256i</span><span class="w"> </span><span class="n">cmp_a</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_mm256_set1_epi8</span><span class="p">(</span><span class="n">delimiter</span><span class="p">);</span><span class="w">  </span><span class="c1">// 8bit的分隔重复32次扩充到256bit</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">data</span><span class="p">();</span>
+<span class="w">  </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">last_lead_zero</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w">  </span><span class="c1">// 上一轮256bit（32个字符）处理后剩下的未拷贝进结果集的字符串个数</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">32</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">data</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">size</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">__m256i</span><span class="w"> </span><span class="n">cmp_b</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_mm256_loadu_si256</span><span class="p">(</span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="n">__m256i</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">p</span><span class="p">));</span><span class="w">  </span><span class="c1">// 32个字符加载进内存</span>
+<span class="w">    </span><span class="n">__m256i</span><span class="w"> </span><span class="n">cmp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_mm256_cmpeq_epi8</span><span class="p">(</span><span class="n">cmp_a</span><span class="p">,</span><span class="w"> </span><span class="n">cmp_b</span><span class="p">);</span><span class="w">  </span><span class="c1">// 256 bit 一次比较</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">mask</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_mm256_movemask_epi8</span><span class="p">(</span><span class="n">cmp</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">mask</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">last_lead_zero</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">32</span><span class="p">;</span>
+<span class="w">      </span><span class="n">p</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">32</span><span class="p">;</span>
+<span class="w">      </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 补上一次未拷贝的字符串</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">tail_zero</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__builtin_ctz</span><span class="p">(</span><span class="n">mask</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">last_lead_zero</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">tail_zero</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">tokens</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">p</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">last_lead_zero</span><span class="p">,</span><span class="w"> </span><span class="n">last_lead_zero</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">tail_zero</span><span class="p">);</span>
+<span class="w">      </span><span class="n">last_lead_zero</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">p</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">tail_zero</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 不足 256 bit（32字节）部分</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">token_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">last_lead_zero</span><span class="p">;</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">sentence_end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">data</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">size</span><span class="p">();</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(;</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">sentence_end</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">p</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">p</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">delimiter</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">token_start</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">tokens</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">token_start</span><span class="p">,</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">token_start</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="n">token_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">      </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">token_start</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">tokens</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">token_start</span><span class="p">,</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">token_start</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">tokens</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>很不幸，这份代码在长文本下评测发现本代码性能较差。</p>
+<h4>（6）性能对比</h4>
+<p>以上 5 个版本的代码，再加上 google 开源的 absl 基础库 absl::StrSplit 函数，对 2K+ 的长文本循环 10000 次做压测，在个人开发机上，性能对比如下：</p>
+<table style="margin:0px auto;"><tbody><tr><td style="text-align:left;"><span style="font-size:14px;">性能对比</span></td>
+<td >V1-简单版</span></td>
+<td >V2-优化版</span></td>
+<td >V3-stl版本</span></td>
+<td >V4-SIMD最佳版本</span></td>
+<td >V5-SIMD较差版本</span></td>
+<td >absl</span></td>
+</tr><tr><td >耗时(ms)</span></td>
+<td >552</span></td>
+<td ><strong>426</strong></span></td>
+<td >508</span></td>
+<td ><strong>413</strong></span></td>
+<td >501</span></td>
+<td >709</span></td>
+</tr></tbody></table><p>可以看到，absl::StrSplit 性能最差，可能是因为其会返回空字符串导致。性能最佳的是需要复杂处理的 SIMD 版本，性能次之的是采用两个游标的非SIMD 版本，两者的差异非常小。考虑到 SIMD 实现的复杂性，且性能收益较小，在实际业务场景中，可以在复杂性和性能收益之间做个权衡。</p>
+<h3>3.2、任意字符分割字符串</h3>
+<p>任意字符分割字符串也很常见，譬如有些日志支持空格、tab、逗号任意一个作为分隔符。和 3.1 章的单字符分割类似，提供三种实现，并对其性能做总结。</p>
+<h4>（1）STL 版</h4>
+<div class="highlight"><pre><code><span></span><span class="c1">// 不使用 SIMD，使用标准库的查找，是性能最差的方式</span>
+<span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">&gt;</span><span class="w"> </span><span class="n">SplitString</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">input</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">delimiters</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">delimiters</span><span class="p">.</span><span class="n">empty</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="n">input</span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">&gt;</span><span class="w"> </span><span class="n">tokens</span><span class="p">;</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">::</span><span class="n">size_type</span><span class="w"> </span><span class="n">token_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">find_first_not_of</span><span class="p">(</span><span class="n">delimiters</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">::</span><span class="n">size_type</span><span class="w"> </span><span class="n">token_end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">find_first_of</span><span class="p">(</span><span class="n">delimiters</span><span class="p">,</span><span class="w"> </span><span class="n">token_start</span><span class="p">);</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">token_start</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">::</span><span class="n">npos</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">token_end</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">::</span><span class="n">npos</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">tokens</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">input</span><span class="p">.</span><span class="n">substr</span><span class="p">(</span><span class="n">token_start</span><span class="p">,</span><span class="w"> </span><span class="n">token_end</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">token_start</span><span class="p">));</span>
+<span class="w">    </span><span class="n">token_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">find_first_not_of</span><span class="p">(</span><span class="n">delimiters</span><span class="p">,</span><span class="w"> </span><span class="n">token_end</span><span class="p">);</span>
+<span class="w">    </span><span class="n">token_end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">find_first_of</span><span class="p">(</span><span class="n">delimiters</span><span class="p">,</span><span class="w"> </span><span class="n">token_start</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">tokens</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这个实现和 3.1 里的 stl 版本类似，代码量比较少，性能比较差。</p>
+<h4>（2）自行遍历版</h4>
+<div class="highlight"><pre><code><span></span><span class="c1">// 不使用 SIMD，使用遍历，是非 SIMD 模式下性能最好的方式</span>
+<span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">&gt;</span><span class="w"> </span><span class="n">SplitStringV2</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">input</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">delimiters</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">delimiters</span><span class="p">.</span><span class="n">empty</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="n">input</span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">&gt;</span><span class="w"> </span><span class="n">tokens</span><span class="p">;</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">token_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">data</span><span class="p">();</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">token_start</span><span class="p">;</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">end_pos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">data</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">size</span><span class="p">();</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(;</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">end_pos</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">p</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">match_delimiter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="w"> </span><span class="n">delimiter</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">delimiters</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">p</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">delimiter</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">match_delimiter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">match_delimiter</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">token_start</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">tokens</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">token_start</span><span class="p">,</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">token_start</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="n">token_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">      </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">token_start</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">tokens</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">token_start</span><span class="p">,</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">token_start</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">tokens</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>自行遍历（不使用 STL 函数）版本，和 3.1 里的版本 2 代码很像，性能也是非 SIMD 模式下最好的。</p>
+<h4>（3）SIMD 版本</h4>
+<div class="highlight"><pre><code><span></span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">&gt;</span><span class="w"> </span><span class="n">SplitStringWithSimd256</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">input</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="w"> </span><span class="n">delimiters</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">delimiters</span><span class="p">.</span><span class="n">empty</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="n">input</span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">input</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">32</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">SplitStringV2</span><span class="p">(</span><span class="n">input</span><span class="p">,</span><span class="w"> </span><span class="n">delimiters</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string_view</span><span class="o">&gt;</span><span class="w"> </span><span class="n">tokens</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">end_pos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">5</span><span class="p">;</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">data</span><span class="p">();</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">end_pos</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">last_lead_zero</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w">  </span><span class="c1">// 上一轮256bit（32个字符）处理后剩下的未拷贝进结果集的字符串个数</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">end</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">__m256i</span><span class="w"> </span><span class="n">cmp_a</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_mm256_loadu_si256</span><span class="p">(</span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="n">__m256i</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">p</span><span class="p">));</span><span class="w">  </span><span class="c1">// 32个字符加载进内存</span>
+<span class="w">    </span><span class="n">__m256i</span><span class="w"> </span><span class="n">cmp_result_a</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_mm256_cmpeq_epi8</span><span class="p">(</span><span class="n">cmp_a</span><span class="p">,</span><span class="w"> </span><span class="n">_mm256_set1_epi8</span><span class="p">(</span><span class="n">delimiters</span><span class="p">[</span><span class="mi">0</span><span class="p">]));</span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">delimiters</span><span class="p">.</span><span class="n">size</span><span class="p">();</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">__m256i</span><span class="w"> </span><span class="n">cmp_result_b</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_mm256_cmpeq_epi8</span><span class="p">(</span><span class="n">cmp_a</span><span class="p">,</span><span class="w"> </span><span class="n">_mm256_set1_epi8</span><span class="p">(</span><span class="n">delimiters</span><span class="p">[</span><span class="n">i</span><span class="p">]));</span>
+<span class="w">      </span><span class="n">cmp_result_a</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_mm256_or_si256</span><span class="p">(</span><span class="n">cmp_result_a</span><span class="p">,</span><span class="w"> </span><span class="n">cmp_result_b</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">mask</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_mm256_movemask_epi8</span><span class="p">(</span><span class="n">cmp_result_a</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">mask</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">last_lead_zero</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">32</span><span class="p">;</span>
+<span class="w">      </span><span class="n">p</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">32</span><span class="p">;</span>
+<span class="w">      </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 记录本次的头部0个数，注：mask的序和字符串序是相反的，所以这里头部的0对应字符串尾部的不匹配字符</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">lead_zero</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__builtin_clz</span><span class="p">(</span><span class="n">mask</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// 补上一次未拷贝的字符串</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">tail_zero</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__builtin_ctz</span><span class="p">(</span><span class="n">mask</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">last_lead_zero</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">tail_zero</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">tokens</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">p</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">last_lead_zero</span><span class="p">,</span><span class="w"> </span><span class="n">last_lead_zero</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">tail_zero</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">mask</span><span class="w"> </span><span class="o">&gt;&gt;=</span><span class="w"> </span><span class="p">(</span><span class="n">tail_zero</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span>
+<span class="w">    </span><span class="n">p</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">tail_zero</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// 补完，继续处理</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">mask</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">tail_zero</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__builtin_ctz</span><span class="p">(</span><span class="n">mask</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">tail_zero</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">tokens</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="w"> </span><span class="n">tail_zero</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="n">mask</span><span class="w"> </span><span class="o">&gt;&gt;=</span><span class="w"> </span><span class="p">(</span><span class="n">tail_zero</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span>
+<span class="w">      </span><span class="n">p</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">tail_zero</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="n">last_lead_zero</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">lead_zero</span><span class="p">;</span>
+<span class="w">    </span><span class="n">p</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">lead_zero</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 256 bit（32字节） 对齐之后剩下的部分</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">token_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">data</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">end_pos</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">last_lead_zero</span><span class="p">;</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">pp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">token_start</span><span class="p">;</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">sentence_end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">data</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">input</span><span class="p">.</span><span class="n">size</span><span class="p">();</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(;</span><span class="w"> </span><span class="n">pp</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">sentence_end</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">pp</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">match_delimiter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="w"> </span><span class="n">delimiter</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">delimiters</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">pp</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">delimiter</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">match_delimiter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">match_delimiter</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">pp</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">token_start</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">tokens</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">token_start</span><span class="p">,</span><span class="w"> </span><span class="n">pp</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">token_start</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="n">token_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pp</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">      </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">pp</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">token_start</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">tokens</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">token_start</span><span class="p">,</span><span class="w"> </span><span class="n">pp</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">token_start</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">tokens</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>处理任意分隔符和处理单分隔符大部分代码类似，只有两部分有变化：</p>
+<ol>
+<li>一个待比较字符串和多个分隔符比较得到的多个 mask 码，使用 _mm256_or_si256 做合并</li>
+<li>非 SIMD 部分使用 for 循环遍历判断多个分隔符</li>
+</ol>
+<h4>（4）性能对比</h4>
+<p>以上 3 个版本的代码，再加上 google 开源的 absl 基础库 absl::StrSplit 函数，对 2K+ 的长文本循环 10000
+次做压测，在个人开发机上，性能对比如下：</p>
+<table style="margin:0px auto;"><tbody><tr><td >性能对比</td>
+<td >stl版</td>
+<td >自行遍历版</td>
+<td >SIMD版</td>
+<td >absl</td>
+</tr><tr><td >耗时(ms)</td>
+<td >768</td>
+<td >658</td>
+<td ><strong>480</strong></td>
+<td >1054</td>
+</tr></tbody></table><p>absl::StrSplit 性能最差，SIMD 版本有多个分隔符的场景下，性能提升非常明显，SIMD 应用代码的高复杂度付出是值得的。</p>
+<h2>4、示例代码仓库</h2>
+<p><a href="../file/zip/split_string_with_simd.zip">split_string_with_simd.zip</a></p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "字符串分割的高性能实现.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

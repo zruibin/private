@@ -1,0 +1,801 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>Redis多线程架构的演进 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="Redis多线程架构的演进,数据库,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="Redis多线程架构的演进" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>Redis多线程架构的演进</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2022-06-15 21:20
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_shu_ju_ku.html' class='article_tag'>数据库</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://juejin.cn/post/6949929673615179789' target='blank'>Redis多线程架构的演进</a></p></h4>
+<p>Redis真的是单线程吗？网上有很多关于这个问题的讨论，得出的结论也几乎是一致的。本文在讨论这个问题之前，先定义好问题中“单线程”的概念边界：</p>
+<ul>
+<li>1.单线程指的是“核心网络模型”</li>
+<li>2.单线程指的是Redis整个服务端架构的设计</li>
+</ul>
+<p>对于边界1，那么答案是肯定的，在Redis v6.0 版本以前，Redis的网络模型一直都是单线程模式的，即使到了v6.0版本，所有客户端命令的执行依然是在主线程上完成的；对于边界2，答案是否定的，Redis从发布之出就有两个<code>BIO(background I/O service)</code>线程来异步处理aof持久化、关闭文件的任务，在Redis v4.0版本中又添加了一个BIO线程，将比较耗时的命令异步化，到了Redis v6.0，Redis核心的网络模型也被改造成了多线程。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220615-2120-1.png" alt="Redis核心网络模型的重要节点发展历史.png"></p>
+<p>在概念边界2的限制下，我们可以得出结论：<strong>Redis从来都不是单线程工作的</strong>！在Redis发布近十年来，在系统架构演进过程中都遇到了哪些问题？作者antirez对这些问题是怎样思考的？采取了什么样的方案来改进？探索这些问题对于开发者的成长很有价值，也是本文的写作目的，笔者会结合相关源码与读者共同解答这些问题。</p>
+<h2>1. Redis基础架构设计</h2>
+<p>性能优异的服务离不开好的架构设计，Redis使用 <code>I/O multiplexing</code> 实现了单线程接收海量客户端请求；通过单线程<code>Reactor</code>模型实现了高性能的事件处理；基于条件变量实现的生产者消费者模型构建了自己的<code>BIO系统</code>。本节先简单介绍一下这些从Redis诞生以来就一直使用的基础架构设计。</p>
+<h3>1.1 Redis对 I/O multiplexing 的封装</h3>
+<p>I/O multiplexing 指的是多个网络socket I/O 复用同一个线程，它解决了<a href="http://www.kegel.com/c10k.html">C10K</a>的问题。Redis将不同的 I/O 多路复用函数封装成相同的 API 提供给上层使用，仅仅以单线程处理网络I/O，就可以为成千上万的客户端提供服务。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220615-2120-2.png" alt="Redis对网络I_O复用的封装.jpg"></p>
+<p>Redis的I/O多路复用模块提供的API:</p>
+<div class="highlight"><pre><code><span></span><span class="c1">//下面的方法不同版本的redis在src目录下的ae_epoll.c、ae_evport.c、ae_kqueue.c、ae_select.c代码文件中都有实现</span>
+<span class="k">static</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">aeApiCreate</span><span class="p">(</span><span class="n">aeEventLoop</span><span class="w"> </span><span class="o">*</span><span class="n">eventLoop</span><span class="p">)</span>
+<span class="k">static</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">aeApiResize</span><span class="p">(</span><span class="n">aeEventLoop</span><span class="w"> </span><span class="o">*</span><span class="n">eventLoop</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">setsize</span><span class="p">)</span>
+<span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">aeApiFree</span><span class="p">(</span><span class="n">aeEventLoop</span><span class="w"> </span><span class="o">*</span><span class="n">eventLoop</span><span class="p">)</span>
+<span class="k">static</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">aeApiAddEvent</span><span class="p">(</span><span class="n">aeEventLoop</span><span class="w"> </span><span class="o">*</span><span class="n">eventLoop</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">fd</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">mask</span><span class="p">)</span>
+<span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">aeApiDelEvent</span><span class="p">(</span><span class="n">aeEventLoop</span><span class="w"> </span><span class="o">*</span><span class="n">eventLoop</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">fd</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">mask</span><span class="p">)</span>
+<span class="k">static</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">aeApiPoll</span><span class="p">(</span><span class="n">aeEventLoop</span><span class="w"> </span><span class="o">*</span><span class="n">eventLoop</span><span class="p">,</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">timeval</span><span class="w"> </span><span class="o">*</span><span class="n">tvp</span><span class="p">)</span>
+</code></pre></div>
+<p>Redis可以在多个平台上运行，所以会通过宏定义，根据编译平台的不同，选择不同的I/O多路复用函数作为子模块，提供给上层接口做封装。</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/*下面代码在Redis不同版本的ae.c源码文件中均包含</span>
+<span class="cm"> *Include the best multiplexing layer supported by this system.</span>
+<span class="cm"> * The following should be ordered by performances, descending. */</span>
+<span class="cp">#ifdef HAVE_EVPORT</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;ae_evport.c&quot;</span>
+<span class="cp">#else</span>
+<span class="w">    </span><span class="cp">#ifdef HAVE_EPOLL</span>
+<span class="w">    </span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;ae_epoll.c&quot;</span>
+<span class="w">    </span><span class="cp">#else</span>
+<span class="w">        </span><span class="cp">#ifdef HAVE_KQUEUE</span>
+<span class="w">        </span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;ae_kqueue.c&quot;</span>
+<span class="w">        </span><span class="cp">#else</span>
+<span class="w">        </span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;ae_select.c&quot;</span>
+<span class="w">        </span><span class="cp">#endif</span>
+<span class="w">    </span><span class="cp">#endif</span>
+<span class="cp">#endif</span>
+</code></pre></div>
+<p>Redis 会优先选择时间复杂度为 𝑂(1) 的 I/O 多路复用函数作为底层实现，包括 Solaries 10 中的 evport、Linux 中的 epoll 和 macOS/FreeBSD 中的 kqueue。select 函数是作为 POSIX
+标准中的系统调用，在不同版本的操作系统上都会实现，所以将其作为保底方案。</p>
+<h3>1.2 单线程事件循环 —— Reactor网络模型</h3>
+<p>在服务端架构设计中，Reactor是一种基于事件驱动的设计模式。目前Linux平台上主流的高性能网络库/框架中，大都采用这种设计模式，比如netty、libevent、libev、ACE，POE(Perl)、Twisted(Python)等。</p>
+<p>Reactor 模式本质上指的是使用 <code>I/O 多路复用(I/O multiplexing) + 非阻塞 I/O(non-blocking I/O)</code>的模式。通常设置一个主线程负责做 event-loop 事件循环和 I/O 读写，通过 select/poll/epoll_wait 等系统调用监听I/O 事件，业务逻辑提交给其他工作线程去做。而所谓『非阻塞 I/O』的核心思想是指避免阻塞在 read() 或者 write() 或者其他的 I/O 系统调用上，这样可以最大限度的复用 event-loop 线程，让一个线程能服务于多个 sockets。在 Reactor 模式中，I/O 线程只能阻塞在 I/O multiplexing 函数上（select/poll/epoll_wait）。单线程的Reactor网络模型是这样的：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220615-2120-3.png" alt="单线程Reactor模型.jpg"></p>
+<p>Redis在 6.0 版本之前的单事件循环模型，实际上就是一个非常经典的Reactor模型，看下图：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220615-2120-4.png" alt="Redis实现的单线程Reactor模式.jpg"></p>
+<p>Redis的单线程Reactor大体是这样工作的：“I/O 多路复用模块”会监听多个 FD ，当这些FD产生，accept，read，write 或 close 的文件事件。会向“文件事件分发器（dispatcher）”传送事件。文件事件分发器（dispatcher）在收到事件之后，会根据事件的类型将事件分发给对应的 handler。后边的章节我们会对这一过程再展开详述。</p>
+<h3>1.3 基于条件变量实现的生产者消费者模型</h3>
+<p>我们前边提到，Redis从发版之出就自带BIO线程，主要用来处理一些比较耗时的后台任务。redis使用的是一个基于条件变量实现生产者消费者模型来设计BIO系统。Redis使用C语言开发，我们以Linux C为例子，先来介绍一下锁与共享变量的使用方法，再总结一下这一模型的设计。</p>
+<h4>1.3.1 锁</h4>
+<p>多线程情况下， 锁的使用主要涉及以下5个函数， 它们都包含在pthread.h头文件中。</p>
+<div class="highlight"><pre><code><span></span><span class="n">pthread_mutex_init</span><span class="p">(</span><span class="n">pthread_mutex_t</span><span class="w"> </span><span class="n">mutex</span><span class="p">,</span><span class="k">const</span><span class="w"> </span><span class="n">pthread_mutexattr_t</span><span class="w"> </span><span class="n">attr</span><span class="p">)</span>
+<span class="n">pthread_mutex_lock</span><span class="p">(</span><span class="n">pthread_mutex_t</span><span class="w"> </span><span class="o">*</span><span class="n">mutex</span><span class="p">)</span>
+<span class="n">pthread_mutex_trylock</span><span class="p">(</span><span class="n">pthread_mutex_t</span><span class="w"> </span><span class="o">*</span><span class="n">mutex</span><span class="p">)</span>
+<span class="n">pthread_mutex_unlock</span><span class="p">(</span><span class="n">pthread_mutex_t</span><span class="w"> </span><span class="o">*</span><span class="n">mutex</span><span class="p">)</span>
+<span class="n">pthread_mutex_destroy</span><span class="p">(</span><span class="n">pthread_mutex_t</span><span class="w"> </span><span class="o">*</span><span class="n">mutex</span><span class="p">)</span>
+</code></pre></div>
+<p>其中锁变量类型为<code>pthread_mutex_t</code>，锁的使用包含三个步骤:锁的初始化、加锁、以及释放锁。</p>
+<h4>1.3.2 锁初始化</h4>
+<p><code>pthread_mutex_init</code>该函数用于锁的初始化，要使用锁，首先需要声明一个<code>pthread_mutex_t</code>变量,然后用该函数进行初始化，如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">pthread_mutex_t</span><span class="w"> </span><span class="n">mutex</span><span class="p">;</span>
+<span class="n">pthread_mutex_init</span><span class="p">(</span><span class="o">&amp;</span><span class="n">mutex</span><span class="p">,</span><span class="nb">NULL</span><span class="p">);</span>
+</code></pre></div>
+<p>初始化的时候，第二个参数可以用于设置锁的性质。经过这一步, 我们完成了锁的初始化，在第二个参数设置NULL的时候，一个线程加锁，另外一个线程再执行加锁操作就会阻塞，直到另外的线程释放锁。</p>
+<h4>1.3.3 加锁、释放锁与资源回收</h4>
+<p><code>pthread_mutex_lock</code>与<code>pthread_mutex_trylock</code>这两个函数可以用于加锁。这两个函数都完成了加锁的功能，在获得了变量初始化后的mutex以后，直接调用函数即可完成加锁功能。其中第一个函数在另外一个线程已经获得锁的情况下会一直阻塞，而第二个函数则会直接返回，不会阻塞。</p>
+<p><code>pthread_mutex_unlock</code>函数可以用于释放锁。</p>
+<p><code>pthread_mutex_destroy</code>函数用于释放资源，在使用<code>pthread_mutex_init</code>函数进行锁初始化的情况下，使用结束以后，需要使用该函数释放资源。</p>
+<h4>1.3.4 共享变量</h4>
+<p>共享变量应用于这样一种场景：一个线程先对某一条件进行判断，如果条件不满足则进入等待，条件满足的时候，该线程被通知条件满足，继续执行任务。共享变量涉及的函数有如下6个：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">int</span><span class="w"> </span><span class="n">pthread_cond_init</span><span class="p">(</span><span class="n">pthread_cond_t</span><span class="w"> </span><span class="n">cond</span><span class="p">,</span><span class="w"> </span><span class="n">pthread_condattr_t</span><span class="w"> </span><span class="n">cond_attr</span><span class="p">)</span>
+<span class="kt">int</span><span class="w"> </span><span class="n">pthread_cond_wait</span><span class="p">(</span><span class="n">pthread_cond_t</span><span class="w"> </span><span class="n">cond</span><span class="p">,</span><span class="w"> </span><span class="n">pthread_mutex_t</span><span class="w"> </span><span class="n">mutex</span><span class="p">)</span>
+<span class="kt">int</span><span class="w"> </span><span class="n">pthread_cond_signal</span><span class="p">(</span><span class="n">pthread_cond_t</span><span class="w"> </span><span class="o">*</span><span class="n">cond</span><span class="p">)</span>
+<span class="kt">int</span><span class="w"> </span><span class="n">pthread_cond_broadcast</span><span class="p">(</span><span class="n">pthread_cond_t</span><span class="w"> </span><span class="o">*</span><span class="n">cond</span><span class="p">)</span>
+<span class="kt">int</span><span class="w"> </span><span class="n">pthread_cond_timedwait</span><span class="p">(</span><span class="n">pthread_cond_t</span><span class="w"> </span><span class="n">cond</span><span class="p">,</span><span class="w"> </span><span class="n">pthread_mutex_t</span><span class="w"> </span><span class="n">mutex</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">timespec</span><span class="w"> </span><span class="o">*</span><span class="n">abstime</span><span class="p">)</span>
+</code></pre></div>
+<h4>1.3.5 共享变量的初始化与条件等待</h4>
+<p>共享变量使用函数<code>pthread_cond_init</code>初始化，要使用条件变量，首先要声明一个<code>pthread_cond_t</code>变量，然后用该函数进行初始化。第二个参数使用NULL，可以进行具体的参数设置。初始化完成后，需要通过<code>pthread_cond_wait</code>或<code>pthread_cond_timedwait</code>等待条件成立；在条件不满足的时候，函数进入等待；当条件满足的时候，该函数会停止等待，继续执行。该函数的第二个参数是<code>pthread_mutex_t</code>类型，这是因为在条件判断的时候，需要先进行加锁来防止出现错误，在执行改函数前需要主动对这个变量执行加锁操作，<strong>进入这个函数以后，其内部会对mutex进行解锁操作；而函数执行完以后(也就是停止阻塞以后)，又会重新加锁</strong>，具体原因在介绍完本组函数以后进行说明，其中第二个函数可以指定等待的时间，而不是一直在阻塞。</p>
+<h4>1.3.6 条件满足通知</h4>
+<p>上面说到，在条件不满足的时候，一个线程会调用<code>pthread_cond_wait</code>函数阻塞等待；而此时如果其他线程检查到条件满足，则可以调用<code>pthread_cond_signal</code>、<code>pthread_cond_broadcast</code>，让处于等待状态的线程重新开始执行。当有多个线程在等待的时候，则可以调用<code>pthread_cond_signal</code>函数会唤醒其中一个线程，而<code>pthread_cond_broadcast</code>函数会唤醒所有的等待的线程。</p>
+<h4>1.3.7 实现生产者消费者模型的正确方法</h4>
+<p>上边我们介绍完了锁与共享变量的基本函数，接下来介绍这两套函数配合使用的一个常见场景：有两个线程，其中一个线程先对一个条件进行检查，这个检查动作需要先加锁。如果条件成立则执行操作，否则阻塞等待，直到条件成立这个线程才会被通知继续执行；另一个线程先做加锁处理，然后置条件为真，并通知其他等待的线程条件已经满足，可以继续执行。</p>
+<p>上面说在检查共享变量的时候要加锁，其原因通过以下伪代码来说明。</p>
+<p>第一种情况：</p>
+<div class="highlight"><pre><code><span></span><span class="n">线程1</span>
+<span class="nf">pthread_mutex_lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">mutex</span><span class="p">);</span><span class="w"> </span>
+<span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">condition</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">FALSE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">pthread_cond_wait</span><span class="p">(</span><span class="o">&amp;</span><span class="n">cond</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">mutex</span><span class="p">);</span><span class="w"> </span>
+<span class="p">}</span>
+<span class="n">pthread_mutex_unlock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">mutex</span><span class="p">);</span>
+
+<span class="n">线程2</span>
+<span class="n">condition</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="n">pthread_cond_signal</span><span class="p">(</span><span class="o">&amp;</span><span class="n">cond</span><span class="p">);</span>
+</code></pre></div>
+<p>可以看到线程1先检查一个条件是否成立，在不成立的情况下就调用wait函数进行等待，而在这之前，先对这步过程进行了加锁操作。线程2则是把条件设置为true(假设其通过某种方式知道了这个时候该条件应当为true)，然后用<code>pthread_cond_signal</code>函数通知线程1停止阻塞继续执行。上面的程序在多个线程并发执行的时候有如下的问题： 如果线程1先判断，发现条件不满足，准备进入等待，在这个时候线程2中条件被置为真，且发送通知，然后线程1才阻塞等待，这样的话线程1错过了一次通知，导致其在条件满足的情况下依然在阻塞等待。</p>
+<div class="highlight"><pre><code><span></span><span class="n">线程1</span><span class="w">                               </span><span class="n">线程2</span>
+<span class="n">pthread_mutex_lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">mutex</span><span class="p">);</span>
+<span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">condition</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">FALSE</span><span class="p">)</span>
+<span class="w">                                      </span><span class="n">condition</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w">                                      </span><span class="n">pthread_cond_signal</span><span class="p">(</span><span class="o">&amp;</span><span class="n">cond</span><span class="p">);</span>
+<span class="n">pthread_cond_wait</span><span class="p">(</span><span class="o">&amp;</span><span class="n">cond</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">mutex</span><span class="p">);</span>
+</code></pre></div>
+<p>为了解决上面说的问题，对程序进行了如下的改进。通过线程2的加锁操作，避免了这样的问题。这也解释了为什么<code>pthread_cond_wait</code>函数在进入以后要进行解锁操作，如果起不解锁，那么线程2在进行条件置为true的操作就没有办法执行，因为线程1在进入等待之前已经对这个变量加锁了，这样线程1会一直等待，而线程2也会等待，导致死锁。</p>
+<div class="highlight"><pre><code><span></span><span class="n">线程1</span><span class="w">                                       </span><span class="n">线程2</span>
+<span class="n">pthread_mutex_lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">mutex</span><span class="p">);</span><span class="w">           </span><span class="n">pthread_mutex_lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">mutex</span><span class="p">);</span>
+<span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">condition</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">FALSE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">          </span><span class="n">condition</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TRUE</span><span class="p">;</span>
+<span class="w"> </span><span class="n">pthread_cond_wait</span><span class="p">(</span><span class="o">&amp;</span><span class="n">cond</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">mutex</span><span class="p">);</span><span class="w">    </span><span class="n">pthread_cond_signal</span><span class="p">(</span><span class="o">&amp;</span><span class="n">cond</span><span class="p">);</span>
+<span class="p">}</span><span class="w">                                     </span><span class="n">pthread_mutex_unlock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">mutex</span><span class="p">);</span>
+<span class="n">pthread_mutex_unlock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">mutex</span><span class="p">);</span>
+</code></pre></div>
+<p>因为wait重新执行的时候需要再次加锁，所以上面的<code>pthread_cond_signal</code>调用以后，必须释放锁才能够完成wait。另外，也可以先解锁，然后调用<code>pthread_cond_signal</code>，这两种写法都是正确的。虽然共享变量的访问一般需要加锁，但在这个场景下不加锁造成的竞争不会产生错误，只是会造成线程调度效率上的问题，所以也可以这么写，但是一般推荐标准的写法。</p>
+<p>对于条件变量，其基本的使用场景是，某些线程对条件进行判断，如果不满足条件，就进入等待状态。在进行条件判断之前，先进行加锁操作，另外一些线程则是负责对条件赋值为真，然后通知等待的线程继续执行，线程被唤醒后，继续进入判断的环节以及后续的操作。</p>
+<p>总结一下本节介绍的基于条件变量实现的生产者消费者模型：A类线程依次执行加锁、检查(条件不成立则等待,知道成立再次进入检查阶段)、执行、解锁；同时B类线程依次执行加锁、条件置为真、通知、解锁。</p>
+<h2>2. Redis核心网络模型架构的演进</h2>
+<p>从Redis的发展历史我们可以看出，其核心网络模型经历了从单线程到多线程的演进。那么Redis单线程的I/O模型是怎样实现的？单线程存在什么问题？Redis 的多线程的I/O又是怎样实现的？为什么要这么做? 本节我们就来探索这些问题。</p>
+<h3>2.1 单线程I/O的工作流程</h3>
+<p>我们前边有说到，Redis在 6.0 版本以前，其核心的网络模型一直是单线程Reactor模型，利用 epoll/select/kqueue 等多路复用技术，在单线程的事件循环中不断去处理客户端请求，最后回写响应数据到客户端：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220615-2120-5.png" alt="Redis单Reactor模型.jpg"></p>
+<p>我们先来学习一下redis网络模型中的一些核心概念：</p>
+<ul>
+<li><code>client</code> ：客户端对象，Redis 是典型的 CS 架构（Client &lt;---&gt; Server），客户端通过 socket 与服务端建立网络通道然后发送请求命令，服务端执行请求的命令并回复。Redis 使用结构体 client 存储客户端的所有相关信息，包括但不限于封装的套接字连接 <code>*conn</code>，当前选择的数据库指针 <code>*db</code>，读入缓冲区 querybuf，写出缓冲区 buf，写出数据链表 reply等。</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="cm">/* client对象在redis不同版本的redis.h中均有定义</span>
+<span class="cm"> * With multiplexing we need to take per-client state.</span>
+<span class="cm"> * Clients are taken in a linked list. */</span>
+<span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">client</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">id</span><span class="p">;</span><span class="w">            </span><span class="cm">/* Client incremental unique ID. */</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">fd</span><span class="p">;</span><span class="w">                 </span><span class="cm">/* Client socket. */</span>
+<span class="w">    </span><span class="n">redisDb</span><span class="w"> </span><span class="o">*</span><span class="n">db</span><span class="p">;</span><span class="w">            </span><span class="cm">/* Pointer to currently SELECTed DB. */</span>
+<span class="w">    </span><span class="n">robj</span><span class="w"> </span><span class="o">*</span><span class="n">name</span><span class="p">;</span><span class="w">             </span><span class="cm">/* As set by CLIENT SETNAME. */</span>
+<span class="w">    </span><span class="n">sds</span><span class="w"> </span><span class="n">querybuf</span><span class="p">;</span><span class="w">           </span><span class="cm">/* Buffer we use to accumulate client queries. */</span>
+<span class="w">    </span><span class="kt">size_t</span><span class="w"> </span><span class="n">qb_pos</span><span class="p">;</span><span class="w">          </span><span class="cm">/* The position we have read in querybuf. */</span>
+<span class="w">    </span><span class="n">sds</span><span class="w"> </span><span class="n">pending_querybuf</span><span class="p">;</span><span class="w">   </span><span class="cm">/* If this client is flagged as master, this buffer</span>
+<span class="cm">                               represents the yet not applied portion of the</span>
+<span class="cm">                               replication stream that we are receiving from</span>
+<span class="cm">                               the master. */</span>
+<span class="w">    </span><span class="kt">size_t</span><span class="w"> </span><span class="n">querybuf_peak</span><span class="p">;</span><span class="w">   </span><span class="cm">/* Recent (100ms or more) peak of querybuf size. */</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">;</span><span class="w">               </span><span class="cm">/* Num of arguments of current command. */</span>
+<span class="w">    </span><span class="n">robj</span><span class="w"> </span><span class="o">**</span><span class="n">argv</span><span class="p">;</span><span class="w">            </span><span class="cm">/* Arguments of current command. */</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">redisCommand</span><span class="w"> </span><span class="o">*</span><span class="n">cmd</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">lastcmd</span><span class="p">;</span><span class="w">  </span><span class="cm">/* Last command executed. */</span>
+<span class="w">    </span><span class="p">......</span><span class="w"> </span><span class="c1">//此处省略很多其它的属性</span>
+<span class="w">    </span><span class="cm">/* Response buffer */</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">bufpos</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="n">buf</span><span class="p">[</span><span class="n">PROTO_REPLY_CHUNK_BYTES</span><span class="p">];</span>
+<span class="p">}</span><span class="w"> </span><span class="n">client</span><span class="p">;</span>
+</code></pre></div>
+<ul>
+<li><code>aeApiPoll</code>：这个我们前边提到过，I/O 多路复用 API，是基于 <code>epoll_wait/select/kevent</code> 等系统调用的封装，监听等待读写事件触发，然后处理，它是事件循环（Event Loop）中的核心函数，是事件驱动得以运行的基础。</li>
+<li><code>acceptTcpHandler</code>：连接应答处理器，底层使用系统调用 accept 接受来自客户端的新连接，并为新连接注册绑定命令读取处理器，以备后续处理新的客户端 TCP 连接；除了这个处理器，还有对应的 acceptUnixHandler 负责处理 Unix Domain Socket 以及 acceptTLSHandler 负责处理 TLS 加密连接。</li>
+<li><code>readQueryFromClient</code>：命令读取处理器，解析并执行客户端的请求命令。</li>
+<li><code>beforeSleep</code>：事件循环中进入 aeApiPoll 等待事件到来之前会执行的函数，其中包含一些日常的任务，比如把 client-&gt;buf 或者 client-&gt;reply （后面会解释为什么这里需要两个缓冲区）中的响应写回到客户端，持久化 AOF 缓冲区的数据到磁盘等，相对应的还有一个 afterSleep 函数，在 aeApiPoll 之后执行。</li>
+<li><code>sendReplyToClient</code>：命令回复处理器，当一次事件循环之后写出缓冲区中还有数据残留，则这个处理器会被注册绑定到相应的连接上，等连接触发写就绪事件时，它会将写出缓冲区剩余的数据回写到客户端。</li>
+</ul>
+<p>然后，笔者再描述一下Redis服务端的工作流程：</p>
+<ol>
+<li>Redis 服务器启动，开启主线程事件循环（Event Loop），注册 acceptTcpHandler 连接应答处理器到用户配置的监听端口对应的文件描述符，等待新连接到来；</li>
+<li>客户端和服务端建立网络连接；</li>
+<li>acceptTcpHandler 被调用，主线程使用 AE 的 API 将 readQueryFromClient 命令读取处理器绑定到新连接对应的文件描述符上，并初始化一个 client 绑定这个客户端连接；</li>
+<li>客户端发送请求命令，触发读就绪事件，主线程调用 readQueryFromClient 通过 socket 读取客户端发送过来的命令存入 client-&gt;querybuf 读入缓冲区；</li>
+<li>接着调用 processInputBuffer，在其中使用 processInlineBuffer 或者 processMultibulkBuffer 根据 Redis 协议解析命令，最后调用 processCommand 执行命令；</li>
+<li>根据请求命令的类型（SET, GET, DEL, EXEC 等），分配相应的命令执行器去执行，最后调用 addReply 函数族的一系列函数将响应数据写入到对应 client 的写出缓冲区：client-&gt;buf 或者 client-&gt;reply ，client-&gt;buf 是首选的写出缓冲区，固定大小 16KB，一般来说可以缓冲足够多的响应数据，但是如果客户端在时间窗口内需要响应的数据非常大，那么则会自动切换到 client-&gt;reply 链表上去，使用链表理论上能够保存无限大的数据（受限于机器的物理内存），最后把 client 添加进一个 LIFO 队列 <code>clients_pending_write</code>；</li>
+<li>在事件循环（Event Loop）中，主线程执行 beforeSleep --&gt; handleClientsWithPendingWrites，遍历 <code>clients_pending_write</code> 队列，调用 writeToClient 把 client 的写出缓冲区里的数据回写到客户端，如果写出缓冲区还有数据遗留，则注册 sendReplyToClient 命令回复处理器到该连接的写就绪事件，等待客户端可写时在事件循环中再继续回写残余的响应数据。</li>
+</ol>
+<p>笔者整理了一张更详细的redis单线程I/O的工作流程图，感兴趣的读者可以结合上边的描述过程看一下。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220615-2120-6.png" alt="Redis单线程I_O工作流程图.jpg"></p>
+<h3>2.2 单线程存在什么问题？</h3>
+<p>我们都知道单线程的程序是无法利用服务器的多核CPU的，那么早期的Redis为什么还要使用单线程呢？我们不妨先看一下<code>Redis</code>官方给出的<a href="https://redis.io/topics/faq">FAQ</a></p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220615-2120-7.png" alt="redis为什么要使用单线程.png"></p>
+<p>核心意思是：CPU并不是制约<code>Redis</code>性能表现的瓶颈所在，更多情况下是受到内存大小和网络I/O的限制，所以Redis核心网络模型使用单线程并没有什么问题，如果你想要使用服务的多核CPU，可以在一台服务器上启动多个实例或者采用分片集群的方式。</p>
+<p>通过上一节对Redis单线程Reactor模型的分析，我们知道Redis的I/O线程除了在等待事件，其它的事件都是非阻塞的，没有浪费任何的CPU时间，这也是 Redis能够提供高性能服务的原因。不过除了我们上边说的只能使用一个CPU核心外，这个模型还有两个缺陷：</p>
+<ul>
+<li>在value比较大的情况下会阻塞Redis服务</li>
+<li>QPS难以更上一层楼</li>
+</ul>
+<p>redis主线程的时间主要消耗在两个地方：逻辑计算的消耗(CPU计算)和由于同步IO(I/O multiplexing)的读写，内核态和用户态相互拷贝数据。当value很大时，Redis的瓶颈会首先出现在同步IO这里，如果能有多个线程来分担这部分压力，那Redis的QPS还能有大幅度的提升，这就是Redis多线程网络模型的实现思路。</p>
+<h3>2.3 Redis多线程网络模型的实现</h3>
+<p>Redis在 6.0 版本之后正式在核心网络模型中引入了多线程，前边我们提到Redis在 6.0版本之前，使用的是经典的单线程Reactor模型，通常来说，单线程的Reactor架构模型在引入了多线程之后会进化为 Multi-Reactors模式，它的工作模式是这样的：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220615-2120-8.png" alt="多线程Reactor模型.jpg"></p>
+<p>区别于单 Reactor 模式，这种模式不再是单线程的事件循环，而是有多个线程（Sub Reactors）各自维护一个独立的事件循环，由 Main Reactor 负责接收新连接并分发给 Sub Reactors 去独立处理，最后 Sub Reactors 回写响应给客户端。</p>
+<p>Multiple Reactors 模式通常也可以等同于 Master-Workers 模式，比如 Nginx 和 Memcached 等就是采用这种多线程模型，虽然不同的项目实现细节略有区别，但总体来说模式是一致的。</p>
+<h4>2.3.1 多线程网络模型的工作流程</h4>
+<p>Redis 虽然也实现了多线程，但是却不是标准的 Multi-Reactors/Master-Workers 模式，我们先看一下 Redis 多线程网络模型的总体设计：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220615-2120-9.png" alt="Redis多线程IO工作原理图.jpg"></p>
+<ol>
+<li>Redis 服务器启动，开启主线程事件循环（Event Loop），注册 acceptTcpHandler 连接应答处理器到用户配置的监听端口对应的文件描述符，等待新连接到来；</li>
+<li>客户端和服务端建立网络连接；</li>
+<li>acceptTcpHandler 被调用，主线程使用 AE 的 API 将 readQueryFromClient 命令读取处理器绑定到新连接对应的文件描述符上，并初始化一个 client 绑定这个客户端连接；</li>
+<li>客户端发送请求命令，触发读就绪事件，服务端主线程不会通过 socket 去读取客户端的请求命令，而是先将 client 放入一个 LIFO 队列 <code>clients_pending_read</code>；</li>
+<li>在事件循环（Event Loop）中，主线程执行 beforeSleep --&gt;handleClientsWithPendingReadsUsingThreads，利用 Round-Robin 轮询负载均衡策略，把 clients_pending_read队列中的连接均匀地分配给 I/O 线程各自的本地 FIFO 任务队列 io_threads_list[id] 和主线程自己，I/O 线程通过 socket 读取客户端的请求命令，存入 client-&gt;querybuf 并解析第一个命令，但不执行命令，主线程忙轮询，等待所有 I/O 线程完成读取任务；</li>
+<li>主线程和所有 I/O 线程都完成了读取任务，主线程结束忙轮询，遍历 <code>clients_pending_read</code> 队列，执行所有客户端连接的请求命令，先调用 processCommandAndResetClient 执行第一条已经解析好的命令，然后调用 processInputBuffer 解析并执行客户端连接的所有命令，在其中使用 processInlineBuffer 或者 processMultibulkBuffer 根据 Redis 协议解析命令，最后调用 processCommand 执行命令；</li>
+<li>根据请求命令的类型（SET, GET, DEL, EXEC 等），分配相应的命令执行器去执行，最后调用 addReply 函数族的一系列函数将响应数据写入到对应 client 的写出缓冲区：client-&gt;buf 或者 client-&gt;reply ，client-&gt;buf 是首选的写出缓冲区，固定大小 16KB，一般来说可以缓冲足够多的响应数据，但是如果客户端在时间窗口内需要响应的数据非常大，那么则会自动切换到 client-&gt;reply 链表上去，使用链表理论上能够保存无限大的数据（受限于机器的物理内存），最后把 client 添加进一个 LIFO 队列 <code>clients_pending_write；</code></li>
+<li>在事件循环（Event Loop）中，主线程执行 beforeSleep --&gt; handleClientsWithPendingWritesUsingThreads，利用 Round-Robin 轮询负载均衡策略，把 <code>clients_pending_write</code> 队列中的连接均匀地分配给 I/O 线程各自的本地 FIFO 任务队列 <code>io_threads_list[id]</code> 和主线程自己，I/O 线程通过调用 writeToClient 把 client 的写出缓冲区里的数据回写到客户端，主线程忙轮询，等待所有 I/O 线程完成写出任务；</li>
+<li>主线程和所有 I/O 线程都完成了写出任务， 主线程结束忙轮询，遍历 <code>clients_pending_write</code> 队列，如果 client 的写出缓冲区还有数据遗留，则注册 sendReplyToClient 到该连接的写就绪事件，等待客户端可写时在事件循环中再继续回写残余的响应数据。</li>
+</ol>
+<p>这里大部分逻辑和之前的单线程模型是一致的，变动的地方仅仅是把读取客户端请求命令和回写响应数据的逻辑异步化了，交给 I/O 线程去完成，这里需要特别注意的一点是：<strong>I/O 线程仅仅是读取和解析客户端命令而不会真正去执行命令，客户端命令的执行最终还是要回到主线程上完成。</strong></p>
+<p>笔者也同样整理了一张更详细的redis多线程I/O的工作流程图，感兴趣的读者可以结合上边的描述过程看一下。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220615-2120-10.png" alt="Redis多线程I_O工作流程图.jpg"></p>
+<h4>2.3.2 多线程I/O源码剖析</h4>
+<p>接下里，笔者以 Redis v6.0.1版本，对多线程I/O实现中比较重要的源码进行分析。</p>
+<p>先来看多线程的初始化：</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/* Initialize the data structures needed for threaded I/O. */</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">initThreadedIO</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">io_threads_active</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="cm">/* We start with threads not active. */</span>
+<span class="w">    </span><span class="c1">//如果只配置了一个线程,则所有的I/O放到主线程上执行</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="n">io_threads_num</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">//最多配置的线程数量不超过128</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="n">io_threads_num</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">IO_THREADS_MAX_NUM</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">serverLog</span><span class="p">(</span><span class="n">LL_WARNING</span><span class="p">,</span><span class="s">&quot;Fatal: too many I/O threads configured. &quot;</span>
+<span class="w">                             </span><span class="s">&quot;The maximum number is %d.&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">IO_THREADS_MAX_NUM</span><span class="p">);</span>
+<span class="w">        </span><span class="n">exit</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">//启动线程，线程数量为配置中的线程数</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">server</span><span class="p">.</span><span class="n">io_threads_num</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">   </span>
+<span class="w">        </span><span class="c1">//创建I/O线程的本地任务队列</span>
+<span class="w">        </span><span class="n">io_threads_list</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listCreate</span><span class="p">();</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="k">continue</span><span class="p">;</span><span class="w"> </span><span class="c1">//0号线程是主线程</span>
+<span class="w">        </span><span class="c1">//初始化 I/O 线程并启动。</span>
+<span class="w">        </span><span class="n">pthread_t</span><span class="w"> </span><span class="n">tid</span><span class="p">;</span>
+<span class="w">        </span><span class="c1">// 每个 I/O 线程会分配一个本地锁，用来休眠和唤醒线程。</span>
+<span class="w">        </span><span class="n">pthread_mutex_init</span><span class="p">(</span><span class="o">&amp;</span><span class="n">io_threads_mutex</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="nb">NULL</span><span class="p">);</span><span class="w"> </span>
+<span class="w">        </span><span class="c1">// 每个 I/O 线程分配一个原子计数器，用来记录当前遗留的任务数量。</span>
+<span class="w">        </span><span class="n">io_threads_pending</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">        </span><span class="c1">// 主线程在启动 I/O 线程的时候会默认先锁住它，直到有 I/O 任务才唤醒它。</span>
+<span class="w">        </span><span class="n">pthread_mutex_lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">io_threads_mutex</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span>
+<span class="w">        </span><span class="c1">// 启动线程，进入 I/O 线程的主逻辑函数 IOThreadMain</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">pthread_create</span><span class="p">(</span><span class="o">&amp;</span><span class="n">tid</span><span class="p">,</span><span class="nb">NULL</span><span class="p">,</span><span class="n">IOThreadMain</span><span class="p">,(</span><span class="kt">void</span><span class="o">*</span><span class="p">)(</span><span class="kt">long</span><span class="p">)</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">serverLog</span><span class="p">(</span><span class="n">LL_WARNING</span><span class="p">,</span><span class="s">&quot;Fatal: Can&#39;t initialize IO thread.&quot;</span><span class="p">);</span>
+<span class="w">            </span><span class="n">exit</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="n">io_threads</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tid</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>initThreadedIO</code>会在Redis服务器启动的末尾被调用，进行I/O多线程的初始化工作。Redis的多线程模式是关闭的，需要用户在 redis.conf 配置文件中开启并设置：</p>
+<div class="highlight"><pre><code><span></span><span class="n">io</span><span class="o">-</span><span class="n">threads</span><span class="w"> </span><span class="mi">2</span>
+<span class="n">io</span><span class="o">-</span><span class="n">threads</span><span class="o">-</span><span class="k">do</span><span class="o">-</span><span class="n">reads</span><span class="w"> </span><span class="n">yes</span>
+</code></pre></div>
+<p>注意通过配置io-theads设置的I/O线程数量也包括主线程在内，io-threads-do-reads标识I/O线程是否参与读I/O的处理，提供这个配置的原因是因为，读I/O的并行处理对于Redis的性能提升并不明显。</p>
+<p>我们再来看读取请求的源代码。当客户端发送请求命令之后，会触发 Redis 主线程的事件循环，命令处理器 readQueryFromClient被回调，在以前的单线程模型下，这个方法会直接读取解析客户端命令并执行，但是多线程模式下，则会把 client 加入到<code>clients_pending_read</code> 任务队列中去，后面主线程再分配到 I/O 线程去读取客户端请求命令：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">readQueryFromClient</span><span class="p">(</span><span class="n">connection</span><span class="w"> </span><span class="o">*</span><span class="n">conn</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">client</span><span class="w"> </span><span class="o">*</span><span class="n">c</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">connGetPrivateData</span><span class="p">(</span><span class="n">conn</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">nread</span><span class="p">,</span><span class="w"> </span><span class="n">readlen</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">size_t</span><span class="w"> </span><span class="n">qblen</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">//如果开启了多线程，将client加入到异步队列之后返回</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">postponeClientRead</span><span class="p">(</span><span class="n">c</span><span class="p">))</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+<span class="w">    </span><span class="p">......</span><span class="w"> </span><span class="c1">//省略代码，逻辑同单线程版本几乎一样</span>
+<span class="p">}</span>
+
+<span class="cm">/* Return 1 if we want to handle the client read later using threaded I/O.</span>
+<span class="cm"> * This is called by the readable handler of the event loop.</span>
+<span class="cm"> * As a side effect of calling this function the client is put in the</span>
+<span class="cm"> * pending read clients and flagged as such. */</span>
+<span class="kt">int</span><span class="w"> </span><span class="nf">postponeClientRead</span><span class="p">(</span><span class="n">client</span><span class="w"> </span><span class="o">*</span><span class="n">c</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">//当多线程 I/O 模式开启、主线程没有在处理阻塞任务时，将 client 加入异步队列。</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">io_threads_active</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">        </span><span class="n">server</span><span class="p">.</span><span class="n">io_threads_do_reads</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">        </span><span class="o">!</span><span class="n">ProcessingEventsWhileBlocked</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">        </span><span class="o">!</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="p">(</span><span class="n">CLIENT_MASTER</span><span class="o">|</span><span class="n">CLIENT_SLAVE</span><span class="o">|</span><span class="n">CLIENT_PENDING_READ</span><span class="p">)))</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// 给 client 打上 CLIENT_PENDING_READ 标识，表示该 client 需要被多线程处理，</span>
+<span class="w">        </span><span class="c1">// 后续在 I/O 线程中会在读取和解析完客户端命令之后判断该标识并放弃执行命令，让主线程去执行。</span>
+<span class="w">        </span><span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span><span class="w"> </span><span class="o">|=</span><span class="w"> </span><span class="n">CLIENT_PENDING_READ</span><span class="p">;</span>
+<span class="w">        </span><span class="n">listAddNodeHead</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="n">clients_pending_read</span><span class="p">,</span><span class="n">c</span><span class="p">);</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>主线程会在事件循环的 beforeSleep() 方法中，调用 handleClientsWithPendingReadsUsingThreads：</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/* When threaded I/O is also enabled for the reading + parsing side, the</span>
+<span class="cm"> * readable handler will just put normal clients into a queue of clients to</span>
+<span class="cm"> * process (instead of serving them synchronously). This function runs</span>
+<span class="cm"> * the queue using the I/O threads, and process them in order to accumulate</span>
+<span class="cm"> * the reads in the buffers, and also parse the first command available</span>
+<span class="cm"> * rendering it in the client structures. */</span>
+<span class="kt">int</span><span class="w"> </span><span class="nf">handleClientsWithPendingReadsUsingThreads</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">io_threads_active</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">!</span><span class="n">server</span><span class="p">.</span><span class="n">io_threads_do_reads</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">processed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listLength</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="n">clients_pending_read</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">processed</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">tio_debug</span><span class="p">)</span><span class="w"> </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;%d TOTAL READ pending clients</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">processed</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// 遍历待读取的 client 队列 clients_pending_read，</span>
+<span class="w">    </span><span class="c1">// 通过 RR 轮询均匀地分配给 I/O 线程和主线程自己（编号 0）。</span>
+<span class="w">    </span><span class="n">listIter</span><span class="w"> </span><span class="n">li</span><span class="p">;</span>
+<span class="w">    </span><span class="n">listNode</span><span class="w"> </span><span class="o">*</span><span class="n">ln</span><span class="p">;</span>
+<span class="w">    </span><span class="n">listRewind</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="n">clients_pending_read</span><span class="p">,</span><span class="o">&amp;</span><span class="n">li</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">item_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">while</span><span class="p">((</span><span class="n">ln</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listNext</span><span class="p">(</span><span class="o">&amp;</span><span class="n">li</span><span class="p">)))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">client</span><span class="w"> </span><span class="o">*</span><span class="n">c</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listNodeValue</span><span class="p">(</span><span class="n">ln</span><span class="p">);</span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">target_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">item_id</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">server</span><span class="p">.</span><span class="n">io_threads_num</span><span class="p">;</span>
+<span class="w">        </span><span class="n">listAddNodeTail</span><span class="p">(</span><span class="n">io_threads_list</span><span class="p">[</span><span class="n">target_id</span><span class="p">],</span><span class="n">c</span><span class="p">);</span>
+<span class="w">        </span><span class="n">item_id</span><span class="o">++</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 设置当前 I/O 操作为读取操作，给每个 I/O 线程的计数器设置分配的任务数量，</span>
+<span class="w">    </span><span class="c1">// 让 I/O 线程可以开始工作：只读取和解析命令，不执行。</span>
+<span class="w">    </span><span class="n">io_threads_op</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">IO_THREADS_OP_READ</span><span class="p">;</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">server</span><span class="p">.</span><span class="n">io_threads_num</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listLength</span><span class="p">(</span><span class="n">io_threads_list</span><span class="p">[</span><span class="n">j</span><span class="p">]);</span>
+<span class="w">        </span><span class="n">io_threads_pending</span><span class="p">[</span><span class="n">j</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">count</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">     </span><span class="c1">// 主线程自己也会去执行读取客户端请求命令的任务，以达到最大限度利用 CPU。</span>
+<span class="w">    </span><span class="n">listRewind</span><span class="p">(</span><span class="n">io_threads_list</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span><span class="o">&amp;</span><span class="n">li</span><span class="p">);</span>
+<span class="w">    </span><span class="k">while</span><span class="p">((</span><span class="n">ln</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listNext</span><span class="p">(</span><span class="o">&amp;</span><span class="n">li</span><span class="p">)))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">client</span><span class="w"> </span><span class="o">*</span><span class="n">c</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listNodeValue</span><span class="p">(</span><span class="n">ln</span><span class="p">);</span>
+<span class="w">        </span><span class="n">readQueryFromClient</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">conn</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">listEmpty</span><span class="p">(</span><span class="n">io_threads_list</span><span class="p">[</span><span class="mi">0</span><span class="p">]);</span>
+
+<span class="w">    </span><span class="c1">// 忙轮询，累加所有 I/O 线程的原子任务计数器，直到所有计数器的遗留任务数量都是 0，</span>
+<span class="w">    </span><span class="c1">// 表示所有任务都已经执行完成，结束轮询。</span>
+<span class="w">    </span><span class="k">while</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">pending</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">server</span><span class="p">.</span><span class="n">io_threads_num</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="o">++</span><span class="p">)</span>
+<span class="w">            </span><span class="n">pending</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">io_threads_pending</span><span class="p">[</span><span class="n">j</span><span class="p">];</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">pending</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">tio_debug</span><span class="p">)</span><span class="w"> </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;I/O READ All threads finshed</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// 遍历待读取的 client 队列，清除 CLIENT_PENDING_READ 和 CLIENT_PENDING_COMMAND 标记，</span>
+<span class="w">    </span><span class="c1">// 然后解析并执行所有 client 的命令。</span>
+<span class="w">    </span><span class="k">while</span><span class="p">(</span><span class="n">listLength</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="n">clients_pending_read</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">ln</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listFirst</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="n">clients_pending_read</span><span class="p">);</span>
+<span class="w">        </span><span class="n">client</span><span class="w"> </span><span class="o">*</span><span class="n">c</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listNodeValue</span><span class="p">(</span><span class="n">ln</span><span class="p">);</span>
+<span class="w">        </span><span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span><span class="w"> </span><span class="o">&amp;=</span><span class="w"> </span><span class="o">~</span><span class="n">CLIENT_PENDING_READ</span><span class="p">;</span>
+<span class="w">        </span><span class="n">listDelNode</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="n">clients_pending_read</span><span class="p">,</span><span class="n">ln</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">CLIENT_PENDING_COMMAND</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span><span class="w"> </span><span class="o">&amp;=</span><span class="w"> </span><span class="o">~</span><span class="n">CLIENT_PENDING_COMMAND</span><span class="p">;</span>
+<span class="w">            </span><span class="c1">// client 的第一条命令已经被解析好了，直接尝试执行。</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">processCommandAndResetClient</span><span class="p">(</span><span class="n">c</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">C_ERR</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="cm">/* If the client is no longer valid, we avoid</span>
+<span class="cm">                 * processing the client later. So we just go</span>
+<span class="cm">                 * to the next. */</span>
+<span class="w">                </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="c1">// 继续解析并执行 client 命令。</span>
+<span class="w">        </span><span class="n">processInputBuffer</span><span class="p">(</span><span class="n">c</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">processed</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这里主线程所做的核心工作就是：</p>
+<ul>
+<li>遍历待读取的 client 队列 <code>clients_pending_read</code>，通过 RR 策略把所有任务分配给 I/O 线程和主线程去读取和解析客户端命令。</li>
+<li>忙轮询等待所有 I/O 线程完成任务。</li>
+<li>等主线程和其它I/O吓成一起完成了读请求处理以后，最后再遍历 <code>clients_pending_read</code>，执行所有 client 的命令。</li>
+</ul>
+<p>与读取相求相对应的自然是写回响应了，完成命令的读取、解析以及执行之后，客户端命令的响应数据已经存入 client-&gt;buf 或者 client-&gt;reply中了，接下来就需要把响应数据回写到客户端了，还是在 beforeSleep 中， 主线程调用handleClientsWithPendingWritesUsingThreads：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">handleClientsWithPendingWritesUsingThreads</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">processed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listLength</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="n">clients_pending_write</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">processed</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="cm">/* Return ASAP if there are no clients. */</span>
+
+<span class="w">    </span><span class="c1">// 如果用户设置的 I/O 线程数等于 1 或者当前 clients_pending_write 队列中待写出的 client</span>
+<span class="w">    </span><span class="c1">// 数量不足 I/O 线程数的两倍，则不用多线程的逻辑，让所有 I/O 线程进入休眠，</span>
+<span class="w">    </span><span class="c1">// 直接在主线程把所有 client 的相应数据回写到客户端。</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="n">io_threads_num</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">stopThreadedIOIfNeeded</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">handleClientsWithPendingWrites</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">   </span><span class="c1">// 唤醒正在休眠的 I/O 线程（如果有的话）。</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">io_threads_active</span><span class="p">)</span><span class="w"> </span><span class="n">startThreadedIO</span><span class="p">();</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">tio_debug</span><span class="p">)</span><span class="w"> </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;%d TOTAL WRITE pending clients</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">processed</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// 遍历待写出的 client 队列 clients_pending_write，</span>
+<span class="w">    </span><span class="c1">// 通过 RR 轮询均匀地分配给 I/O 线程和主线程自己（0号线程）。</span>
+<span class="w">    </span><span class="n">listIter</span><span class="w"> </span><span class="n">li</span><span class="p">;</span>
+<span class="w">    </span><span class="n">listNode</span><span class="w"> </span><span class="o">*</span><span class="n">ln</span><span class="p">;</span>
+<span class="w">    </span><span class="n">listRewind</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="n">clients_pending_write</span><span class="p">,</span><span class="o">&amp;</span><span class="n">li</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">item_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">while</span><span class="p">((</span><span class="n">ln</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listNext</span><span class="p">(</span><span class="o">&amp;</span><span class="n">li</span><span class="p">)))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">client</span><span class="w"> </span><span class="o">*</span><span class="n">c</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listNodeValue</span><span class="p">(</span><span class="n">ln</span><span class="p">);</span>
+<span class="w">        </span><span class="n">c</span><span class="o">-&gt;</span><span class="n">flags</span><span class="w"> </span><span class="o">&amp;=</span><span class="w"> </span><span class="o">~</span><span class="n">CLIENT_PENDING_WRITE</span><span class="p">;</span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">target_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">item_id</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">server</span><span class="p">.</span><span class="n">io_threads_num</span><span class="p">;</span>
+<span class="w">        </span><span class="n">listAddNodeTail</span><span class="p">(</span><span class="n">io_threads_list</span><span class="p">[</span><span class="n">target_id</span><span class="p">],</span><span class="n">c</span><span class="p">);</span>
+<span class="w">        </span><span class="n">item_id</span><span class="o">++</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 设置当前 I/O 操作为写出操作，给每个 I/O 线程的计数器设置分配的任务数量，</span>
+<span class="w">    </span><span class="c1">// 让 I/O 线程可以开始工作，把写出缓冲区（client-&gt;buf 或 c-&gt;reply）中的响应数据回写到客户端。</span>
+<span class="w">    </span><span class="n">io_threads_op</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">IO_THREADS_OP_WRITE</span><span class="p">;</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">server</span><span class="p">.</span><span class="n">io_threads_num</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listLength</span><span class="p">(</span><span class="n">io_threads_list</span><span class="p">[</span><span class="n">j</span><span class="p">]);</span>
+<span class="w">        </span><span class="n">io_threads_pending</span><span class="p">[</span><span class="n">j</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">count</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 主线程自己也会去执行读取客户端请求命令的任务，以达到最大限度利用 CPU。</span>
+<span class="w">    </span><span class="n">listRewind</span><span class="p">(</span><span class="n">io_threads_list</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span><span class="o">&amp;</span><span class="n">li</span><span class="p">);</span>
+<span class="w">    </span><span class="k">while</span><span class="p">((</span><span class="n">ln</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listNext</span><span class="p">(</span><span class="o">&amp;</span><span class="n">li</span><span class="p">)))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">client</span><span class="w"> </span><span class="o">*</span><span class="n">c</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listNodeValue</span><span class="p">(</span><span class="n">ln</span><span class="p">);</span>
+<span class="w">        </span><span class="n">writeToClient</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="mi">0</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">listEmpty</span><span class="p">(</span><span class="n">io_threads_list</span><span class="p">[</span><span class="mi">0</span><span class="p">]);</span>
+
+<span class="w">    </span><span class="c1">// 忙轮询，累加所有 I/O 线程的原子任务计数器，直到所有计数器的遗留任务数量都是 0。</span>
+<span class="w">    </span><span class="c1">// 表示所有任务都已经执行完成，结束轮询。</span>
+<span class="w">    </span><span class="k">while</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">pending</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">server</span><span class="p">.</span><span class="n">io_threads_num</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="o">++</span><span class="p">)</span>
+<span class="w">            </span><span class="n">pending</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">io_threads_pending</span><span class="p">[</span><span class="n">j</span><span class="p">];</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">pending</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">tio_debug</span><span class="p">)</span><span class="w"> </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;I/O WRITE All threads finshed</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// 最后再遍历一次 clients_pending_write 队列，检查是否还有 client 的中写出缓冲区中有残留数据，</span>
+<span class="w">    </span><span class="c1">// 如果有，那就为 client 注册一个命令回复器 sendReplyToClient，等待客户端写就绪再继续把数据回写。</span>
+<span class="w">    </span><span class="n">listRewind</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="n">clients_pending_write</span><span class="p">,</span><span class="o">&amp;</span><span class="n">li</span><span class="p">);</span>
+<span class="w">    </span><span class="k">while</span><span class="p">((</span><span class="n">ln</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listNext</span><span class="p">(</span><span class="o">&amp;</span><span class="n">li</span><span class="p">)))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">client</span><span class="w"> </span><span class="o">*</span><span class="n">c</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listNodeValue</span><span class="p">(</span><span class="n">ln</span><span class="p">);</span>
+<span class="w">        </span><span class="c1">// 检查 client 的写出缓冲区是否还有遗留数据。</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">clientHasPendingReplies</span><span class="p">(</span><span class="n">c</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">                </span><span class="n">connSetWriteHandler</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">conn</span><span class="p">,</span><span class="w"> </span><span class="n">sendReplyToClient</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">AE_ERR</span><span class="p">)</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">            </span><span class="n">freeClientAsync</span><span class="p">(</span><span class="n">c</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="n">listEmpty</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="n">clients_pending_write</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">processed</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>与读取请求相似，主线程处理写回响应的核心工作是：</p>
+<ul>
+<li>检查当前任务负载，如果当前的任务数量不足以用多线程模式处理的话，则休眠 I/O 线程并且直接同步将响应数据回写到客户端。</li>
+<li>唤醒正在休眠的 I/O 线程（如果有的话）。</li>
+<li>遍历待写出的 client 队列 <code>clients_pending_write</code>，通过 RR 策略把所有任务分配给 I/O 线程和主线程去将响应数据写回到客户端。</li>
+<li>忙轮询等待所有 I/O 线程完成任务。</li>
+<li>最后再遍历 <code>clients_pending_write</code>，为那些还残留有响应数据的 client 注册命令回复处理器 sendReplyToClient，等待客户端可写之后在事件循环中继续回写残余的响应数据。</li>
+</ul>
+<p>上边我们分析了主线程的工作，下边我们再来看一下I/O线程的主逻辑都做了些什么：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="nf">IOThreadMain</span><span class="p">(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">myid</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="cm">/* The ID is the thread number (from 0 to server.iothreads_num-1), and is</span>
+<span class="cm">     * used by the thread to just manipulate a single sub-array of clients. */</span>
+<span class="w">    </span><span class="kt">long</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="p">)</span><span class="n">myid</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="n">thdname</span><span class="p">[</span><span class="mi">16</span><span class="p">];</span>
+<span class="w">    </span><span class="n">snprintf</span><span class="p">(</span><span class="n">thdname</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">thdname</span><span class="p">),</span><span class="w"> </span><span class="s">&quot;io_thd_%ld&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="p">);</span>
+<span class="w">    </span><span class="n">redis_set_thread_title</span><span class="p">(</span><span class="n">thdname</span><span class="p">);</span>
+<span class="w">    </span><span class="k">while</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// 忙轮询，100w 次循环，等待主线程分配 I/O 任务。</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">1000000</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">io_threads_pending</span><span class="p">[</span><span class="n">id</span><span class="p">]</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="c1">// 如果 100w 次忙轮询之后如果还是没有任务分配给它，则通过尝试加锁进入休眠，</span>
+<span class="w">        </span><span class="c1">// 等待主线程分配任务之后调用 startThreadedIO 解锁，唤醒 I/O 线程去执行。</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">io_threads_pending</span><span class="p">[</span><span class="n">id</span><span class="p">]</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">pthread_mutex_lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">io_threads_mutex</span><span class="p">[</span><span class="n">id</span><span class="p">]);</span>
+<span class="w">            </span><span class="n">pthread_mutex_unlock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">io_threads_mutex</span><span class="p">[</span><span class="n">id</span><span class="p">]);</span>
+<span class="w">            </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="n">serverAssert</span><span class="p">(</span><span class="n">io_threads_pending</span><span class="p">[</span><span class="n">id</span><span class="p">]</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">tio_debug</span><span class="p">)</span><span class="w"> </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;[%ld] %d to handle</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="p">)</span><span class="n">listLength</span><span class="p">(</span><span class="n">io_threads_list</span><span class="p">[</span><span class="n">id</span><span class="p">]));</span>
+<span class="w">        </span><span class="c1">// 注意：主线程分配任务给 I/O 线程之时，</span>
+<span class="w">        </span><span class="c1">// 会把任务加入每个线程的本地任务队列 io_threads_list[id]，</span>
+<span class="w">        </span><span class="c1">// 但是当 I/O 线程开始执行任务之后，主线程就不会再去访问这些任务队列，避免数据竞争。</span>
+<span class="w">        </span><span class="n">listIter</span><span class="w"> </span><span class="n">li</span><span class="p">;</span>
+<span class="w">        </span><span class="n">listNode</span><span class="w"> </span><span class="o">*</span><span class="n">ln</span><span class="p">;</span>
+<span class="w">        </span><span class="n">listRewind</span><span class="p">(</span><span class="n">io_threads_list</span><span class="p">[</span><span class="n">id</span><span class="p">],</span><span class="o">&amp;</span><span class="n">li</span><span class="p">);</span>
+<span class="w">        </span><span class="k">while</span><span class="p">((</span><span class="n">ln</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listNext</span><span class="p">(</span><span class="o">&amp;</span><span class="n">li</span><span class="p">)))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">client</span><span class="w"> </span><span class="o">*</span><span class="n">c</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listNodeValue</span><span class="p">(</span><span class="n">ln</span><span class="p">);</span>
+<span class="w">            </span><span class="c1">// 如果当前是写出操作，则把 client 的写出缓冲区中的数据回写到客户端。</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">io_threads_op</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">IO_THREADS_OP_WRITE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">writeToClient</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="mi">0</span><span class="p">);</span>
+<span class="w">            </span><span class="c1">// 如果当前是读取操作，则socket 读取客户端的请求命令并解析第一条命令。    </span>
+<span class="w">            </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">io_threads_op</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">IO_THREADS_OP_READ</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">readQueryFromClient</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">conn</span><span class="p">);</span>
+<span class="w">            </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">serverPanic</span><span class="p">(</span><span class="s">&quot;io_threads_op value is unknown&quot;</span><span class="p">);</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="n">listEmpty</span><span class="p">(</span><span class="n">io_threads_list</span><span class="p">[</span><span class="n">id</span><span class="p">]);</span>
+<span class="w">        </span><span class="c1">// 所有任务执行完之后把自己的计数器置 0，主线程通过累加所有 I/O 线程的计数器</span>
+<span class="w">        </span><span class="c1">// 判断是否所有 I/O 线程都已经完成工作。</span>
+<span class="w">        </span><span class="n">io_threads_pending</span><span class="p">[</span><span class="n">id</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">tio_debug</span><span class="p">)</span><span class="w"> </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;[%ld] Done</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>I/O 线程启动之后，会先进入忙轮询，判断原子计数器中的任务数量，如果是非 0 则表示主线程已经给它分配了任务，开始执行任务，否则就一直忙轮询一百万次等待，忙轮询结束之后再查看计数器，如果还是 0，则尝试加本地锁，因为主线程在启动 I/O 线程之时就已经提前锁住了所有 I/O 线程的本地锁，因此 I/O 线程会进行休眠，等待主线程唤醒。</p>
+<p>主线程会在每次事件循环中尝试调用 startThreadedIO 唤醒 I/O 线程去执行任务，如果接收到客户端请求命令，则 I/O 线程会被唤醒开始工作，根据主线程设置的 <code>io_threads_op</code> 标识去执行命令读取和解析或者回写响应数据的任务，I/O 线程在收到主线程通知之后，会遍历自己的本地任务队列 <code>io_threads_list[id]</code>，取出一个个 client 执行任务：</p>
+<ul>
+<li>如果当前是写出操作，则调用 writeToClient，通过 socket 把 client-&gt;buf 或者 client-&gt;reply 里的响应数据回写到客户端。</li>
+<li>如果当前是读取操作，则调用 readQueryFromClient，通过 socket 读取客户端命令，存入 client-&gt;querybuf，然后调用 processInputBuffer 去解析命令，这里最终只会解析到第一条命令，然后就结束，不会去执行命令。</li>
+<li>在全部任务执行完之后把自己的原子计数器置 0，以告知主线程自己已经完成了工作。</li>
+</ul>
+<p>至此，我们就分析完了多线程I/O工作的核心源码。</p>
+<h4>2.3.3 I/O多线程lock-free的设计亮点</h4>
+<p>细心的读者可能会发现，Redis的多线程I/O设计是无锁化的，lock-free一直是多线程设计中的一个特色，Redis是通过原子操作+交错访问来实现的，主线程和 I/O
+线程之间共享的变量有三个：<code>io_threads_pending</code> 计数器、<code>io_threads_op</code> I/O 标识符和 <code>io_threads_list</code> 线程本地任务队列。</p>
+<p><code>io_threads_pending</code> 是原子变量，不需要加锁保护，<code>io_threads_op</code> 和 <code>io_threads_list</code> 这两个变量则是通过控制主线程和 I/O 线程交错访问来规避共享数据竞争问题：I/O
+线程启动之后会通过忙轮询和锁休眠等待主线程的信号，在这之前它不会去访问自己的本地任务队列 <code>io_threads_list[id]</code>，而主线程会在分配完所有任务到各个 I/O 线程的本地队列之后才去唤醒 I/O 线程开始工作，并且主线程之后在 I/O 线程运行期间只会访问自己的本地任务队列 <code>io_threads_list[0]</code> 而不会再去访问 I/O 线程的本地队列，这也就保证了主线程永远会在 I/O 线程之前访问 <code>io_threads_list</code> 并且之后不再访问，保证了交错访问。<code>io_threads_op</code> 同理，主线程会在唤醒 I/O 线程之前先设置好<code>io_threads_op</code> 的值，并且在 I/O 线程运行期间不会再去访问这个变量。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220615-2120-11.png" alt="Redis多线程无锁化访问变量.jpg"></p>
+<h4>2.3.4 多线程I/O的性能提升与设计缺陷</h4>
+<p>事实上，<code>Redis</code>通过多线程来提升性能达到的效果可能比你想象中的还要好，下边是从ITNEXT平台提取的一张压测结果报告图，更详细的内容可参考：<a href="https://itnext.io/benchmarking-the-experimental-redis-multi-threaded-i-o-1bb28b69a314">对实验性Redis多线程I / O进行基准测试</a></p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220615-2120-12.png" alt="image.png"></p>
+<p>可以看到，在配置24个IO-threads时，执行普通的GET、SET指令，<code>Redis</code>能够达到20W+的QPS，相比较于单线程，性能提升了将近一倍。</p>
+<p>我们前边提到，Redis的多线程网络模型为了保持与旧版本的兼容性，并没有使用标准的Multi-Reactors/Master-Workers 模型。客户端命令的执行还是在主线程上完成的。并且主线程和I/O线程的通信也是通过忙轮询和锁粗暴解决的，这会导致Redis在服务期间有CPU的空转问题，后边我们研究BIO系统的实现之后，会发现BIO线程与主线程之间的通信，相比较与Redis的核心多线程网络模型中通信的实现，要优雅很多。相信之后Redis的作者会对目前的方案进行改进。</p>
+<h2>3. Redis BIO系统的演进</h2>
+<p>本文一开始就给出了结论：对于整个服务端架构的设计而言，Redis从来都不是单线程的。我们讨论的单线程，只是针对Redis的核心网络模型而言，这部分的内容我们在上一节已经深入剖析过了。对于Redis的BIO系统，也就是这些所谓的后台线程，也经历了一个演进的过程，在这个过程中都发生了哪些事？Redis的作者antirez对BIO系统做了哪些优化呢？本节我们就来一起探索下这两个问题。</p>
+<h3>3.1 早期的BIO系统设计与实现</h3>
+<p>早期的Redis通过bio系统完成两件事，一是进行Aof持久化，也就是将写入到系统的page cache的数据fsync到磁盘中；二是关闭文件。为了完成这件任务，其采用了任务队列的方式，每个任务都是一个线程来完成，任务会被放到任务队列中，然后由执行任务线程取走，如果队列空，则阻塞等待，如果队列里有任务，就通知工作线程，这通过条件变量来实现。后面以任务初始化，任务放入队列，任务出队列三个方面进行介绍，并且以aof持久化为例说明其在系统中的使用方式，本节的内容与代码分析基于redis的 3.2.3 版本。</p>
+<h4>3.1.1 任务初始化</h4>
+<p>对于一个任务，比如aof持久化任务，首先要初始化一个队列，在redis里面使用了redis自己的链表结构建立这个队列。这个队列需要满足以下特点：</p>
+<ul>
+<li>生产者放任务到队列中。</li>
+<li>如果队列不为空，消费者从队列中取任务；否则消费者进入等待状态。</li>
+</ul>
+<p>这里的消费者就是服务线程，而为了完成队列为空则等待的功能，redis使用了条件变量机制。其初始化代码如下。</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="n">pthread_t</span><span class="w"> </span><span class="n">bio_threads</span><span class="p">[</span><span class="n">BIO_NUM_OPS</span><span class="p">];</span>
+<span class="k">static</span><span class="w"> </span><span class="n">pthread_mutex_t</span><span class="w"> </span><span class="n">bio_mutex</span><span class="p">[</span><span class="n">BIO_NUM_OPS</span><span class="p">];</span>
+<span class="k">static</span><span class="w"> </span><span class="n">pthread_cond_t</span><span class="w"> </span><span class="n">bio_condvar</span><span class="p">[</span><span class="n">BIO_NUM_OPS</span><span class="p">];</span>
+<span class="k">static</span><span class="w"> </span><span class="n">list</span><span class="w"> </span><span class="o">*</span><span class="n">bio_jobs</span><span class="p">[</span><span class="n">BIO_NUM_OPS</span><span class="p">];</span>
+</code></pre></div>
+<p>上面的常量<code>BIO_NUM_OPS = 2</code>,表示支持两种任务。对于每种任务，对应一个list用于放置任务，一个<code>pthread_cond_t</code>和<code>pthread_mutex_t</code>变量用于并发控制，以及一个<code>pthread_t</code> 用于后台服务线程。 初始化使用了bioInit函数，部分代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">BIO_NUM_OPS</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">pthread_mutex_init</span><span class="p">(</span><span class="o">&amp;</span><span class="n">bio_mutex</span><span class="p">[</span><span class="n">j</span><span class="p">],</span><span class="nb">NULL</span><span class="p">);</span>
+<span class="w">    </span><span class="n">pthread_cond_init</span><span class="p">(</span><span class="o">&amp;</span><span class="n">bio_condvar</span><span class="p">[</span><span class="n">j</span><span class="p">],</span><span class="nb">NULL</span><span class="p">);</span>
+<span class="w">    </span><span class="n">bio_jobs</span><span class="p">[</span><span class="n">j</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listCreate</span><span class="p">();</span>
+<span class="w">    </span><span class="n">bio_pending</span><span class="p">[</span><span class="n">j</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span><span class="c1">//初始化锁与条件变量</span>
+<span class="p">......</span>
+<span class="p">......</span>
+<span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">BIO_NUM_OPS</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">arg</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">)(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="p">)</span><span class="w"> </span><span class="n">j</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">//这里的函数参数是arg = j，也就是每个线程传入一个编号j，0代表关闭文件，1代表aof初始化 </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">pthread_create</span><span class="p">(</span><span class="o">&amp;</span><span class="kr">thread</span><span class="p">,</span><span class="o">&amp;</span><span class="n">attr</span><span class="p">,</span><span class="n">bioProcessBackgroundJobs</span><span class="p">,</span><span class="n">arg</span><span class="p">)</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">    </span>
+<span class="w">        </span><span class="n">serverLog</span><span class="p">(</span><span class="n">LL_WARNING</span><span class="p">,</span><span class="s">&quot;Fatal: Can&#39;t initialize Background Jobs.&quot;</span><span class="p">);</span><span class="w"> </span>
+<span class="w">        </span><span class="n">exit</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span><span class="w"> </span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span>
+<span class="w">    </span><span class="n">bio_threads</span><span class="p">[</span><span class="n">j</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kr">thread</span><span class="p">;</span><span class="w"> </span>
+<span class="p">}</span><span class="c1">//初始化线程</span>
+</code></pre></div>
+<p>在完成初始化任务以后，我们有了BIO_NUM_OPS(其值为2)个链表表示任务队列，有两个线程调用bioProcessBackgroundJobs函数，参数是一个编号j，并且每个队列都初始化了锁与条件变量做并发控制。</p>
+<h4>3.1.2 任务入队列</h4>
+<p>任务入队列就是把一个任务放到链表的头部,并且把相应任务的pending值+1,表示这个队列里面未完成的任务多了一个。 其中任务的结构如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">bio_job</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">time_t</span><span class="w"> </span><span class="n">time</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">arg1</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">arg2</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">arg3</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>可以看到，任务不是很复杂，只记录一个时间和参数就可以了，后面讲任务执行的时候，会讲到这样一个简单的结构记录的任务怎么执行。任务入队列的代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">bioCreateBackgroundJob</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">type</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">arg1</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">arg2</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">arg3</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">bio_job</span><span class="w"> </span><span class="o">*</span><span class="n">job</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">zmalloc</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">job</span><span class="p">));</span>
+<span class="w">    </span><span class="n">job</span><span class="o">-&gt;</span><span class="n">arg1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">arg1</span><span class="p">;</span>
+<span class="w"> </span><span class="p">...</span>
+<span class="w">    </span><span class="n">pthread_mutex_lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">bio_mutex</span><span class="p">[</span><span class="n">type</span><span class="p">]);</span>
+<span class="w">    </span><span class="n">listAddNodeTail</span><span class="p">(</span><span class="n">bio_jobs</span><span class="p">[</span><span class="n">type</span><span class="p">],</span><span class="n">job</span><span class="p">);</span>
+<span class="w">    </span><span class="n">bio_pending</span><span class="p">[</span><span class="n">type</span><span class="p">]</span><span class="o">++</span><span class="p">;</span>
+<span class="w">    </span><span class="n">pthread_cond_signal</span><span class="p">(</span><span class="o">&amp;</span><span class="n">bio_condvar</span><span class="p">[</span><span class="n">type</span><span class="p">]);</span>
+<span class="w">    </span><span class="n">pthread_mutex_unlock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">bio_mutex</span><span class="p">[</span><span class="n">type</span><span class="p">]);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这段入队列的代码先为任务结构分配空间，然后使用listAddNodeTail函数把任务放到链表的头部。这里使用的是redis自己实现的链表。可以看到，进行链表操作的时候，要先加锁，这是因为这里的链表是共享资源。在任务成功加入队列以后，调用<code>pthread_cond_signal</code>函数，通知阻塞等待的线程继续执行。上面这个过程是共享变量使用的基本模式:加锁、置条件为真(这里是任务入队列)、通知、解锁。</p>
+<h4>3.1.3 任务出队列</h4>
+<p>我们已经做好了任务初始化的工作，并且可以在队列里面放置新的任务，那么当队列里面有任务的时候，我们在第一步初始化的时候开启的后台线程就会调用bioProcessBackgroundJobs函数进行任务处理，其处理主要代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="nf">bioProcessBackgroundJobs</span><span class="p">(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">arg</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="p">)</span><span class="w"> </span><span class="n">arg</span><span class="p">;</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">bio_job</span><span class="w"> </span><span class="o">*</span><span class="n">job</span><span class="p">;</span>
+<span class="w">    </span><span class="k">while</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">listNode</span><span class="w"> </span><span class="o">*</span><span class="n">ln</span><span class="p">;</span>
+<span class="w">        </span><span class="n">pthread_mutex_lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">bio_mutex</span><span class="p">[</span><span class="n">type</span><span class="p">]);</span><span class="w">        </span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">listLength</span><span class="p">(</span><span class="n">bio_jobs</span><span class="p">[</span><span class="n">type</span><span class="p">])</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="c1">//条件不成立,等待</span>
+<span class="w">            </span><span class="n">pthread_cond_wait</span><span class="p">(</span><span class="o">&amp;</span><span class="n">bio_condvar</span><span class="p">[</span><span class="n">type</span><span class="p">],</span><span class="o">&amp;</span><span class="n">bio_mutex</span><span class="p">[</span><span class="n">type</span><span class="p">]);</span>
+<span class="w">            </span><span class="c1">//被通知以后,停止阻塞,重新判断条件</span>
+<span class="w">            </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="c1">//条件成立,直接执行</span>
+<span class="w">        </span><span class="n">ln</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listFirst</span><span class="p">(</span><span class="n">bio_jobs</span><span class="p">[</span><span class="n">type</span><span class="p">]);</span>
+<span class="w">        </span><span class="n">job</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ln</span><span class="o">-&gt;</span><span class="n">value</span><span class="p">;</span>
+<span class="w">        </span><span class="c1">//取走值以后,解锁</span>
+<span class="w">        </span><span class="n">pthread_mutex_unlock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">bio_mutex</span><span class="p">[</span><span class="n">type</span><span class="p">]);</span>
+<span class="w">        </span><span class="c1">//完成队列处理以后，根据类型调用close函数或者fsync函数。</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">type</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">BIO_CLOSE_FILE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">close</span><span class="p">((</span><span class="kt">long</span><span class="p">)</span><span class="n">job</span><span class="o">-&gt;</span><span class="n">arg1</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">type</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">BIO_AOF_FSYNC</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">fsync</span><span class="p">((</span><span class="kt">long</span><span class="p">)</span><span class="n">job</span><span class="o">-&gt;</span><span class="n">arg1</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">serverPanic</span><span class="p">(</span><span class="s">&quot;Wrong job type in bioProcessBackgroundJobs().&quot;</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="n">pthread_mutex_lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">bio_mutex</span><span class="p">[</span><span class="n">type</span><span class="p">]);</span>
+<span class="w">        </span><span class="n">listDelNode</span><span class="p">(</span><span class="n">bio_jobs</span><span class="p">[</span><span class="n">type</span><span class="p">],</span><span class="n">ln</span><span class="p">);</span>
+<span class="w">        </span><span class="n">bio_pending</span><span class="p">[</span><span class="n">type</span><span class="p">]</span><span class="o">--</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>上面的代码主要流程是，先判断当前的队列是不是空的，如果是空的，则等待。否则，从队列中取出一个job结构，并且根据线程的类型决定调用什么函数。这里的类型通过创建线程是传如的参数获得，可以是0 或者 1。获得类型以后，从job里面取出arg1作为参数，调用close函数或者fsync函数。arg1是一个文件描述符，所以，在任务加入队列的时候，只是需要放一个文件描述符如队列，这也就是为什么<code>bio_job</code>结构体会设置得如此简单。</p>
+<h4>3.1.4 Aof持久化的例子</h4>
+<p>Aof 持久化是redis的两大持久化方式之一，其会以字符串的形式把对redis的每一个操作都先记录在内存的一个buffer中，然后写入文件，并且在适当的时间使用fsync将数据刷入磁盘，而调用fsync的其中一种方式就是使用上面介绍的bio系统，其使用的方式遵循了上面说的三个步骤。</p>
+<p>首先，在server.c中的main函数里面，有一个initServer函数，其内部调用了bioInit函数，完成了bio系统的初始化，这样，相关的队列结构被建立，后台线程也被创建了。在redis主循环被启动以后，会进入持久化的时机，调用flushAppendOnlyFile函数，完成aof持久化工作。这个函数会处理aof相关的配置以及优化等各类问题，在本文只关注对bio系统的使用，其相关代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="n">aof_fsync</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">AOF_FSYNC_EVERYSEC</span><span class="p">)</span>
+<span class="w">    </span><span class="n">sync_in_progress</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">bioPendingJobsOfType</span><span class="p">(</span><span class="n">BIO_AOF_FSYNC</span><span class="p">)</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">......</span>
+<span class="p">......</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">sync_in_progress</span><span class="p">)</span><span class="w"> </span><span class="n">aof_background_fsync</span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="n">aof_fd</span><span class="p">);</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">aof_background_fsync</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">fd</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">bioCreateBackgroundJob</span><span class="p">(</span><span class="n">BIO_AOF_FSYNC</span><span class="p">,(</span><span class="kt">void</span><span class="o">*</span><span class="p">)(</span><span class="kt">long</span><span class="p">)</span><span class="n">fd</span><span class="p">,</span><span class="nb">NULL</span><span class="p">,</span><span class="nb">NULL</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>可以看到，其通过bioPendingJobsOfType来检查当前队列处理的情况，并且调用bioCreateBackgroundJob来将aof任务加入队列。由于在前面已经完成了线程的创建，在队列中有任务的时候，线程就会启动，并且通过上面讲的fsync函数完成持久化操作。</p>
+<p>Redis的Bio是一个非常好的在实际系统中使条件变量的例子。</p>
+<h3>3.2 令人头痛的问题:大key应该如何删除?</h3>
+<p>我们知道Redis的DEL命令用来删除一个或多个KEY存储的值，它是一个阻塞的命令，有的时候你要删除一个超大的键值对，比如一个有上百万的对象，这条命令可能就会被阻塞好几秒了；又因为Redis执行指令都是在主线程上执行的，所以整个服务必然会有大量慢查询，吞吐量急剧下降！Redis的作者antirez也遇到了这个问题。</p>
+<p>那么针对这个问题怎么优化呢？研究过Redis源码的读者可能会想到了：使用渐进式rehash的方案，利用定时器和数据游标，每次删除一部分数据怎么样呢？其实这种思路，antirez并不是没有考虑过，但是最终antirez采取的方案是在原有的BIO系统中再增加一个成员。那么我们想到的渐进式删除方案有什么问题呢？问题的答案要从antriez在2015年发表的一篇博客中查找了：<a href="http://antirez.com/news/93">Lazy Redis is better Redis</a></p>
+<p>笔者截取了antirez举的一个例子：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220615-2120-13.png" alt="自适应删除策略.png"></p>
+<p>为什么说渐进式懒删除很难做呢？作者说当我们删除一个集合的时候，可能我们删除集合中元素的速度还没有客户端向集合中添加元素的速度快，那我们的删除工作看起来是永远也无法完成了。</p>
+<h3>3.3 BIO系统再添新成员——lazyfree</h3>
+<p>上一小节我们分析了使用DEL命令删除大key时会造成redis服务端阻塞，除此之外，在使用 FLUSHDB 和 FLUSHALL 删除包含大量键的数据库时，或者redis在清理过期数据和淘汰内存超限的数据时，如果碰巧撞到了大体积的键也会造成服务器阻塞。</p>
+<p>为了解决以上问题， redis 4.0 引入了lazyfree的机制，它可以将删除键或数据库的操作放在后台线程里执行， 从而尽可能地避免服务器阻塞。</p>
+<p>lazyfree的原理不难想象，就是在删除对象时只是进行逻辑删除，然后把对象丢给后台，让后台线程去执行真正的destruct，避免由于对象体积过大而造成阻塞。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220615-2120-14.png" alt="Redis中的lazyfree实现.jpg"></p>
+<p>redis的lazyfree实现即是如此，下面我们主要看一下unlink命令的实现(以下代码是基于Redis 4.0的)：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">unlinkCommand</span><span class="p">(</span><span class="n">client</span><span class="w"> </span><span class="o">*</span><span class="n">c</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">delGenericCommand</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>入口很简单，就是调用delGenericCommand，第二个参数为1表示需要异步删除。</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/* This command implements DEL and LAZYDEL. */</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">delGenericCommand</span><span class="p">(</span><span class="n">client</span><span class="w"> </span><span class="o">*</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">lazy</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">numdel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">j</span><span class="p">;</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argc</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">expireIfNeeded</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">db</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="n">j</span><span class="p">]);</span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">deleted</span><span class="w">  </span><span class="o">=</span><span class="w"> </span><span class="n">lazy</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">dbAsyncDelete</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">db</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="n">j</span><span class="p">])</span><span class="w"> </span><span class="o">:</span>
+<span class="w">                              </span><span class="n">dbSyncDelete</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">db</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="n">j</span><span class="p">]);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">deleted</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">signalModifiedKey</span><span class="p">(</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">db</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="n">j</span><span class="p">]);</span>
+<span class="w">            </span><span class="n">notifyKeyspaceEvent</span><span class="p">(</span><span class="n">REDIS_NOTIFY_GENERIC</span><span class="p">,</span>
+<span class="w">                </span><span class="s">&quot;del&quot;</span><span class="p">,</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">argv</span><span class="p">[</span><span class="n">j</span><span class="p">],</span><span class="n">c</span><span class="o">-&gt;</span><span class="n">db</span><span class="o">-&gt;</span><span class="n">id</span><span class="p">);</span>
+<span class="w">            </span><span class="n">server</span><span class="p">.</span><span class="n">dirty</span><span class="o">++</span><span class="p">;</span>
+<span class="w">            </span><span class="n">numdel</span><span class="o">++</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">addReplyLongLong</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="n">numdel</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>delGenericCommand函数根据lazy参数来决定是同步删除还是异步删除，同步删除的逻辑没有什么变化就不细讲了，我们重点看下新增的异步删除的实现。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#define LAZYFREE_THRESHOLD 64</span>
+<span class="c1">// 首先定义了启用后台删除的阈值，对象中的元素大于该阈值时才真正丢给后台线程去删除，如果对象中包含的元素太少就没有必要丢给后台线程，因为线程同步也要一定的消耗。</span>
+<span class="kt">int</span><span class="w"> </span><span class="nf">dbAsyncDelete</span><span class="p">(</span><span class="n">redisDb</span><span class="w"> </span><span class="o">*</span><span class="n">db</span><span class="p">,</span><span class="w"> </span><span class="n">robj</span><span class="w"> </span><span class="o">*</span><span class="n">key</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">dictSize</span><span class="p">(</span><span class="n">db</span><span class="o">-&gt;</span><span class="n">expires</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="n">dictDelete</span><span class="p">(</span><span class="n">db</span><span class="o">-&gt;</span><span class="n">expires</span><span class="p">,</span><span class="n">key</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">//清除待删除key的过期时间</span>
+<span class="w">    </span><span class="n">dictEntry</span><span class="w"> </span><span class="o">*</span><span class="n">de</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">dictUnlink</span><span class="p">(</span><span class="n">db</span><span class="o">-&gt;</span><span class="n">dict</span><span class="p">,</span><span class="n">key</span><span class="o">-&gt;</span><span class="n">ptr</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">//dictUnlink返回数据库字典中包含key的条目指针，并从数据库字典中摘除该条目（并不会释放资源）</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">de</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">robj</span><span class="w"> </span><span class="o">*</span><span class="n">val</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">dictGetVal</span><span class="p">(</span><span class="n">de</span><span class="p">);</span>
+<span class="w">        </span><span class="kt">size_t</span><span class="w"> </span><span class="n">free_effort</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">lazyfreeGetFreeEffort</span><span class="p">(</span><span class="n">val</span><span class="p">);</span>
+<span class="w">        </span><span class="c1">//lazyfreeGetFreeEffort来获取val对象所包含的元素个数</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">free_effort</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">LAZYFREE_THRESHOLD</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">atomicIncr</span><span class="p">(</span><span class="n">lazyfree_objects</span><span class="p">,</span><span class="mi">1</span><span class="p">);</span>
+<span class="w">            </span><span class="c1">//原子操作给lazyfree_objects加1，以备info命令查看有多少对象待后台线程删除</span>
+<span class="w">            </span><span class="n">bioCreateBackgroundJob</span><span class="p">(</span><span class="n">BIO_LAZY_FREE</span><span class="w"> </span><span class="p">,</span><span class="n">val</span><span class="p">,</span><span class="nb">NULL</span><span class="p">,</span><span class="nb">NULL</span><span class="p">);</span>
+<span class="w">            </span><span class="c1">//此时真正把对象val丢到后台线程的任务队列中</span>
+<span class="w">            </span><span class="n">dictSetVal</span><span class="p">(</span><span class="n">db</span><span class="o">-&gt;</span><span class="n">dict</span><span class="p">,</span><span class="n">de</span><span class="p">,</span><span class="nb">NULL</span><span class="p">);</span>
+<span class="w">            </span><span class="c1">//把条目里的val指针设置为NULL，防止删除数据库字典条目时重复删除val对象</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">de</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">dictFreeUnlinkedEntry</span><span class="p">(</span><span class="n">db</span><span class="o">-&gt;</span><span class="n">dict</span><span class="p">,</span><span class="n">de</span><span class="p">);</span>
+<span class="w">        </span><span class="c1">//删除数据库字典条目，释放资源</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>以上便是异步删除的逻辑，首先会清除过期时间，然后调用dictUnlink把要删除的对象从数据库字典摘除，再判断下对象的大小（太小就没必要后台删除），如果足够大就丢给后台线程，最后清理下数据库字典的条目信息。</p>
+<p>由以上的逻辑可以看出，当unlink一个体积较大的键时，实际的删除是交给后台线程完成的，所以并不会阻塞redis。</p>
+<h2>4. 小结</h2>
+<p>本文内容确实太过于冗长了，如果读者将文章仔细看到了这里，我相信您一定是对这篇文章非常感兴趣了。笔者使用GDB调试Redis6.0版本代码时，输出了Redis启动后的线程信息，我们就从下面这张图结合本文的内容做一个总结吧：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220615-2120-15.png" alt="redis多线程信息.png"></p>
+<p>可以看到笔者的调试信息中，Redis启动了6个线程，它们分别是：</p>
+<ul>
+<li><p><code>redis-server</code> ： redis的主线程，通过 I/O multiplexing 接收客户端请求，执行CPU指令，从redis发版之出就已经存在并一直作为Redis核心网络模型的主线程。</p>
+</li>
+<li><p><code>bio_close_file、bio_aof_fsync</code> ：Redis BIO系统的老成员，<code>bio_close_file</code>用来异步的关闭服务端文件，<code>bio_aof_fsync</code>用来异步的同步日志，它们也是从Redis发版之出就一直存在了。</p>
+</li>
+<li><p><code>bio_lazy_free</code> ： Redis在4.0版本BIO系统增加的新成员，它主要将删除键或数据库的操作放在后台线程里执行， 从而尽可能地避免服务器阻塞。</p>
+</li>
+<li><p><code>io_thd_1、io_thd_2、io_thd_3</code> ： Redis在6.0版本提供了I/O工作线程的配置，它们用来分担Redis主线程的I/O压力，使主线程更高效的进行CPU指令执行的工作。</p>
+</li>
+</ul>
+<p>以上就是笔者对Redis各个线程的功能和发展历史的总结，脉络很清晰！希望读者不仅限于了解Redis多线程的演进过程，还能清楚的知道这个过程中Redis都遇到了哪些问题，并对这些问题进行自己的思考，要知道作者antirez最终采取了什么样方案，他又是基于哪些因素考虑的。此外，本文分析了Redis架构设计的很多模型和源码，比如基于锁和共享变量实现的多线程生产者消费者模型、redis多线程I/O做到了lock-free，这些也都是我们在系统设计和编码中值得学习和借鉴的地方。最后，再次感谢坚持到最后的读者！</p>
+<h2>参考 &amp; 延伸阅读</h2>
+<ul>
+<li>Lazy Redis is better Redis ：<a href="http://antirez.com/news/93">antirez.com/news/93</a></li>
+<li>The C10K problem ： <a href="http://www.kegel.com/c10k.html">www.kegel.com/c10k.html</a></li>
+<li>redis FAQ ：<a href="https://redis.io/topics/faq">redis.io/topics/faq</a></li>
+<li>Benchmarking the experimental Redis Multi-Threaded I/O ：<a href="https://itnext.io/benchmarking-the-experimental-redis-multi-threaded-i-o-1bb28b69a314">itnext.io/benchmarkin…</a></li>
+<li>Redis和I/O 多路复用 ：<a href="https://draveness.me/redis-io-multiplexing/">draveness.me/redis-io-mu…</a></li>
+<li>Redis 多线程网络模型全面揭秘 ：<a href="https://mp.weixin.qq.com/s/pm2NsPzTO4lJQfGUC4-sJQ">mp.weixin.qq.com/s/pm2NsPzTO…</a></li>
+<li>条件变量与锁 ：<a href="https://yiwenshao.github.io/2016/11/05/%25E6%259D%25A1%25E4%25BB%25B6%25E5%258F%2598%25E9%2587%258F%25E4%25B8%258E%25E9%2594%2581/">yiwenshao.github.io/2016/11/05/…</a></li>
+<li>Redis 6.0 多线程 IO 处理过程详解 ：<a href="https://ruby-china.org/topics/39925">ruby-china.org/topics/3992…</a></li>
+<li>Redis · lazyfree · 大key删除的福音 ：<a href="http://mysql.taobao.org/monthly/2018/10/05/">mysql.taobao.org/monthly/201…</a></li>
+</ul>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "Redis多线程架构的演进.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

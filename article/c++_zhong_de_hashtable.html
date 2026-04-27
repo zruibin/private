@@ -1,0 +1,461 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>C++中的HashTable - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="C++中的HashTable,C/C++,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="C++中的HashTable" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>C++中的HashTable</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2022-10-25 22:30
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://km.woa.com/group/51889/articles/show/532558' target='blank'>C++中的HashTable</a></p></h4>
+<blockquote><p>HashTable是开发中常用的数据结构。本文从C++ STL中的HashTable讲起，分析其存在的性能问题，以业界改进的实现为对比。通过基准测试对比其实际性能表现，总结更优的实现版本。</p>
+</blockquote>
+<h2>STL HashTable的问题</h2>
+<p>STL中的HashTable实现为<code>std::unordered_map</code>，采用<a href="https://en.wikipedia.org/wiki/Hash_table#Separate_chaining">链接法</a>(chaining)解决hash碰撞，hash值相同的多个pair组织为链表，如图1所示。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20221025-2230-1.png" alt=""></p>
+<p>图1 <code>std::unordered_map</code>内存布局</p>
+<p>查找key值时，需要遍历对应的链表，寻找值相同的key。链表中节点<strong>内存分布不连续</strong>，相邻节点处于同一cache line的概率很小，因此会产生较多的cpu cache miss，<strong>降低查询效率</strong>。</p>
+<h2>改进版HashTable</h2>
+<p>google <code>absl::flat_hash_map</code>采用<a href="https://en.wikipedia.org/wiki/Hash_table#Open_addressing">开放寻址法</a>(open addressing)解决hash碰撞，并使用二次探测(quadratic probing)方式。<code>absl::flat_hash_map</code>改进了内存布局，将所有pair放在一段连续内存中，将hash值相同的多个pair放在相邻位置，如图2所示。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20221025-2230-2.png" alt=""></p>
+<p>图2 <code>absl::flat_hash_map</code>内存布局</p>
+<p>查找key时，以二次探测方式遍历hash值相等的pair，寻找值相等的key。hash值相同的pair存储在相邻内存位置处，<strong>内存局部性好</strong>，对cpu cache友好，可<strong>提高查询效率</strong>。</p>
+<p>在内存用量方面，<code>absl::flat_hash_map</code>空间复杂度为 <code>O((sizeof(std::pair&lt;const K, V&gt;) + 1) * bucket_count())</code>。最大负载因子被设计为0.875，超过该值后，表大小会增加一倍。因此absl::flat_hash_map的size()通常介于 <code>0.4375 * bucket_count()</code> 和 <code>0.875 * bucket_count()</code> 之间。</p>
+<p>需要注意，<code>absl::flat_hash_map</code>在rehash时，会对pair进行move，因此pair的指针会失效，类似下述用法会访问非法内存地址。</p>
+<div class="highlight"><pre><code><span></span><span class="n">absl</span><span class="o">::</span><span class="n">flat_hash_map</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="p">,</span><span class="w"> </span><span class="n">Foo</span><span class="o">&gt;</span><span class="w"> </span><span class="n">map</span><span class="p">;</span>
+<span class="c1">// ...  init map</span>
+<span class="n">Foo</span><span class="o">&amp;</span><span class="w"> </span><span class="n">foo1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">map</span><span class="p">[</span><span class="s">&quot;f1&quot;</span><span class="p">];</span>
+<span class="n">Foo</span><span class="o">*</span><span class="w"> </span><span class="n">foo2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">(</span><span class="n">map</span><span class="p">[</span><span class="s">&quot;f2&quot;</span><span class="p">]);</span>
+<span class="c1">// ... rehash map</span>
+<span class="n">foo1</span><span class="p">.</span><span class="n">DoSomething</span><span class="p">();</span><span class="w"> </span><span class="c1">// 非法访问，foo1引用的对象已被move</span>
+<span class="n">foo2</span><span class="o">-&gt;</span><span class="n">DoSomething</span><span class="p">();</span><span class="w"> </span><span class="c1">// 非法访问，foo2指向的对象已被move</span>
+</code></pre></div>
+<p>为了解决上述pair指针失效问题，google <code>absl::node_hash_map</code>将pair存储在单独分配的节点中，在连续内存中存放指向这些节点的指针，其他设计与<code>flat_hash_map</code>相同，如图3所示。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20221025-2230-3.png" alt=""></p>
+<p>图3 <code>absl::node_hash_map</code>内存布局</p>
+<p><code>absl::node_hash_map</code>在rehash时，pair本身无需移动，只需将指针拷贝至新的地址。可保证pair的指针稳定性。</p>
+<h2>源码探究</h2>
+<p>下面对absl两种HashTable的核心逻辑源码进行探索（省略不相关部分的代码）：</p>
+<h3>1.分配内存</h3>
+<div class="highlight"><pre><code><span></span><span class="c1">// flat_hash_map和node_hash_map均以raw_hash_set为父类实现，区别在于policy不同</span>
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">K</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">V</span><span class="p">,</span>
+<span class="w">          </span><span class="k">class</span><span class="w"> </span><span class="nc">Hash</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">absl</span><span class="o">::</span><span class="n">container_internal</span><span class="o">::</span><span class="n">hash_default_hash</span><span class="o">&lt;</span><span class="n">K</span><span class="o">&gt;</span><span class="p">,</span>
+<span class="w">          </span><span class="k">class</span><span class="w"> </span><span class="nc">Eq</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">absl</span><span class="o">::</span><span class="n">container_internal</span><span class="o">::</span><span class="n">hash_default_eq</span><span class="o">&lt;</span><span class="n">K</span><span class="o">&gt;</span><span class="p">,</span>
+<span class="w">          </span><span class="k">class</span><span class="w"> </span><span class="nc">Allocator</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">allocator</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">pair</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="n">K</span><span class="p">,</span><span class="w"> </span><span class="n">V</span><span class="o">&gt;&gt;&gt;</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">flat_hash_map</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">absl</span><span class="o">::</span><span class="n">container_internal</span><span class="o">::</span><span class="n">raw_hash_map</span><span class="o">&lt;</span>
+<span class="w">                          </span><span class="n">absl</span><span class="o">::</span><span class="n">container_internal</span><span class="o">::</span><span class="n">FlatHashMapPolicy</span><span class="o">&lt;</span><span class="n">K</span><span class="p">,</span><span class="w"> </span><span class="n">V</span><span class="o">&gt;</span><span class="p">,</span>
+<span class="w">                          </span><span class="n">Hash</span><span class="p">,</span><span class="w"> </span><span class="n">Eq</span><span class="p">,</span><span class="w"> </span><span class="n">Allocator</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{};</span>
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Key</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">Value</span><span class="p">,</span>
+<span class="w">          </span><span class="k">class</span><span class="w"> </span><span class="nc">Hash</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">absl</span><span class="o">::</span><span class="n">container_internal</span><span class="o">::</span><span class="n">hash_default_hash</span><span class="o">&lt;</span><span class="n">Key</span><span class="o">&gt;</span><span class="p">,</span>
+<span class="w">          </span><span class="k">class</span><span class="w"> </span><span class="nc">Eq</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">absl</span><span class="o">::</span><span class="n">container_internal</span><span class="o">::</span><span class="n">hash_default_eq</span><span class="o">&lt;</span><span class="n">Key</span><span class="o">&gt;</span><span class="p">,</span>
+<span class="w">          </span><span class="k">class</span><span class="w"> </span><span class="nc">Alloc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">allocator</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">pair</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="n">Key</span><span class="p">,</span><span class="w"> </span><span class="n">Value</span><span class="o">&gt;&gt;&gt;</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">node_hash_map</span>
+<span class="w">    </span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">absl</span><span class="o">::</span><span class="n">container_internal</span><span class="o">::</span><span class="n">raw_hash_map</span><span class="o">&lt;</span>
+<span class="w">          </span><span class="n">absl</span><span class="o">::</span><span class="n">container_internal</span><span class="o">::</span><span class="n">NodeHashMapPolicy</span><span class="o">&lt;</span><span class="n">Key</span><span class="p">,</span><span class="w"> </span><span class="n">Value</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">Hash</span><span class="p">,</span><span class="w"> </span><span class="n">Eq</span><span class="p">,</span>
+<span class="w">          </span><span class="n">Alloc</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{};</span>
+
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Policy</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">Hash</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">Eq</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">Alloc</span><span class="o">&gt;</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">raw_hash_map</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">raw_hash_set</span><span class="o">&lt;</span><span class="n">Policy</span><span class="p">,</span><span class="w"> </span><span class="n">Hash</span><span class="p">,</span><span class="w"> </span><span class="n">Eq</span><span class="p">,</span><span class="w"> </span><span class="n">Alloc</span><span class="o">&gt;</span><span class="p">{};</span>
+
+<span class="c1">// raw_hash_set分配连续内存的大小取决于 capacity_ 和 slot_type</span>
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Policy</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">Hash</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">Eq</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">Alloc</span><span class="o">&gt;</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">raw_hash_set</span><span class="w"> </span><span class="p">{</span>
+
+<span class="w">  </span><span class="k">using</span><span class="w"> </span><span class="n">slot_type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">Policy</span><span class="o">::</span><span class="n">slot_type</span><span class="p">;</span>
+
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">initialize_slots</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 分配连续内存的大小为 capacity_ * slot_size 并对齐 slot_align</span>
+<span class="w">    </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">mem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">char</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">Allocate</span><span class="o">&lt;</span><span class="k">alignof</span><span class="p">(</span><span class="n">slot_type</span><span class="p">)</span><span class="o">&gt;</span><span class="p">(</span>
+<span class="w">        </span><span class="o">&amp;</span><span class="n">alloc_ref</span><span class="p">(),</span>
+<span class="w">        </span><span class="n">AllocSize</span><span class="p">(</span><span class="n">capacity_</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">slot_type</span><span class="p">),</span><span class="w"> </span><span class="k">alignof</span><span class="p">(</span><span class="n">slot_type</span><span class="p">))));</span>
+<span class="w">    </span><span class="n">ctrl_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="n">ctrl_t</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">mem</span><span class="p">);</span>
+<span class="w">    </span><span class="n">slots_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="n">slot_type</span><span class="o">*&gt;</span><span class="p">(</span>
+<span class="w">        </span><span class="n">mem</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">SlotOffset</span><span class="p">(</span><span class="n">capacity_</span><span class="p">,</span><span class="w"> </span><span class="k">alignof</span><span class="p">(</span><span class="n">slot_type</span><span class="p">)));</span>
+<span class="w">    </span><span class="n">ResetCtrl</span><span class="p">(</span><span class="n">capacity_</span><span class="p">,</span><span class="w"> </span><span class="n">ctrl_</span><span class="p">,</span><span class="w"> </span><span class="n">slots_</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">slot_type</span><span class="p">));</span>
+<span class="w">    </span><span class="n">reset_growth_left</span><span class="p">();</span>
+<span class="w">    </span><span class="n">infoz</span><span class="p">().</span><span class="n">RecordStorageChanged</span><span class="p">(</span><span class="n">size_</span><span class="p">,</span><span class="w"> </span><span class="n">capacity_</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kr">inline</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="nf">AllocSize</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">capacity</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">slot_size</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">slot_align</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">SlotOffset</span><span class="p">(</span><span class="n">capacity</span><span class="p">,</span><span class="w"> </span><span class="n">slot_align</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">capacity</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">slot_size</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">};</span>
+
+<span class="c1">// flat_hash_map的slot包含pair</span>
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">K</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">V</span><span class="o">&gt;</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">FlatHashMapPolicy</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">using</span><span class="w"> </span><span class="n">slot_type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">map_slot_type</span><span class="o">&lt;</span><span class="n">K</span><span class="p">,</span><span class="w"> </span><span class="n">V</span><span class="o">&gt;</span><span class="p">;</span>
+<span class="p">};</span>
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">K</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">V</span><span class="o">&gt;</span>
+<span class="k">union</span><span class="w"> </span><span class="nc">map_slot_type</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">using</span><span class="w"> </span><span class="n">value_type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">pair</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="n">K</span><span class="p">,</span><span class="w"> </span><span class="n">V</span><span class="o">&gt;</span><span class="p">;</span>
+<span class="w">  </span><span class="k">using</span><span class="w"> </span><span class="n">mutable_value_type</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">pair</span><span class="o">&lt;</span><span class="n">absl</span><span class="o">::</span><span class="n">remove_const_t</span><span class="o">&lt;</span><span class="n">K</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">absl</span><span class="o">::</span><span class="n">remove_const_t</span><span class="o">&lt;</span><span class="n">V</span><span class="o">&gt;&gt;</span><span class="p">;</span>
+
+<span class="w">  </span><span class="n">value_type</span><span class="w"> </span><span class="n">value</span><span class="p">;</span>
+<span class="w">  </span><span class="n">mutable_value_type</span><span class="w"> </span><span class="n">mutable_value</span><span class="p">;</span>
+<span class="w">  </span><span class="n">absl</span><span class="o">::</span><span class="n">remove_const_t</span><span class="o">&lt;</span><span class="n">K</span><span class="o">&gt;</span><span class="w"> </span><span class="n">key</span><span class="p">;</span>
+<span class="p">};</span>
+<span class="c1">// node_hash_map的slot为指向pair的指针</span>
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Key</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">Value</span><span class="o">&gt;</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">NodeHashMapPolicy</span>
+<span class="w">    </span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">absl</span><span class="o">::</span><span class="n">container_internal</span><span class="o">::</span><span class="n">node_slot_policy</span><span class="o">&lt;</span>
+<span class="w">          </span><span class="n">std</span><span class="o">::</span><span class="n">pair</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="n">Key</span><span class="p">,</span><span class="w"> </span><span class="n">Value</span><span class="o">&gt;&amp;</span><span class="p">,</span><span class="w"> </span><span class="n">NodeHashMapPolicy</span><span class="o">&lt;</span><span class="n">Key</span><span class="p">,</span><span class="w"> </span><span class="n">Value</span><span class="o">&gt;&gt;</span><span class="p">{};</span>
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Reference</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">Policy</span><span class="o">&gt;</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">node_slot_policy</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">using</span><span class="w"> </span><span class="n">slot_type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">std</span><span class="o">::</span><span class="n">remove_cv</span><span class="o">&lt;</span>
+<span class="w">      </span><span class="k">typename</span><span class="w"> </span><span class="nc">std</span><span class="o">::</span><span class="n">remove_reference</span><span class="o">&lt;</span><span class="n">Reference</span><span class="o">&gt;::</span><span class="n">type</span><span class="o">&gt;::</span><span class="n">type</span><span class="o">*</span><span class="p">;</span><span class="w">  </span><span class="c1">// slot为指向pair的指针</span>
+<span class="p">};</span>
+</code></pre></div>
+<h3>2.添加元素</h3>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Policy</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">Hash</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">Eq</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">Alloc</span><span class="o">&gt;</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">raw_hash_set</span><span class="w"> </span><span class="p">{</span>
+
+<span class="w">  </span><span class="c1">// 查找</span>
+<span class="w">  </span><span class="c1">// Attempts to find `key` in the table; if it isn&#39;t found, returns a slot that</span>
+<span class="w">  </span><span class="c1">// the value can be inserted into, with the control byte already set to</span>
+<span class="w">  </span><span class="c1">// `key`&#39;s H2.</span>
+<span class="w">  </span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">K</span><span class="o">&gt;</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">pair</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="p">,</span><span class="w"> </span><span class="kt">bool</span><span class="o">&gt;</span><span class="w"> </span><span class="n">find_or_prepare_insert</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">K</span><span class="o">&amp;</span><span class="w"> </span><span class="n">key</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">prefetch_heap_block</span><span class="p">();</span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">hash</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">hash_ref</span><span class="p">()(</span><span class="n">key</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// 在相同hash值的桶中查找</span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">seq</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">probe</span><span class="p">(</span><span class="n">ctrl_</span><span class="p">,</span><span class="w"> </span><span class="n">hash</span><span class="p">,</span><span class="w"> </span><span class="n">capacity_</span><span class="p">);</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="nb">true</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">Group</span><span class="w"> </span><span class="n">g</span><span class="p">{</span><span class="n">ctrl_</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">seq</span><span class="p">.</span><span class="n">offset</span><span class="p">()};</span>
+<span class="w">      </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">g</span><span class="p">.</span><span class="n">Match</span><span class="p">(</span><span class="n">H2</span><span class="p">(</span><span class="n">hash</span><span class="p">)))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 如果key相等，则找到了目标元素</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">ABSL_PREDICT_TRUE</span><span class="p">(</span><span class="n">PolicyTraits</span><span class="o">::</span><span class="n">apply</span><span class="p">(</span>
+<span class="w">                </span><span class="n">EqualElement</span><span class="o">&lt;</span><span class="n">K</span><span class="o">&gt;</span><span class="p">{</span><span class="n">key</span><span class="p">,</span><span class="w"> </span><span class="n">eq_ref</span><span class="p">()},</span>
+<span class="w">                </span><span class="n">PolicyTraits</span><span class="o">::</span><span class="n">element</span><span class="p">(</span><span class="n">slots_</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">seq</span><span class="p">.</span><span class="n">offset</span><span class="p">(</span><span class="n">i</span><span class="p">)))))</span>
+<span class="w">          </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="n">seq</span><span class="p">.</span><span class="n">offset</span><span class="p">(</span><span class="n">i</span><span class="p">),</span><span class="w"> </span><span class="nb">false</span><span class="p">};</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">ABSL_PREDICT_TRUE</span><span class="p">(</span><span class="n">g</span><span class="p">.</span><span class="n">MaskEmpty</span><span class="p">()))</span><span class="w"> </span><span class="k">break</span><span class="p">;</span>
+<span class="w">      </span><span class="n">seq</span><span class="p">.</span><span class="n">next</span><span class="p">();</span>
+<span class="w">      </span><span class="n">assert</span><span class="p">(</span><span class="n">seq</span><span class="p">.</span><span class="n">index</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">capacity_</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="s">&quot;full table!&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// 如果没有相等的key，则插入元素</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="n">prepare_insert</span><span class="p">(</span><span class="n">hash</span><span class="p">),</span><span class="w"> </span><span class="nb">true</span><span class="p">};</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 找到下一个可用的slot</span>
+<span class="w">  </span><span class="c1">// Given the hash of a value not currently in the table, finds the next</span>
+<span class="w">  </span><span class="c1">// viable slot index to insert it at.</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">prepare_insert</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">hash</span><span class="p">)</span><span class="w"> </span><span class="n">ABSL_ATTRIBUTE_NOINLINE</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">target</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">find_first_non_full</span><span class="p">(</span><span class="n">ctrl_</span><span class="p">,</span><span class="w"> </span><span class="n">hash</span><span class="p">,</span><span class="w"> </span><span class="n">capacity_</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">ABSL_PREDICT_FALSE</span><span class="p">(</span><span class="n">growth_left</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">                           </span><span class="o">!</span><span class="n">IsDeleted</span><span class="p">(</span><span class="n">ctrl_</span><span class="p">[</span><span class="n">target</span><span class="p">.</span><span class="n">offset</span><span class="p">])))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">rehash_and_grow_if_necessary</span><span class="p">();</span>
+<span class="w">      </span><span class="n">target</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">find_first_non_full</span><span class="p">(</span><span class="n">ctrl_</span><span class="p">,</span><span class="w"> </span><span class="n">hash</span><span class="p">,</span><span class="w"> </span><span class="n">capacity_</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="o">++</span><span class="n">size_</span><span class="p">;</span>
+<span class="w">    </span><span class="n">growth_left</span><span class="p">()</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="n">IsEmpty</span><span class="p">(</span><span class="n">ctrl_</span><span class="p">[</span><span class="n">target</span><span class="p">.</span><span class="n">offset</span><span class="p">]);</span>
+<span class="w">    </span><span class="n">SetCtrl</span><span class="p">(</span><span class="n">target</span><span class="p">.</span><span class="n">offset</span><span class="p">,</span><span class="w"> </span><span class="n">H2</span><span class="p">(</span><span class="n">hash</span><span class="p">),</span><span class="w"> </span><span class="n">capacity_</span><span class="p">,</span><span class="w"> </span><span class="n">ctrl_</span><span class="p">,</span><span class="w"> </span><span class="n">slots_</span><span class="p">,</span>
+<span class="w">            </span><span class="k">sizeof</span><span class="p">(</span><span class="n">slot_type</span><span class="p">));</span>
+<span class="w">    </span><span class="n">infoz</span><span class="p">().</span><span class="n">RecordInsert</span><span class="p">(</span><span class="n">hash</span><span class="p">,</span><span class="w"> </span><span class="n">target</span><span class="p">.</span><span class="n">probe_length</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">target</span><span class="p">.</span><span class="n">offset</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// 在找到的slot处构造元素</span>
+<span class="w">  </span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">K</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">key_type</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">F</span><span class="o">&gt;</span>
+<span class="w">  </span><span class="n">iterator</span><span class="w"> </span><span class="n">lazy_emplace</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">key_arg</span><span class="o">&lt;</span><span class="n">K</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">key</span><span class="p">,</span><span class="w"> </span><span class="n">F</span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">f</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">find_or_prepare_insert</span><span class="p">(</span><span class="n">key</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">res</span><span class="p">.</span><span class="n">second</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">slot_type</span><span class="o">*</span><span class="w"> </span><span class="n">slot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">slots_</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">res</span><span class="p">.</span><span class="n">first</span><span class="p">;</span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">forward</span><span class="o">&lt;</span><span class="n">F</span><span class="o">&gt;</span><span class="p">(</span><span class="n">f</span><span class="p">)((</span><span class="o">&amp;</span><span class="n">alloc_ref</span><span class="p">(),</span><span class="w"> </span><span class="o">&amp;</span><span class="n">slot</span><span class="p">));</span>
+<span class="w">      </span><span class="n">assert</span><span class="p">(</span><span class="o">!</span><span class="n">slot</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">iterator_at</span><span class="p">(</span><span class="n">res</span><span class="p">.</span><span class="n">first</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="p">};</span>
+</code></pre></div>
+<h3>3.rehash</h3>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Policy</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">Hash</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">Eq</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">Alloc</span><span class="o">&gt;</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">raw_hash_set</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+
+<span class="w">  </span><span class="c1">// Called whenever the table *might* need to conditionally grow.</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">rehash_and_grow_if_necessary</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">capacity_</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">resize</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">capacity_</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">Group</span><span class="o">::</span><span class="n">kWidth</span><span class="w"> </span><span class="o">&amp;&amp;</span>
+<span class="w">               </span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="kt">uint64_t</span><span class="p">{</span><span class="mi">32</span><span class="p">}</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">capacity_</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="kt">uint64_t</span><span class="p">{</span><span class="mi">25</span><span class="p">})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">drop_deletes_without_resize</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Otherwise grow the container.</span>
+<span class="w">      </span><span class="n">resize</span><span class="p">(</span><span class="n">capacity_</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">resize</span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">new_capacity</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">assert</span><span class="p">(</span><span class="n">IsValidCapacity</span><span class="p">(</span><span class="n">new_capacity</span><span class="p">));</span>
+<span class="w">    </span><span class="k">auto</span><span class="o">*</span><span class="w"> </span><span class="n">old_ctrl</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ctrl_</span><span class="p">;</span>
+<span class="w">    </span><span class="k">auto</span><span class="o">*</span><span class="w"> </span><span class="n">old_slots</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">slots_</span><span class="p">;</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">old_capacity</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">capacity_</span><span class="p">;</span>
+<span class="w">    </span><span class="n">capacity_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">new_capacity</span><span class="p">;</span>
+<span class="w">    </span><span class="n">initialize_slots</span><span class="p">();</span>
+
+<span class="w">    </span><span class="kt">size_t</span><span class="w"> </span><span class="n">total_probe_length</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">old_capacity</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">IsFull</span><span class="p">(</span><span class="n">old_ctrl</span><span class="p">[</span><span class="n">i</span><span class="p">]))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">size_t</span><span class="w"> </span><span class="n">hash</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">PolicyTraits</span><span class="o">::</span><span class="n">apply</span><span class="p">(</span><span class="n">HashElement</span><span class="p">{</span><span class="n">hash_ref</span><span class="p">()},</span>
+<span class="w">                                          </span><span class="n">PolicyTraits</span><span class="o">::</span><span class="n">element</span><span class="p">(</span><span class="n">old_slots</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">i</span><span class="p">));</span>
+<span class="w">        </span><span class="k">auto</span><span class="w"> </span><span class="n">target</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">find_first_non_full</span><span class="p">(</span><span class="n">ctrl_</span><span class="p">,</span><span class="w"> </span><span class="n">hash</span><span class="p">,</span><span class="w"> </span><span class="n">capacity_</span><span class="p">);</span>
+<span class="w">        </span><span class="kt">size_t</span><span class="w"> </span><span class="n">new_i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">target</span><span class="p">.</span><span class="n">offset</span><span class="p">;</span>
+<span class="w">        </span><span class="n">total_probe_length</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">target</span><span class="p">.</span><span class="n">probe_length</span><span class="p">;</span>
+<span class="w">        </span><span class="n">SetCtrl</span><span class="p">(</span><span class="n">new_i</span><span class="p">,</span><span class="w"> </span><span class="n">H2</span><span class="p">(</span><span class="n">hash</span><span class="p">),</span><span class="w"> </span><span class="n">capacity_</span><span class="p">,</span><span class="w"> </span><span class="n">ctrl_</span><span class="p">,</span><span class="w"> </span><span class="n">slots_</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">slot_type</span><span class="p">));</span>
+<span class="w">    </span><span class="c1">// 调用 policy transfer 在新地址处构造元素</span>
+<span class="w">        </span><span class="n">PolicyTraits</span><span class="o">::</span><span class="n">transfer</span><span class="p">(</span><span class="o">&amp;</span><span class="n">alloc_ref</span><span class="p">(),</span><span class="w"> </span><span class="n">slots_</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">new_i</span><span class="p">,</span><span class="w"> </span><span class="n">old_slots</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">i</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">old_capacity</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">SanitizerUnpoisonMemoryRegion</span><span class="p">(</span><span class="n">old_slots</span><span class="p">,</span>
+<span class="w">                                    </span><span class="k">sizeof</span><span class="p">(</span><span class="n">slot_type</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">old_capacity</span><span class="p">);</span>
+<span class="w">      </span><span class="n">Deallocate</span><span class="o">&lt;</span><span class="k">alignof</span><span class="p">(</span><span class="n">slot_type</span><span class="p">)</span><span class="o">&gt;</span><span class="p">(</span>
+<span class="w">          </span><span class="o">&amp;</span><span class="n">alloc_ref</span><span class="p">(),</span><span class="w"> </span><span class="n">old_ctrl</span><span class="p">,</span>
+<span class="w">          </span><span class="n">AllocSize</span><span class="p">(</span><span class="n">old_capacity</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">slot_type</span><span class="p">),</span><span class="w"> </span><span class="k">alignof</span><span class="p">(</span><span class="n">slot_type</span><span class="p">)));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">infoz</span><span class="p">().</span><span class="n">RecordRehash</span><span class="p">(</span><span class="n">total_probe_length</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">};</span>
+
+<span class="c1">// flat_hash_map在rehash时，将元素移动至新地址处</span>
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">K</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">V</span><span class="o">&gt;</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">map_slot_policy</span><span class="w"> </span><span class="p">{</span>
+
+<span class="w">  </span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Allocator</span><span class="o">&gt;</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">transfer</span><span class="p">(</span><span class="n">Allocator</span><span class="o">*</span><span class="w"> </span><span class="n">alloc</span><span class="p">,</span><span class="w"> </span><span class="n">slot_type</span><span class="o">*</span><span class="w"> </span><span class="n">new_slot</span><span class="p">,</span>
+<span class="w">                       </span><span class="n">slot_type</span><span class="o">*</span><span class="w"> </span><span class="n">old_slot</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">emplace</span><span class="p">(</span><span class="n">new_slot</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 将元素 move 至新地址处</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">kMutableKeys</span><span class="o">::</span><span class="n">value</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">absl</span><span class="o">::</span><span class="n">allocator_traits</span><span class="o">&lt;</span><span class="n">Allocator</span><span class="o">&gt;::</span><span class="n">construct</span><span class="p">(</span>
+<span class="w">          </span><span class="o">*</span><span class="n">alloc</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">new_slot</span><span class="o">-&gt;</span><span class="n">mutable_value</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">old_slot</span><span class="o">-&gt;</span><span class="n">mutable_value</span><span class="p">));</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">absl</span><span class="o">::</span><span class="n">allocator_traits</span><span class="o">&lt;</span><span class="n">Allocator</span><span class="o">&gt;::</span><span class="n">construct</span><span class="p">(</span><span class="o">*</span><span class="n">alloc</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">new_slot</span><span class="o">-&gt;</span><span class="n">value</span><span class="p">,</span>
+<span class="w">                                                   </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">old_slot</span><span class="o">-&gt;</span><span class="n">value</span><span class="p">));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">destroy</span><span class="p">(</span><span class="n">alloc</span><span class="p">,</span><span class="w"> </span><span class="n">old_slot</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">};</span>
+<span class="c1">// node_hash_map在rehash时，将指向元素的指针拷贝至新地址处</span>
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Reference</span><span class="p">,</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">Policy</span><span class="o">&gt;</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">node_slot_policy</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">class</span><span class="w"> </span><span class="nc">Alloc</span><span class="o">&gt;</span>
+<span class="w">  </span><span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">transfer</span><span class="p">(</span><span class="n">Alloc</span><span class="o">*</span><span class="p">,</span><span class="w"> </span><span class="n">slot_type</span><span class="o">*</span><span class="w"> </span><span class="n">new_slot</span><span class="p">,</span><span class="w"> </span><span class="n">slot_type</span><span class="o">*</span><span class="w"> </span><span class="n">old_slot</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// 将“指向元素的地址” copy 至新地址处</span>
+<span class="w">    </span><span class="o">*</span><span class="n">new_slot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">old_slot</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">};</span>
+</code></pre></div>
+<h2>基准测试</h2>
+<p>基准测试场景如下：</p>
+<ul>
+<li>k、v均为std::string</li>
+<li>k长度约20字节</li>
+<li>v长度约40字节</li>
+<li>写操作：向空map中，emplace N个k值不同的pair</li>
+<li>读操作：从包含N个pair的map中，find N次随机k值（提前生成好的随机序列）</li>
+</ul>
+<p>各容器读操作的cache miss情况如下：</p>
+<div class="highlight"><pre><code><span></span><span class="cp"># std::unordered_map</span>
+<span class="p">[</span><span class="n">root</span><span class="err">@</span><span class="n">VM</span><span class="mi">-239-185</span><span class="o">-</span><span class="n">centos</span><span class="w"> </span><span class="n">tools</span><span class="p">]</span><span class="err">#</span><span class="w"> </span><span class="n">perf</span><span class="w"> </span><span class="n">stat</span><span class="w"> </span><span class="o">-</span><span class="n">e</span><span class="w"> </span><span class="n">cpu</span><span class="o">-</span><span class="n">clock</span><span class="p">,</span><span class="n">cycles</span><span class="p">,</span><span class="n">instructions</span><span class="p">,</span><span class="n">L1</span><span class="o">-</span><span class="n">dcache</span><span class="o">-</span><span class="n">load</span><span class="o">-</span><span class="n">misses</span><span class="p">,</span><span class="n">L1</span><span class="o">-</span><span class="n">dcache</span><span class="o">-</span><span class="n">loads</span><span class="w">  </span><span class="o">-</span><span class="n">p</span><span class="w"> </span><span class="mi">2864179</span><span class="w">   </span>
+<span class="o">^</span><span class="n">C</span>
+<span class="w"> </span><span class="n">Performance</span><span class="w"> </span><span class="n">counter</span><span class="w"> </span><span class="n">stats</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">process</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="err">&#39;</span><span class="mi">2864179</span><span class="err">&#39;</span><span class="o">:</span>
+
+<span class="w">         </span><span class="mi">18</span><span class="p">,</span><span class="mf">447.43</span><span class="w"> </span><span class="n">msec</span><span class="w"> </span><span class="n">cpu</span><span class="o">-</span><span class="n">clock</span><span class="w">                 </span><span class="err">#</span><span class="w">    </span><span class="mf">1.000</span><span class="w"> </span><span class="n">CPUs</span><span class="w"> </span><span class="n">utilized</span><span class="w">          </span>
+<span class="w">    </span><span class="mi">56</span><span class="p">,</span><span class="mi">278</span><span class="p">,</span><span class="mi">197</span><span class="p">,</span><span class="mo">02</span><span class="mi">9</span><span class="w">      </span><span class="n">cycles</span><span class="w">                    </span><span class="err">#</span><span class="w">    </span><span class="mf">3.051</span><span class="w"> </span><span class="n">GHz</span><span class="w">                    </span>
+<span class="w">    </span><span class="mi">25</span><span class="p">,</span><span class="mi">374</span><span class="p">,</span><span class="mi">763</span><span class="p">,</span><span class="mi">394</span><span class="w">      </span><span class="n">instructions</span><span class="w">              </span><span class="err">#</span><span class="w">    </span><span class="mf">0.45</span><span class="w">  </span><span class="n">insn</span><span class="w"> </span><span class="n">per</span><span class="w"> </span><span class="n">cycle</span><span class="w">         </span>
+<span class="w">       </span><span class="mi">265</span><span class="p">,</span><span class="mi">164</span><span class="p">,</span><span class="mi">336</span><span class="w">      </span><span class="n">L1</span><span class="o">-</span><span class="n">dcache</span><span class="o">-</span><span class="n">load</span><span class="o">-</span><span class="n">misses</span><span class="w">     </span><span class="err">#</span><span class="w">    </span><span class="mf">3.17</span><span class="o">%</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">all</span><span class="w"> </span><span class="n">L1</span><span class="o">-</span><span class="n">dcache</span><span class="w"> </span><span class="n">hits</span><span class="w">  </span>
+<span class="w">     </span><span class="mi">8</span><span class="p">,</span><span class="mi">377</span><span class="p">,</span><span class="mi">925</span><span class="p">,</span><span class="mi">973</span><span class="w">      </span><span class="n">L1</span><span class="o">-</span><span class="n">dcache</span><span class="o">-</span><span class="n">loads</span><span class="w">           </span><span class="err">#</span><span class="w">  </span><span class="mf">454.151</span><span class="w"> </span><span class="n">M</span><span class="o">/</span><span class="n">sec</span>
+
+<span class="w">      </span><span class="mf">18.453787989</span><span class="w"> </span><span class="n">seconds</span><span class="w"> </span><span class="n">time</span><span class="w"> </span><span class="n">elapsed</span>
+
+<span class="cp"># absl::node_hash_map</span>
+<span class="p">[</span><span class="n">root</span><span class="err">@</span><span class="n">VM</span><span class="mi">-239-185</span><span class="o">-</span><span class="n">centos</span><span class="w"> </span><span class="n">tools</span><span class="p">]</span><span class="err">#</span><span class="w"> </span><span class="n">perf</span><span class="w"> </span><span class="n">stat</span><span class="w"> </span><span class="o">-</span><span class="n">e</span><span class="w"> </span><span class="n">cpu</span><span class="o">-</span><span class="n">clock</span><span class="p">,</span><span class="n">cycles</span><span class="p">,</span><span class="n">instructions</span><span class="p">,</span><span class="n">L1</span><span class="o">-</span><span class="n">dcache</span><span class="o">-</span><span class="n">load</span><span class="o">-</span><span class="n">misses</span><span class="p">,</span><span class="n">L1</span><span class="o">-</span><span class="n">dcache</span><span class="o">-</span><span class="n">loads</span><span class="w">  </span><span class="o">-</span><span class="n">p</span><span class="w"> </span><span class="mi">2873181</span><span class="w">   </span>
+<span class="o">^</span><span class="n">C</span>
+<span class="w"> </span><span class="n">Performance</span><span class="w"> </span><span class="n">counter</span><span class="w"> </span><span class="n">stats</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">process</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="err">&#39;</span><span class="mi">2873181</span><span class="err">&#39;</span><span class="o">:</span>
+
+<span class="w">         </span><span class="mi">42</span><span class="p">,</span><span class="mf">683.27</span><span class="w"> </span><span class="n">msec</span><span class="w"> </span><span class="n">cpu</span><span class="o">-</span><span class="n">clock</span><span class="w">                 </span><span class="err">#</span><span class="w">    </span><span class="mf">1.000</span><span class="w"> </span><span class="n">CPUs</span><span class="w"> </span><span class="n">utilized</span><span class="w">          </span>
+<span class="w">   </span><span class="mi">130</span><span class="p">,</span><span class="mi">088</span><span class="p">,</span><span class="mi">665</span><span class="p">,</span><span class="mi">294</span><span class="w">      </span><span class="n">cycles</span><span class="w">                    </span><span class="err">#</span><span class="w">    </span><span class="mf">3.048</span><span class="w"> </span><span class="n">GHz</span><span class="w">                    </span>
+<span class="w">   </span><span class="mi">134</span><span class="p">,</span><span class="mi">531</span><span class="p">,</span><span class="mi">389</span><span class="p">,</span><span class="mi">793</span><span class="w">      </span><span class="n">instructions</span><span class="w">              </span><span class="err">#</span><span class="w">    </span><span class="mf">1.03</span><span class="w">  </span><span class="n">insn</span><span class="w"> </span><span class="n">per</span><span class="w"> </span><span class="n">cycle</span><span class="w">         </span>
+<span class="w">       </span><span class="mi">334</span><span class="p">,</span><span class="mi">111</span><span class="p">,</span><span class="mi">936</span><span class="w">      </span><span class="n">L1</span><span class="o">-</span><span class="n">dcache</span><span class="o">-</span><span class="n">load</span><span class="o">-</span><span class="n">misses</span><span class="w">     </span><span class="err">#</span><span class="w">    </span><span class="mf">0.74</span><span class="o">%</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">all</span><span class="w"> </span><span class="n">L1</span><span class="o">-</span><span class="n">dcache</span><span class="w"> </span><span class="n">hits</span><span class="w">  </span>
+<span class="w">    </span><span class="mi">44</span><span class="p">,</span><span class="mi">998</span><span class="p">,</span><span class="mi">374</span><span class="p">,</span><span class="mi">652</span><span class="w">      </span><span class="n">L1</span><span class="o">-</span><span class="n">dcache</span><span class="o">-</span><span class="n">loads</span><span class="w">           </span><span class="err">#</span><span class="w"> </span><span class="mf">1054.239</span><span class="w"> </span><span class="n">M</span><span class="o">/</span><span class="n">sec</span>
+
+<span class="w">      </span><span class="mf">42.685607230</span><span class="w"> </span><span class="n">seconds</span><span class="w"> </span><span class="n">time</span><span class="w"> </span><span class="n">elapsed</span>
+
+<span class="cp"># absl::flat_hash_map</span>
+<span class="p">[</span><span class="n">root</span><span class="err">@</span><span class="n">VM</span><span class="mi">-239-185</span><span class="o">-</span><span class="n">centos</span><span class="w"> </span><span class="n">tools</span><span class="p">]</span><span class="err">#</span><span class="w"> </span><span class="n">perf</span><span class="w"> </span><span class="n">stat</span><span class="w"> </span><span class="o">-</span><span class="n">e</span><span class="w"> </span><span class="n">cpu</span><span class="o">-</span><span class="n">clock</span><span class="p">,</span><span class="n">cycles</span><span class="p">,</span><span class="n">instructions</span><span class="p">,</span><span class="n">L1</span><span class="o">-</span><span class="n">dcache</span><span class="o">-</span><span class="n">load</span><span class="o">-</span><span class="n">misses</span><span class="p">,</span><span class="n">L1</span><span class="o">-</span><span class="n">dcache</span><span class="o">-</span><span class="n">loads</span><span class="w">  </span><span class="o">-</span><span class="n">p</span><span class="w"> </span><span class="mi">2867048</span><span class="w">  </span>
+<span class="o">^</span><span class="n">C</span>
+<span class="w"> </span><span class="n">Performance</span><span class="w"> </span><span class="n">counter</span><span class="w"> </span><span class="n">stats</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">process</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="err">&#39;</span><span class="mi">2867048</span><span class="err">&#39;</span><span class="o">:</span>
+
+<span class="w">         </span><span class="mi">27</span><span class="p">,</span><span class="mf">379.72</span><span class="w"> </span><span class="n">msec</span><span class="w"> </span><span class="n">cpu</span><span class="o">-</span><span class="n">clock</span><span class="w">                 </span><span class="err">#</span><span class="w">    </span><span class="mf">1.000</span><span class="w"> </span><span class="n">CPUs</span><span class="w"> </span><span class="n">utilized</span><span class="w">          </span>
+<span class="w">    </span><span class="mi">83</span><span class="p">,</span><span class="mi">562</span><span class="p">,</span><span class="mi">709</span><span class="p">,</span><span class="mi">268</span><span class="w">      </span><span class="n">cycles</span><span class="w">                    </span><span class="err">#</span><span class="w">    </span><span class="mf">3.052</span><span class="w"> </span><span class="n">GHz</span><span class="w">                    </span>
+<span class="w">    </span><span class="mi">82</span><span class="p">,</span><span class="mi">589</span><span class="p">,</span><span class="mi">606</span><span class="p">,</span><span class="mi">600</span><span class="w">      </span><span class="n">instructions</span><span class="w">              </span><span class="err">#</span><span class="w">    </span><span class="mf">0.99</span><span class="w">  </span><span class="n">insn</span><span class="w"> </span><span class="n">per</span><span class="w"> </span><span class="n">cycle</span><span class="w">         </span>
+<span class="w">       </span><span class="mi">188</span><span class="p">,</span><span class="mi">364</span><span class="p">,</span><span class="mi">766</span><span class="w">      </span><span class="n">L1</span><span class="o">-</span><span class="n">dcache</span><span class="o">-</span><span class="n">load</span><span class="o">-</span><span class="n">misses</span><span class="w">     </span><span class="err">#</span><span class="w">    </span><span class="mf">0.68</span><span class="o">%</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">all</span><span class="w"> </span><span class="n">L1</span><span class="o">-</span><span class="n">dcache</span><span class="w"> </span><span class="n">hits</span><span class="w">  </span>
+<span class="w">    </span><span class="mi">27</span><span class="p">,</span><span class="mi">605</span><span class="p">,</span><span class="mi">138</span><span class="p">,</span><span class="mi">227</span><span class="w">      </span><span class="n">L1</span><span class="o">-</span><span class="n">dcache</span><span class="o">-</span><span class="n">loads</span><span class="w">           </span><span class="err">#</span><span class="w"> </span><span class="mf">1008.233</span><span class="w"> </span><span class="n">M</span><span class="o">/</span><span class="n">sec</span>
+
+<span class="w">      </span><span class="mf">27.388859157</span><span class="w"> </span><span class="n">seconds</span><span class="w"> </span><span class="n">time</span><span class="w"> </span><span class="n">elapsed</span>
+</code></pre></div>
+<p>可以看到<code>std::unordered_map</code> L1-dcache miss率为3.17%，<code>absl::node_hash_map</code>为0.74%，<code>absl::flat_hash_map</code>为0.68%，验证了上述关于不同内存模型下cpu cache性能表现的推论。</p>
+<p>基准测试结果如下（为了显示更清晰，将元素个数小于1024的和大于1024的分开展示）：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20221025-2230-4.png" alt=""></p>
+<p>图4 写操作，元素个数小于等于1024</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20221025-2230-5.png" alt=""></p>
+<p>图5 写操作，元素个数大于等于1024</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20221025-2230-6.png" alt=""></p>
+<p>图6 读操作，元素个数小于等于1024</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20221025-2230-7.png" alt=""></p>
+<p>图7 读操作，元素个数大于等于1024</p>
+<p>从测试结果可以看出，写操作耗时：<code>std::unordered_map &lt; absl::flat_hash_map &lt; absl::node_hash_map</code>，<code>absl::flat_hash_map</code>比<code>std::unordered_map</code>耗时平均增加9%；读操作耗时：<code>absl::flat_hash_map &lt;absl::node_hash_map &lt;std::unordered_map</code>，<code>absl::flat_hash_map</code>比<code>std::unordered_map</code>耗时平均降低20%。</p>
+<h2>总结</h2>
+<p>三种HashTable对比如下：</p>
+<table style="width:898px;"><tbody><tr><td colspan="1" rowspan="1" style="width:169px;">
+<p><span style="font-size:14px;"><strong>HashTable类型</strong></span></p>
+</td>
+<td colspan="1" rowspan="1" style="width:232px;">
+<p><span style="font-size:14px;"><strong>内存模型</strong></span></p>
+</td>
+<td colspan="1" rowspan="1" style="width:274px;">
+<p><span style="font-size:14px;"><strong>性能表现</strong></span></p>
+</td>
+<td colspan="1" rowspan="1" style="width:111px;">
+<p><span style="font-size:14px;"><strong>推荐使用场景</strong></span></p>
+</td>
+</tr><tr><td colspan="1" rowspan="1" style="width:169px;">
+<p><span style="font-size:14px;">std::unordered_map</span></p>
+</td>
+<td colspan="1" rowspan="1" style="width:232px;">
+<p><span style="font-size:14px;">以链表存储hash值相同的元素</span></p>
+</td>
+<td colspan="1" rowspan="1" style="width:274px;">
+<p><span style="font-size:14px;">写操作：rehash友好，性能最好；</span></p>
+<p><span style="font-size:14px;">读操作：内存不连续，cpu cache命中率较低，性能最差</span></p>
+</td>
+<td colspan="1" rowspan="1" style="width:111px;">
+<p><span style="font-size:14px;">写多读少</span></p>
+</td>
+</tr><tr><td colspan="1" rowspan="1" style="width:169px;">
+<p><span style="font-size:14px;">absl::node_hash_map</span></p>
+</td>
+<td colspan="1" rowspan="1" style="width:232px;">
+<p><span style="font-size:14px;">在连续内存中存储hash值相同的元素的指针</span></p>
+</td>
+<td colspan="1" rowspan="1" style="width:274px;">
+<p><span style="font-size:14px;">写操作：性能最差；</span></p>
+<p><span style="font-size:14px;">读操作：性能略差于absl::flat_hash_map；</span></p>
+</td>
+<td colspan="1" rowspan="1" style="width:111px;">
+<p><span style="font-size:14px;">读多写少，且需要保证pair的指针稳定性</span></p>
+</td>
+</tr><tr><td colspan="1" rowspan="1" style="width:169px;">
+<p><span style="font-size:14px;">absl::flat_hash_map</span></p>
+</td>
+<td colspan="1" rowspan="1" style="width:232px;">
+<p><span style="font-size:14px;">在连续内存中存储hash值相同的元素</span></p>
+</td>
+<td colspan="1" rowspan="1" style="width:274px;">
+<p><span style="font-size:14px;">写操作：性能略差于std::unordered_map；</span></p>
+<p><span style="font-size:14px;">读操作：内存连续，cpu cache命中率较高，性能最好</span></p>
+</td>
+<td colspan="1" rowspan="1" style="width:111px;">
+<p><span style="font-size:14px;">读多写少</span></p>
+</td>
+</tr></tbody></table><p>在读多写少的场景使用HashTable，可以用<code>absl::flat_hash_map</code>替代<code>std::unordered_map</code>，获得更好的查询性能。但需注意<code>absl::flat_hash_map</code>在rehash时会将pair move到新的内存地址，导致访问原始地址非法。</p>
+<p><code>absl::flat_hash_map</code>的接口类似于<code>std::unordered_map</code>，详细介绍可参阅absl官方介绍：<a href="https://abseil.io/docs/cpp/guides/container#hash-tables">https://abseil.io/docs/cpp/guides/container#hash-tables</a></p>
+<h2>扩展阅读</h2>
+<ul>
+<li><code>absl::flat_hash_map</code>源码：<a href="https://github.com/abseil/abseil-cpp/blob/master/absl/container/flat_hash_map.h">abseil-cpp/flat_hash_map.h at master · abseil/abseil-cpp · GitHub</a></li>
+<li><code>std::unordered_map</code>源码：<a href="https://github.com/gcc-mirror/gcc/blob/master/libstdc%2B%2B-v3/include/bits/unordered_map.h">gcc/unordered_map.h at master · gcc-mirror/gcc · GitHub</a></li>
+<li>folly 14-way hash table：<a href="https://github.com/facebook/folly/blob/main/folly/container/F14.md">folly/F14.md at main · facebook/folly · GitHub</a></li>
+<li>robin_hood hash table：<a href="https://github.com/martinus/robin-hood-hashing">GitHub - martinus/robin-hood-hashing: faster and more memory efficient hashtable based on robin hood hashing for C++11/14/17/20</a></li>
+</ul>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "C++中的HashTable.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

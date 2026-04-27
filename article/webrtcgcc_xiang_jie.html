@@ -1,0 +1,501 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>webrtc gcc详解 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="webrtc gcc详解,WebRTC,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="webrtc gcc详解" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>webrtc gcc详解</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2024-06-18 20:00
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_webrtc.html' class='article_tag'>WebRTC</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://mp.weixin.qq.com/s/ivNJrwcJ3z5cZmBsoqjy7g' target='blank'>webrtc gcc详解</a></p></h4>
+<p>webrtc的gcc算法(Google Congestion Control)，貌似国内很多文章都没有细讲，原理是怎么样的，具体怎么进行计算的。这里详解一下gcc。</p>
+<p>gcc算法，主要涉及到：</p>
+<ul>
+<li><p>拥塞控制的关键信息和公式</p>
+</li>
+<li><p>卡曼滤波算法</p>
+</li>
+<li><p>gcc如何使用卡曼滤波算法</p>
+</li>
+</ul>
+<p>因为知识点有点多，文章有点长，如果感兴趣但不能一次读完，可以先收藏后，有空慢慢看。</p>
+<h2>1. 前言</h2>
+<p>对于拥塞控制，webrtc的方案之一是gcc(Google Congestion Control)。具体做法是，接收端监控两个数据，并反馈给发送端。</p>
+<ul>
+<li><p>丢包率: 接收端计算出丢包率，定期发送rtcp rr报文(内有丢包率)给发送端，发送端通过丢包率的大小来决定是否降低编码的bitrate；</p>
+</li>
+<li><p>基于卡曼滤波的带宽预测: 接收端预测出当前发送端到接收端的带宽，接收端再发送rtcp remb报文(内带有预测带宽)给发送端，发送端根据该预测带宽调整编码的bitrate；</p>
+</li>
+</ul>
+<p>基于丢包率来调整动态编码，是比较简单，很多厂家经常在sfu服务的进行调整，如：如果不是长肥型网络，在丢包率&lt;30%的情况下，rtcp rr中的丢包率和丢包总数欺骗性的填写0，这样发送端(尤其是web端)就不会轻易的降低bitrate，到达测试的良好效果。</p>
+<p>但是基于卡曼滤波的带宽预测，就比较复杂，本文主要讲解这部分的原理和实现。</p>
+<h2>2. 拥塞基础信息与公式</h2>
+<p>延时是如何测量出来的: 定义报文到达的时间为t(i)，报文中的时间戳为T(i)。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240618-2000-0.png" alt="图片"></p>
+<p>那么定义延时:</p>
+<div class="highlight"><pre><code><span></span><span class="n">d</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">t</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">-</span><span class="n">t</span><span class="p">(</span><span class="n">i</span><span class="mi">-1</span><span class="p">)</span><span class="o">-</span><span class="p">(</span><span class="n">T</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">-</span><span class="n">T</span><span class="p">(</span><span class="n">i</span><span class="mi">-1</span><span class="p">))</span>
+</code></pre></div>
+<p>在带宽容量C的链路上，传输frame size为L的数据，需要的时间是: <code>ts = L/C</code> 我们对到达时间的间隔进行建模:</p>
+<div class="highlight"><pre><code><span></span><span class="n">L</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">-</span><span class="n">L</span><span class="p">(</span><span class="n">i</span><span class="mi">-1</span><span class="p">)</span>
+<span class="n">d</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">--------------</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">w</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">dL</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">/</span><span class="n">C</span><span class="o">+</span><span class="n">w</span><span class="p">(</span><span class="n">i</span><span class="p">)</span>
+<span class="w">             </span><span class="n">C</span>
+</code></pre></div>
+<p>上面的公式，i为某个时刻，i-1为上一个时刻。</p>
+<p>L(i): 是i时刻接收到的报文长度(这里一般是指某个固定时段接收到的报文size总和)</p>
+<p>L(i-1): 是对于i的上一个时刻的报文长度(上一个固定时段收到的报文size总和)</p>
+<p>C: 为链路容量带宽；</p>
+<p>W(i): 作为一个高斯白噪声，这个参数非常重要。d(i)：是i时刻的延时</p>
+<p><strong>划重点：</strong></p>
+<p><strong>如果链路使用超载，w(i)增加；</strong></p>
+<p><strong>如果链路比较空，w(i)减小;</strong></p>
+<p>也就是说，上面两个公式就是预测和估计w(i)是增加了，还是减小了。</p>
+<p>总结，关键公式就是这两个：</p>
+<div class="highlight"><pre><code><span></span><span class="n">公式1</span><span class="p">(</span><span class="n">测量</span><span class="p">)</span><span class="err">：</span><span class="n">d</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">t</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">-</span><span class="n">t</span><span class="p">(</span><span class="n">i</span><span class="mi">-1</span><span class="p">)</span><span class="o">-</span><span class="p">(</span><span class="n">T</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">-</span><span class="n">T</span><span class="p">(</span><span class="n">i</span><span class="mi">-1</span><span class="p">))</span>
+<span class="n">公式2</span><span class="p">(</span><span class="n">估计</span><span class="p">)</span><span class="err">：</span><span class="w">     </span>
+<span class="w">            </span><span class="n">L</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">-</span><span class="n">L</span><span class="p">(</span><span class="n">i</span><span class="mi">-1</span><span class="p">)</span>
+<span class="n">d_est</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">------------</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">w</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">dL</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">/</span><span class="n">C</span><span class="o">+</span><span class="n">w</span><span class="p">(</span><span class="n">i</span><span class="p">)</span>
+<span class="w">                </span><span class="n">C</span>
+</code></pre></div>
+<p>公式1: 两个时刻的接收报文的本地时间差值，再减去两个时刻的rtp报文中携带的时间戳的差值，结果等于延时(本地时间与rtp报文中时间戳的单位不一致，需要自己转换一致后再计算)。也就是说d(i)是个测量值，每次收到新的一批报文都能测算得出来对应的延时d(i)，所以这里强调d(i)是个测量值。</p>
+<p>公式2: 在公式2中，dL(i)是两个时刻收到报文长度的差值，这个也是每收到一批报文后能测算出来的，dL(i)也是个测量值。1/C是个估计值，C是估计的带宽容量，w(i)也是一个估计值。注意，公式左边的d_est(i)也是表示i时刻的延时，不过这个延时是通过右边的估计值计算出来的，也就是这个计算出来的d_est(i)是一个估计值。</p>
+<p>最后，我们得到，每个i时刻的测量值d(i)，和测量值dL(i)，要预测出1/C(i)和w(i)，这就是我们的目标。</p>
+<p>强调: <strong>w(i)增加，表示链路超载；w(i)减小，表示链路轻负荷</strong>。</p>
+<p>卡曼滤波就是要预测出1/C(i)和w(i)，并根据根据w(i)是增加或减小，来决定预测带宽是增加还是减小。</p>
+<p>小白部分: 既然有了公式1和2，为啥不每次直接计算出延时和带宽的关系，为啥还要引入卡曼滤波算法，弄这么复杂。原因主要是，凡是测试的数据，都会出现测不准，或者
+有偶尔发生的错误数据(术语叫作噪声)，比如某时刻发生抖动，仅仅一批数据产生巨大的延时，但是其实网络是好的，滤波的作用就是过滤出一些无效，错误数据的影响。</p>
+<p>先记住这两个公式，后面先打断一下，简单介绍一下卡曼滤波算法。</p>
+<h2>3. 卡曼滤波算法和示例</h2>
+<p>针对测试数据，有测试不准确的情况，所以需要在测试数据和估计数据之间进行权衡，卡曼滤波算法就是一个线性的滤波估计算法。</p>
+<p>卡曼滤波的5个公式如下(如果看公式有不理解的地方，后面会有个经典的例子，让你理解如何使用这5个公式)：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240618-2000-1.png" alt="图片"></p>
+<p>一共5个方程，如上图，左边两个是时间更新方程(预测)，右边是测量更新方程(更新/纠正)。</p>
+<p>如果第一次接触卡曼滤波算法，可以先熟悉算法，先不研究这5个公式的由来(数学推导)，可以作为使用者，只要知道每个变量代表什么意思，如何代入方程，就能满足基础的需求。</p>
+<p>头两个预测方程中的参数含义:</p>
+<p>A: 状态转移矩阵，就是上一个状态的x变量如何能推导出下一个状态的值。</p>
+<p>B：是将输入转换为状态的矩阵；</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240618-2000-2.png" alt="图片"></p>
+<p>Q：过程激励噪声协方差（系统过程的协方差）。</p>
+<p>后三个测量更新方程的参数含义:</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240618-2000-3.png" alt="图片"></p>
+<p>R: 测量噪声协方差。滤波器实际实现时，测量噪声协方差 R一般可以观测得到，是滤波器的已知条件，用户可以根据自己的情况自己设定。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240618-2000-4.png" alt="图片"></p>
+<p>因为公式较多，参数也较多，不容易让人理解，下面举个经典的例子，让你熟悉这些公式和参数。</p>
+<h3>3.1 卡曼滤波例子(自由落体运动)</h3>
+<p>假设一个实心球从高空落下，正常来说，我们是能通过速度，加速度g(自由落体加速度9.8米/s)，能计算出某个时刻该球的行驶距离速度。</p>
+<p>但是因为有空气阻力，或者外界干扰(刮风什么的)，实际的速度和距离就不能自己计算出来，需要进行测试。假设实心球自己是能测试出距离和速度的，但是测试仪得出的值可能有误差，需要和计算出来的距离和速度进行折中。</p>
+<p>卡曼滤波算法，就是对估计值与测试值进行折中，寻找出真相值的过程。</p>
+<p>距离，速度和加速度在时间t上的关系：</p>
+<div class="highlight"><pre><code><span></span><span class="n">s</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">s</span><span class="p">(</span><span class="n">i</span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">v</span><span class="p">(</span><span class="n">i</span><span class="mi">-1</span><span class="p">)</span><span class="o">*</span><span class="n">t</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mf">0.5</span><span class="o">*</span><span class="n">g</span><span class="o">*</span><span class="n">t</span><span class="o">^</span><span class="mi">2</span>
+<span class="n">v</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">v</span><span class="p">(</span><span class="n">i</span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">g</span><span class="o">*</span><span class="n">t</span>
+</code></pre></div>
+<p>用线性代数的矩阵来表示就是:</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240618-2000-5.png" alt="图片"></p>
+<p>上面这个式子就是卡曼滤波公式1:</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240618-2000-6.png" alt="图片"></p>
+<p>A就是:</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240618-2000-7.png" alt="图片"></p>
+<p>Bu就是:</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240618-2000-8.png" alt="图片"></p>
+<p>卡曼滤波的公式2:</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240618-2000-9.png" alt="图片"></p>
+<p>其中P是一个协方差矩阵，可以自己初始化一下，协方差矩阵是一个对角矩阵(后续随着数据的输入，P会不断通过公式2和公式5自我更新):</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240618-2000-10.png" alt="图片"></p>
+<p>Q是过程激励噪声协方差，表示噪声，可以自己初始化:</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240618-2000-11.png" alt="图片"></p>
+<p>卡曼滤波公式3:</p>
+<p>![图片](../file/image/20240618-2000-12.png</p>
+<p>其中H是状态变量与测试变量的转换矩阵，因为本例是完全对应的关系，所以这里的H是一个单位矩阵。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240618-2000-13.png" alt="图片"></p>
+<p>R是误差，这里是两个参数s和v，假设测试参数还是比较准，R可以适当的设置小一些(自己更具情况设置)：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240618-2000-14.png" alt="图片"></p>
+<p>这样卡曼滤波参数K就可以通过P，H，R三个参数计算出来了。</p>
+<p>卡曼滤波公式4:</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240618-2000-15.png" alt="图片"></p>
+<p>通过公式3，已经计算出K，参数Z是测试值，本例中Z就是一个向量包含距离和速度(s, v)，式子右边的X就是公式1中计算出来的预测值向量(s, v)</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240618-2000-16.png" alt="图片"></p>
+<p><strong>公式4非常重要，通过这个公式，对计算估计出来的值，与测试的值进行折中，得出尽可能接近真实的值。</strong></p>
+<p>卡曼滤波公式5:</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240618-2000-17.png" alt="图片"></p>
+<p>I是单位矩阵，K是公式3计算出来的卡曼滤波增益参数，H是状态变量与测试变量的转换矩阵(本例中是个单位矩阵)，式子右边的P是公式2预测的P矩阵。</p>
+<p>通过公式5的计算，对P协方差矩阵进行更新。</p>
+<p>对上面的5个公式解释后，这里用python进行模拟，代码如下:</p>
+<div class="highlight"><pre><code><span></span><span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="nn">np</span>
+
+<span class="n">delta_t</span> <span class="o">=</span> <span class="mi">1</span> <span class="c1">#每次变化是1秒</span>
+<span class="n">a</span> <span class="o">=</span> <span class="mf">9.8</span> <span class="c1">#重力加速度g</span>
+
+<span class="c1"># 状态迁移矩阵A</span>
+<span class="n">A</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="mi">1</span><span class="p">,</span> <span class="n">delta_t</span><span class="p">],</span>
+            <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">]])</span>
+<span class="c1"># 协方差矩阵</span>
+<span class="n">P</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="mi">1</span><span class="p">,</span> <span class="mf">0.5</span><span class="p">],</span>
+              <span class="p">[</span><span class="mf">0.5</span><span class="p">,</span> <span class="mi">1</span><span class="p">]])</span>
+<span class="c1"># 预测值与测试值的变换矩阵</span>
+<span class="n">H</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">],</span>
+              <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">]])</span>
+<span class="c1"># 过程激励噪声协方差</span>
+<span class="n">Q</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="mf">0.05</span><span class="p">,</span> <span class="mf">0.01</span><span class="p">],</span>
+              <span class="p">[</span><span class="mf">0.01</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">]])</span>
+
+<span class="c1"># 观测噪声协方差</span>
+<span class="n">R</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="mf">0.01</span><span class="p">,</span> <span class="mf">0.01</span><span class="p">],</span>
+              <span class="p">[</span><span class="mf">0.01</span><span class="p">,</span> <span class="mf">0.01</span><span class="p">],])</span>
+<span class="c1"># 单位矩阵</span>
+<span class="n">I</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">eye</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+
+<span class="c1"># 每1秒的测试值，第一项是距离，第二项是速度</span>
+<span class="n">messure_list</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="mf">2.9</span><span class="p">,</span>  <span class="mf">8.8</span><span class="p">],</span>
+                        <span class="p">[</span><span class="mf">19.1</span><span class="p">,</span>  <span class="mf">18.1</span><span class="p">],</span>
+                        <span class="p">[</span><span class="mf">44.1</span><span class="p">,</span>  <span class="mf">28.9</span><span class="p">],</span>
+                        <span class="p">[</span><span class="mf">84.9</span><span class="p">,</span>  <span class="mf">38.7</span><span class="p">],</span>
+                        <span class="p">[</span><span class="mi">134</span><span class="p">,</span>  <span class="mi">50</span><span class="p">],</span>
+                        <span class="p">[</span><span class="mf">193.4</span><span class="p">,</span>  <span class="mf">62.3</span><span class="p">],</span>
+                        <span class="p">[</span><span class="mf">266.1</span><span class="p">,</span>  <span class="mf">72.1</span><span class="p">],</span>
+                        <span class="p">[</span><span class="mf">348.6</span><span class="p">,</span>  <span class="mf">83.4</span><span class="p">],</span>
+                        <span class="p">[</span><span class="mf">442.4</span><span class="p">,</span>  <span class="mf">95.7</span><span class="p">],</span>
+                        <span class="p">[</span><span class="mi">548</span><span class="p">,</span>  <span class="mf">105.5</span><span class="p">]])</span>
+
+<span class="c1"># 卡曼滤波公式1: 状态迁移</span>
+<span class="k">def</span> <span class="nf">StatePridict</span><span class="p">(</span><span class="n">pos</span><span class="p">,</span> <span class="n">speed</span><span class="p">):</span>
+    <span class="n">x_vector</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="n">pos</span><span class="p">],</span> <span class="p">[</span><span class="n">speed</span><span class="p">]])</span>
+    <span class="n">b_u</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="mf">0.5</span><span class="o">*</span><span class="n">a</span><span class="o">*</span><span class="n">delta_t</span><span class="o">*</span><span class="n">delta_t</span><span class="p">],</span> <span class="p">[</span><span class="n">a</span><span class="o">*</span><span class="n">delta_t</span><span class="p">]])</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">dot</span><span class="p">(</span><span class="n">A</span><span class="p">,</span> <span class="n">x_vector</span><span class="p">)</span> <span class="o">+</span> <span class="n">b_u</span>
+    <span class="k">return</span> <span class="n">result</span>
+
+<span class="c1"># 卡曼滤波公式3: 计算卡曼滤波增益参数K</span>
+<span class="k">def</span> <span class="nf">UpdateK</span><span class="p">():</span>
+    <span class="n">up_item</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">dot</span><span class="p">(</span><span class="n">P</span><span class="p">,</span> <span class="n">H</span><span class="o">.</span><span class="n">transpose</span><span class="p">())</span>
+    <span class="n">down_item</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">dot</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">dot</span><span class="p">(</span><span class="n">H</span><span class="p">,</span> <span class="n">P</span><span class="p">),</span> <span class="n">H</span><span class="o">.</span><span class="n">transpose</span><span class="p">())</span> <span class="o">+</span> <span class="n">R</span>
+    <span class="n">inv_item</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">inv</span><span class="p">(</span><span class="n">down_item</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">dot</span><span class="p">(</span><span class="n">up_item</span><span class="p">,</span> <span class="n">inv_item</span><span class="p">)</span>
+
+<span class="n">i</span> <span class="o">=</span> <span class="mi">0</span>
+<span class="n">predict_array</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([[],[]])</span>
+
+<span class="n">pos_predict</span> <span class="o">=</span> <span class="mi">0</span>
+<span class="n">speed_predict</span> <span class="o">=</span> <span class="mi">0</span>
+
+<span class="k">for</span> <span class="n">z</span> <span class="ow">in</span> <span class="n">messure_list</span><span class="p">:</span>
+    <span class="c1"># 方程1: 状态预测公式(根据距离，速度，时间公式推导)</span>
+    <span class="nb">next</span> <span class="o">=</span> <span class="n">StatePridict</span><span class="p">(</span><span class="n">pos_predict</span><span class="p">,</span> <span class="n">speed_predict</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;predict next:&quot;</span><span class="p">,</span> <span class="nb">next</span><span class="p">)</span>
+
+    <span class="c1"># 方程2: 协方差矩阵预测公式</span>
+    <span class="n">P</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">dot</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">dot</span><span class="p">(</span><span class="n">A</span><span class="p">,</span> <span class="n">P</span><span class="p">),</span> <span class="n">np</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="n">A</span><span class="p">))</span> <span class="o">+</span> <span class="n">Q</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;predict P:&quot;</span><span class="p">,</span> <span class="n">P</span><span class="p">)</span>
+
+    <span class="c1"># 方程3: 卡曼滤波增益计算公式</span>
+    <span class="n">K</span> <span class="o">=</span> <span class="n">UpdateK</span><span class="p">()</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;update K:&quot;</span><span class="p">,</span> <span class="n">K</span><span class="p">)</span>
+
+    <span class="c1"># 方程4: 状态更新公式</span>
+    <span class="n">messure_item</span> <span class="o">=</span> <span class="n">z</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;messure item(&quot;</span><span class="p">,</span> <span class="n">i</span><span class="p">,</span> <span class="s2">&quot;):&quot;</span><span class="p">,</span> <span class="n">messure_item</span><span class="p">,</span> <span class="s2">&quot;shape:&quot;</span><span class="p">,</span> <span class="n">messure_item</span><span class="o">.</span><span class="n">shape</span><span class="p">)</span>
+    <span class="n">deviation</span> <span class="o">=</span> <span class="n">messure_item</span> <span class="o">-</span> <span class="n">np</span><span class="o">.</span><span class="n">dot</span><span class="p">(</span><span class="n">H</span><span class="p">,</span> <span class="nb">next</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;deviation:&quot;</span><span class="p">,</span> <span class="n">deviation</span><span class="p">)</span>
+    <span class="nb">next</span> <span class="o">=</span> <span class="nb">next</span> <span class="o">+</span> <span class="n">np</span><span class="o">.</span><span class="n">dot</span><span class="p">(</span><span class="n">K</span><span class="p">,</span> <span class="n">deviation</span><span class="p">)</span>
+    <span class="n">predict_array</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">predict_array</span><span class="p">,</span> <span class="nb">next</span><span class="p">)</span>
+    <span class="n">pos_predict</span> <span class="o">=</span> <span class="nb">next</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span>
+    <span class="n">speed_predict</span> <span class="o">=</span> <span class="nb">next</span><span class="p">[</span><span class="mi">1</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;update next state pos:&quot;</span><span class="p">,</span> <span class="n">pos_predict</span><span class="p">,</span> <span class="s2">&quot;velocity:&quot;</span><span class="p">,</span> <span class="n">speed_predict</span><span class="p">)</span>
+
+    <span class="c1"># 方程5: 协方差更新公司</span>
+    <span class="n">P</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">dot</span><span class="p">((</span><span class="n">I</span> <span class="o">-</span> <span class="n">K</span> <span class="o">*</span> <span class="n">H</span><span class="p">),</span> <span class="n">P</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;update P:&quot;</span><span class="p">,</span> <span class="n">P</span><span class="p">)</span>
+    <span class="n">i</span> <span class="o">=</span> <span class="n">i</span> <span class="o">+</span> <span class="mi">1</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;&quot;</span><span class="p">)</span>
+</code></pre></div>
+<p>把这个程序跑起来，观测各个参数的变化过程，仔细阅读，慢慢就理解这5个公式怎么使用。</p>
+<h2>4. GCC应用卡曼滤波算法</h2>
+<p>在第2章中，回忆一下这两个公式：</p>
+<div class="highlight"><pre><code><span></span><span class="n">公式1</span><span class="p">(</span><span class="n">测量</span><span class="p">)</span><span class="err">：</span><span class="n">d</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">t</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">-</span><span class="n">t</span><span class="p">(</span><span class="n">i</span><span class="mi">-1</span><span class="p">)</span><span class="o">-</span><span class="p">(</span><span class="n">T</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">-</span><span class="n">T</span><span class="p">(</span><span class="n">i</span><span class="mi">-1</span><span class="p">))</span>
+<span class="n">公式2</span><span class="p">(</span><span class="n">估计</span><span class="p">)</span><span class="err">：</span><span class="w">     </span>
+<span class="w">            </span><span class="n">L</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">-</span><span class="n">L</span><span class="p">(</span><span class="n">i</span><span class="mi">-1</span><span class="p">)</span>
+<span class="n">d_est</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">------------</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">w</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">dL</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">/</span><span class="n">C</span><span class="o">+</span><span class="n">w</span><span class="p">(</span><span class="n">i</span><span class="p">)</span>
+<span class="w">                </span><span class="n">C</span>
+</code></pre></div>
+<p>每个i时刻的测量值d(i)，和测量值dL(i)，要预测出1/C(i)和w(i)，这就是我们的目标。</p>
+<p><strong>w(i)增加超过一个阈值，表示链路超载，w(i)减小了，表示链路轻负荷</strong>。</p>
+<p>卡曼滤波就是要预测出1/C(i)和w(i)，并根据根据w(i)是增加或减小，来决定预测带宽是增加还是减小。本节介绍如何预测1/C(i)和w(i)。回忆一下卡曼滤波的5个公式:</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240618-2000-1.png" alt="图片"></p>
+<p>这里，因为向量中的两个参数[1/C w]，自身是没法推导自己，所以卡曼滤波的公式1和公式2就省略了，或者说A矩阵就是个单位矩阵，Bu是0，这样预测后的结果还是自己。</p>
+<p>这样就直接构造公式3:</p>
+<p>X就是[1/C W]向量的转置</p>
+<p><code>H矩阵= [delta_len 1]</code>，<code>delta_len</code>就是两次不同时刻统计收到报文长度的差值。</p>
+<p>R是误差，在本例中可以自己设置，在webrtc源码实现中通过UpdateNoiseEstimate函数来更新获取(为了突出主线，这里先省略)。</p>
+<p>这样公式3的K就计算出来了。</p>
+<p>公式4，更新估计值，</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240618-2000-18.png" alt="图片"></p>
+<p>Z就是i时刻的测试数据的延时delay(i)，通过<code>d(i) = t(i)-t(i-1)-(T(i)-T(i-1))</code>得到i时刻的延时。</p>
+<p>公式5，</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240618-2000-17.png" alt="图片"></p>
+<p>等式右边的P是公式2中计算出来的P，因为公式1和2都省略，所以这里值需要确认H就可以</p>
+<p><code>H = [delta_len 1].T</code></p>
+<p>I是单位矩阵。</p>
+<p>因为K在公式3中已经计算出来，所以P很容易计算出来。</p>
+<h3>4.1 python仿真gcc的卡曼滤波</h3>
+<p><code>delay_array</code>：表示收到报文测试出来的延时集合</p>
+<p><code>deltalen_array</code>：表示收到报文长度差值的集合</p>
+<p>两者作为测试数据，数组下标是一一对应的。</p>
+<div class="highlight"><pre><code><span></span><span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="nn">np</span>
+
+<span class="c1"># d(i) = dL(i)/C + m(i) +v(i) 关键点: 过载的情况，m(i)增加; 轻载的情况，m(i)减小</span>
+<span class="c1"># theta_bar(i) = [1/C(i)  m(i)]^T 其中，带宽C(i)可以设置个初始值，m(i)也设置一个初始值, 后面这两个值就是根据每一次的测试数据来进行预测；</span>
+<span class="c1"># h_bar(i) = [dL(i) 1]^T 其中dL(i)是每次长度变化值，是测试的输入</span>
+
+<span class="c1"># 方程1: 状态预测公式(根据报文差，带宽公式推导)</span>
+<span class="c1"># 本例没有[1/C(i) m(i)]这个向量自己预测自己的公式，这个公式省略掉，或则说就是自己等于自己</span>
+
+<span class="c1"># 方程2: 协方差矩阵预测公式</span>
+<span class="c1"># 同方程1，因为没有预测公式，这个方程也省略掉；</span>
+
+<span class="c1"># 方程3: 卡曼滤波增益计算公式</span>
+<span class="c1">#                              P_(i) * h_bar(i)</span>
+<span class="c1">#     K(i) = --------------------------------------------</span>
+<span class="c1">#                  var_v_hat + h_bar(i)^T * P_(i) * h_bar(i)</span>
+<span class="c1"># 其中P_(i)是协方差矩阵，见方程2; var_v_hat是误差，自己可以初始化一个</span>
+
+<span class="c1"># 方程4: 状态更新公式</span>
+<span class="c1"># d(i) = h_bar(i)^T * theta_bar(i) + v(i) 两个矩阵的点乘，就是dL(i)/C + m(i)这个式子，v(i)是一个噪声参数(可以初始设定一个较小的值)</span>
+<span class="c1"># z(i) = D(i) - d(i) 这里的D(i)是延时的测试数据，也就是报文来的差值，d(i)是预测数据</span>
+<span class="c1"># z(i) = D(i) - (h_bar(i)^T * theta_bar(i-1) + v(i))</span>
+<span class="c1"># new_theta_bar(i) = theta_bar(i) + K(i) * z(i) 这个式子就是状态更新公式，更新得到新的[1/C(i) m(i)]</span>
+
+<span class="c1"># 方程5: 协方差更新公式</span>
+<span class="c1"># P(i) = (I - K(i) * h_bar(i)^T) * P_(i) + Q(i) 其中P(i)是协方差矩阵，Q(i)是误差</span>
+
+<span class="n">delay_array</span> <span class="o">=</span> <span class="p">[</span><span class="o">-</span><span class="mf">4.45</span><span class="p">,</span> <span class="mf">3.92</span><span class="p">,</span> <span class="o">-</span><span class="mf">3.5</span><span class="p">,</span> <span class="o">-</span><span class="mf">0.29</span><span class="p">,</span> <span class="mf">10.77</span><span class="p">,</span> <span class="o">-</span><span class="mf">6.2</span><span class="p">,</span> <span class="mf">6.98</span><span class="p">,</span> <span class="o">-</span><span class="mf">2.75</span><span class="p">,</span> <span class="o">-</span><span class="mf">8.88</span><span class="p">,</span> <span class="o">-</span><span class="mf">0.12</span><span class="p">,</span> <span class="mf">0.78</span><span class="p">,</span> <span class="o">-</span><span class="mf">0.32</span><span class="p">,</span> <span class="mf">2.05</span><span class="p">,</span> <span class="o">-</span><span class="mf">1.61</span><span class="p">,</span> <span class="mf">3.67</span><span class="p">,</span> <span class="mf">3.93</span><span class="p">,</span> <span class="mf">13.23</span><span class="p">,</span> <span class="mf">51.25</span><span class="p">,</span> <span class="mf">15.32</span><span class="p">,</span> <span class="mf">51.05</span><span class="p">,</span> <span class="mf">124.61</span><span class="p">,</span> <span class="o">-</span><span class="mf">14.47</span><span class="p">,</span> <span class="mf">9.43</span><span class="p">,</span> <span class="mf">43.11</span><span class="p">,</span> <span class="o">-</span><span class="mf">10.98</span><span class="p">,</span> <span class="mf">27.03</span><span class="p">,</span> <span class="mf">34.31</span><span class="p">,</span> <span class="mf">52.31</span><span class="p">,</span> <span class="mf">132.39</span><span class="p">,</span> <span class="o">-</span><span class="mf">9.93</span><span class="p">,</span> <span class="o">-</span><span class="mf">1.63</span><span class="p">,</span> <span class="mf">20.47</span><span class="p">,</span> <span class="mf">54.73</span><span class="p">,</span> <span class="mf">12.43</span><span class="p">,</span> <span class="mf">19.86</span><span class="p">,</span> <span class="mf">0.6</span><span class="p">,</span> <span class="mf">78.59</span><span class="p">,</span> <span class="o">-</span><span class="mf">0.2</span><span class="p">,</span> <span class="mf">35.04</span><span class="p">,</span> <span class="mf">8.0</span><span class="p">,</span> <span class="mf">68.9</span><span class="p">,</span> <span class="mf">6.65</span><span class="p">,</span> <span class="mf">82.35</span><span class="p">,</span> <span class="mf">25.6</span><span class="p">,</span> <span class="mf">108.01</span><span class="p">,</span> <span class="o">-</span><span class="mf">1.68</span><span class="p">,</span> <span class="mf">42.52</span><span class="p">,</span> <span class="mf">7.66</span><span class="p">,</span> <span class="mf">82.26</span><span class="p">,</span> <span class="mf">1.68</span><span class="p">,</span> <span class="o">-</span><span class="mf">0.39</span><span class="p">,</span> <span class="mf">65.92</span><span class="p">,</span> <span class="mf">15.35</span><span class="p">,</span> <span class="mf">77.69</span><span class="p">,</span> <span class="o">-</span><span class="mf">2.38</span><span class="p">,</span> <span class="o">-</span><span class="mf">4.94</span><span class="p">,</span> <span class="mf">9.82</span><span class="p">,</span> <span class="o">-</span><span class="mf">12.88</span><span class="p">,</span> <span class="mf">132.41</span><span class="p">,</span> <span class="o">-</span><span class="mf">0.57</span><span class="p">,</span> <span class="mf">81.74</span><span class="p">,</span> <span class="mf">0.13</span><span class="p">,</span> <span class="mf">33.81</span><span class="p">,</span> <span class="o">-</span><span class="mf">16.92</span><span class="p">,</span> <span class="o">-</span><span class="mf">18.68</span><span class="p">,</span> <span class="o">-</span><span class="mf">1.04</span><span class="p">,</span> <span class="o">-</span><span class="mf">56.98</span><span class="p">,</span> <span class="mf">27.08</span><span class="p">,</span> <span class="mf">0.44</span><span class="p">,</span> <span class="o">-</span><span class="mf">10.58</span><span class="p">,</span> <span class="o">-</span><span class="mf">23.03</span><span class="p">,</span> <span class="mf">23.82</span><span class="p">,</span> <span class="mf">36.17</span><span class="p">,</span> <span class="o">-</span><span class="mf">47.1</span><span class="p">,</span> <span class="o">-</span><span class="mf">140.67</span><span class="p">,</span> <span class="mf">28.14</span><span class="p">,</span> <span class="o">-</span><span class="mf">30.56</span><span class="p">,</span> <span class="o">-</span><span class="mf">72.59</span><span class="p">,</span> <span class="o">-</span><span class="mf">21.58</span><span class="p">,</span> <span class="o">-</span><span class="mf">45.59</span><span class="p">,</span> <span class="o">-</span><span class="mf">87.41</span><span class="p">,</span> <span class="mf">12.47</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">3.05</span><span class="p">,</span> <span class="o">-</span><span class="mf">37.41</span><span class="p">,</span> <span class="o">-</span><span class="mf">32.05</span><span class="p">,</span> <span class="mf">22.89</span><span class="p">,</span> <span class="mf">7.52</span><span class="p">,</span> <span class="mf">11.13</span><span class="p">,</span> <span class="mf">34.15</span><span class="p">,</span> <span class="mf">88.15</span><span class="p">,</span> <span class="o">-</span><span class="mf">42.39</span><span class="p">,</span> <span class="o">-</span><span class="mf">2.78</span><span class="p">,</span> <span class="o">-</span><span class="mf">52.67</span><span class="p">,</span> <span class="o">-</span><span class="mf">16.58</span><span class="p">,</span> <span class="mf">5.19</span><span class="p">,</span> <span class="mf">55.34</span><span class="p">,</span> <span class="mf">44.73</span><span class="p">,</span> <span class="o">-</span><span class="mf">13.97</span><span class="p">,</span> <span class="mf">0.22</span><span class="p">,</span> <span class="mf">7.63</span><span class="p">,</span> <span class="mf">27.57</span><span class="p">,</span> <span class="mf">49.72</span><span class="p">,</span> <span class="mf">61.74</span><span class="p">,</span> <span class="mf">18.91</span><span class="p">,</span> <span class="mf">48.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">24.09</span><span class="p">,</span> <span class="o">-</span><span class="mf">6.95</span><span class="p">,</span> <span class="o">-</span><span class="mf">50.06</span><span class="p">,</span> <span class="mf">217.24</span><span class="p">,</span> <span class="o">-</span><span class="mf">62.06</span><span class="p">,</span> <span class="o">-</span><span class="mf">2.07</span><span class="p">,</span> <span class="mf">5.83</span><span class="p">,</span> <span class="o">-</span><span class="mf">3.88</span><span class="p">,</span> <span class="o">-</span><span class="mf">6.4</span><span class="p">,</span> <span class="mf">4.35</span><span class="p">,</span> <span class="mf">39.61</span><span class="p">,</span> <span class="o">-</span><span class="mf">7.67</span><span class="p">,</span> <span class="mf">5.65</span><span class="p">,</span> <span class="mf">9.45</span><span class="p">,</span> <span class="mf">70.02</span><span class="p">,</span> <span class="o">-</span><span class="mf">48.47</span><span class="p">,</span> <span class="mf">35.76</span><span class="p">,</span> <span class="mf">8.69</span><span class="p">,</span> <span class="o">-</span><span class="mf">6.4</span><span class="p">,</span> <span class="o">-</span><span class="mf">4.5</span><span class="p">,</span> <span class="o">-</span><span class="mf">2.26</span><span class="p">,</span> <span class="o">-</span><span class="mf">21.2</span><span class="p">,</span> <span class="o">-</span><span class="mf">53.22</span><span class="p">,</span> <span class="o">-</span><span class="mf">11.8</span><span class="p">,</span> <span class="mf">12.25</span><span class="p">,</span> <span class="o">-</span><span class="mf">8.98</span><span class="p">,</span> <span class="o">-</span><span class="mf">2.94</span><span class="p">,</span> <span class="o">-</span><span class="mf">43.99</span><span class="p">,</span> <span class="mf">1.12</span><span class="p">,</span> <span class="o">-</span><span class="mf">0.04</span><span class="p">,</span> <span class="o">-</span><span class="mf">8.08</span><span class="p">,</span> <span class="mf">14.05</span><span class="p">,</span> <span class="o">-</span><span class="mf">31.01</span><span class="p">,</span> <span class="o">-</span><span class="mf">80.63</span><span class="p">,</span> <span class="mf">94.82</span><span class="p">,</span> <span class="o">-</span><span class="mf">25.58</span><span class="p">,</span> <span class="o">-</span><span class="mf">58.55</span><span class="p">,</span> <span class="mf">47.87</span><span class="p">,</span> <span class="o">-</span><span class="mf">67.36</span><span class="p">,</span> <span class="mf">17.57</span><span class="p">,</span> <span class="mf">4.64</span><span class="p">,</span> <span class="mf">0.1</span><span class="p">,</span> <span class="mf">4.71</span><span class="p">,</span> <span class="mf">7.01</span><span class="p">,</span> <span class="o">-</span><span class="mf">1.5</span><span class="p">,</span> <span class="o">-</span><span class="mf">3.25</span><span class="p">,</span> <span class="o">-</span><span class="mf">1.87</span><span class="p">,</span> <span class="o">-</span><span class="mf">22.01</span><span class="p">,</span> <span class="mf">9.57</span><span class="p">,</span> <span class="o">-</span><span class="mf">8.71</span><span class="p">,</span> <span class="o">-</span><span class="mf">3.17</span><span class="p">,</span> <span class="o">-</span><span class="mf">2.12</span><span class="p">,</span> <span class="o">-</span><span class="mf">36.99</span><span class="p">,</span> <span class="mf">54.74</span><span class="p">,</span> <span class="o">-</span><span class="mf">14.71</span><span class="p">,</span> <span class="o">-</span><span class="mf">8.64</span><span class="p">,</span> <span class="o">-</span><span class="mf">46.41</span><span class="p">,</span> <span class="mf">48.79</span><span class="p">,</span> <span class="mf">5.74</span><span class="p">,</span> <span class="o">-</span><span class="mf">14.25</span><span class="p">,</span> <span class="o">-</span><span class="mf">7.76</span><span class="p">,</span> <span class="mf">30.98</span><span class="p">,</span> <span class="o">-</span><span class="mf">6.09</span><span class="p">,</span> <span class="mf">43.08</span><span class="p">,</span> <span class="mf">16.21</span><span class="p">,</span> <span class="mf">15.78</span><span class="p">,</span> <span class="o">-</span><span class="mf">2.86</span><span class="p">,</span> <span class="o">-</span><span class="mf">63.44</span><span class="p">,</span> <span class="mf">73.09</span><span class="p">,</span> <span class="o">-</span><span class="mf">39.69</span><span class="p">,</span> <span class="o">-</span><span class="mf">50.57</span><span class="p">,</span> <span class="o">-</span><span class="mf">14.58</span><span class="p">,</span> <span class="o">-</span><span class="mf">5.34</span><span class="p">,</span> <span class="mf">5.39</span><span class="p">,</span> <span class="o">-</span><span class="mf">17.07</span><span class="p">,</span> <span class="o">-</span><span class="mf">28.32</span><span class="p">,</span> <span class="o">-</span><span class="mf">15.5</span><span class="p">,</span> <span class="mf">6.03</span><span class="p">,</span> <span class="o">-</span><span class="mf">62.54</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">,</span> <span class="mf">1.01</span><span class="p">,</span> <span class="o">-</span><span class="mf">13.52</span><span class="p">,</span> <span class="o">-</span><span class="mf">32.07</span><span class="p">,</span> <span class="mf">75.16</span><span class="p">,</span> <span class="o">-</span><span class="mf">5.2</span><span class="p">,</span> <span class="o">-</span><span class="mf">0.91</span><span class="p">,</span> <span class="mf">1.48</span><span class="p">,</span> <span class="mf">41.72</span><span class="p">,</span> <span class="o">-</span><span class="mf">21.1</span><span class="p">,</span> <span class="mf">11.13</span><span class="p">]</span>
+<span class="n">deltalen_array</span> <span class="o">=</span> <span class="p">[</span><span class="o">-</span><span class="mf">98.0</span><span class="p">,</span> <span class="mf">170.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">170.0</span><span class="p">,</span> <span class="mf">314.0</span><span class="p">,</span> <span class="mf">612.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">926.0</span><span class="p">,</span> <span class="mf">873.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">541.0</span><span class="p">,</span> <span class="mf">769.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">1101.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">50.0</span><span class="p">,</span> <span class="mf">50.0</span><span class="p">,</span> <span class="mf">182.0</span><span class="p">,</span> <span class="mf">1407.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">1589.0</span><span class="p">,</span> <span class="mf">776.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">776.0</span><span class="p">,</span> <span class="mf">55.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">55.0</span><span class="p">,</span> <span class="mf">1126.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">1126.0</span><span class="p">,</span> <span class="mf">80.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">80.0</span><span class="p">,</span> <span class="mf">305.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">305.0</span><span class="p">,</span> <span class="mf">278.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">278.0</span><span class="p">,</span> <span class="mf">1414.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">1414.0</span><span class="p">,</span> <span class="mf">2.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">2.0</span><span class="p">,</span> <span class="mf">642.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">642.0</span><span class="p">,</span> <span class="mf">387.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">387.0</span><span class="p">,</span> <span class="mf">771.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">771.0</span><span class="p">,</span> <span class="mf">352.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">352.0</span><span class="p">,</span> <span class="mf">746.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">746.0</span><span class="p">,</span> <span class="mf">776.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">776.0</span><span class="p">,</span> <span class="mf">1420.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">1420.0</span><span class="p">,</span> <span class="mf">567.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">567.0</span><span class="p">,</span> <span class="mf">923.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">923.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">660.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">660.0</span><span class="p">,</span> <span class="mf">1012.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">1012.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">1631.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">1631.0</span><span class="p">,</span> <span class="mf">890.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">890.0</span><span class="p">,</span> <span class="mf">700.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">700.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">291.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">291.0</span><span class="p">,</span> <span class="mf">412.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">412.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">75.0</span><span class="p">,</span> <span class="mf">423.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">27.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">434.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">37.0</span><span class="p">,</span> <span class="mf">283.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">115.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">8.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">160.0</span><span class="p">,</span> <span class="mf">160.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">160.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">484.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">484.0</span><span class="p">,</span> <span class="mf">219.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">219.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">364.0</span><span class="p">,</span> <span class="mf">492.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">856.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">160.0</span><span class="p">,</span> <span class="mf">143.0</span><span class="p">,</span> <span class="mf">17.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">160.0</span><span class="p">,</span> <span class="mf">853.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">184.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">509.0</span><span class="p">,</span> <span class="mf">47.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">47.0</span><span class="p">,</span> <span class="mf">318.0</span><span class="p">,</span> <span class="mf">385.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">32.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">671.0</span><span class="p">,</span> <span class="mf">831.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">831.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">2097.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">2097.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">85.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">85.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">160.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">160.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">1143.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">983.0</span><span class="p">,</span> <span class="mf">335.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">495.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">194.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">194.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">17.0</span><span class="p">,</span> <span class="mf">177.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">160.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">25.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">25.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">335.0</span><span class="p">,</span> <span class="mf">935.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">1270.0</span><span class="p">,</span> <span class="mf">941.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">941.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">835.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">835.0</span><span class="p">,</span> <span class="mf">62.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">62.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">194.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">194.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">17.0</span><span class="p">,</span> <span class="mf">17.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">459.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">459.0</span><span class="p">,</span> <span class="mf">160.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">160.0</span><span class="p">,</span> <span class="mf">422.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">422.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">208.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">208.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">946.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">946.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">242.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">242.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">160.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">160.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">40.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">40.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">160.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">160.0</span><span class="p">,</span> <span class="mf">320.0</span><span class="p">,</span> <span class="mf">612.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">932.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">479.0</span><span class="p">,</span> <span class="o">-</span><span class="mf">479.0</span><span class="p">,</span> <span class="mf">951.0</span><span class="p">]</span>
+
+<span class="n">C</span> <span class="o">=</span> <span class="mf">50.0</span> <span class="c1">#假设带宽C为50</span>
+<span class="n">slope_c</span> <span class="o">=</span> <span class="mf">1.0</span><span class="o">/</span><span class="n">C</span>
+<span class="n">v</span> <span class="o">=</span> <span class="mi">5</span> <span class="c1">#计算延时时候的噪声参数</span>
+<span class="n">m</span> <span class="o">=</span> <span class="mf">0.1</span>  <span class="c1">#m参数，过载的情况，m增加; 轻载的情况，m减小</span>
+
+<span class="n">R</span> <span class="o">=</span> <span class="mf">0.05</span>
+
+<span class="n">P_Matrix</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="mf">100.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">],</span>
+             <span class="p">[</span><span class="mf">0.0</span><span class="p">,</span> <span class="mf">1e-1</span><span class="p">]])</span>
+
+<span class="n">Q</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="mf">0.05</span><span class="p">,</span> <span class="mf">0.01</span><span class="p">],</span>
+             <span class="p">[</span><span class="mf">0.01</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">]])</span>
+
+<span class="n">I</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">],</span>
+             <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">]])</span>
+
+<span class="k">def</span> <span class="nf">GetK</span><span class="p">(</span><span class="n">delta_len</span><span class="p">,</span> <span class="n">p</span><span class="p">,</span> <span class="n">r</span><span class="p">):</span>
+    <span class="n">h_bar</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="n">delta_len</span><span class="p">],</span> <span class="p">[</span><span class="mi">1</span><span class="p">]])</span>
+    <span class="n">numerator</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">dot</span><span class="p">(</span><span class="n">p</span><span class="p">,</span> <span class="n">h_bar</span><span class="p">)</span>
+    <span class="n">den</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">dot</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">dot</span><span class="p">(</span><span class="n">h_bar</span><span class="o">.</span><span class="n">T</span><span class="p">,</span> <span class="n">p</span><span class="p">),</span> <span class="n">h_bar</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">dot</span><span class="p">(</span><span class="n">numerator</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">inv</span><span class="p">(</span><span class="n">den</span><span class="p">))</span> <span class="o">+</span> <span class="n">r</span>
+
+<span class="k">def</span> <span class="nf">DelayUpdate</span><span class="p">(</span><span class="n">k</span><span class="p">,</span> <span class="n">z</span><span class="p">,</span> <span class="n">delta_len</span><span class="p">):</span>
+    <span class="n">h_bar</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="n">delta_len</span><span class="p">],</span> <span class="p">[</span><span class="mi">1</span><span class="p">]])</span>
+    <span class="n">theta_bar</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="n">slope_c</span><span class="p">],</span> <span class="p">[</span><span class="n">m</span><span class="p">]])</span>
+
+    <span class="n">error</span> <span class="o">=</span> <span class="n">z</span> <span class="o">-</span> <span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">dot</span><span class="p">(</span><span class="n">h_bar</span><span class="o">.</span><span class="n">T</span><span class="p">,</span> <span class="n">theta_bar</span><span class="p">)</span> <span class="o">+</span> <span class="n">v</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">theta_bar</span> <span class="o">+</span> <span class="n">k</span> <span class="o">*</span> <span class="n">error</span>
+
+<span class="k">def</span> <span class="nf">Update_P</span><span class="p">(</span><span class="n">k</span><span class="p">,</span> <span class="n">p</span><span class="p">,</span> <span class="n">delta_len</span><span class="p">):</span>
+    <span class="n">h_bar</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="n">delta_len</span><span class="p">],</span> <span class="p">[</span><span class="mi">1</span><span class="p">]])</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">p</span> <span class="o">+</span> <span class="n">Q</span>
+    <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">dot</span><span class="p">(</span><span class="n">I</span> <span class="o">-</span> <span class="n">np</span><span class="o">.</span><span class="n">dot</span><span class="p">(</span><span class="n">k</span><span class="p">,</span> <span class="n">h_bar</span><span class="o">.</span><span class="n">T</span><span class="p">),</span> <span class="n">p</span><span class="p">)</span>
+
+<span class="n">index</span> <span class="o">=</span> <span class="mi">0</span>
+<span class="k">for</span> <span class="n">delta_len</span> <span class="ow">in</span> <span class="n">deltalen_array</span><span class="p">:</span>
+    <span class="n">delay</span> <span class="o">=</span> <span class="n">delay_array</span><span class="p">[</span><span class="n">index</span><span class="p">]</span>
+    <span class="n">index</span> <span class="o">=</span> <span class="n">index</span> <span class="o">+</span> <span class="mi">1</span>
+
+    <span class="n">K</span> <span class="o">=</span> <span class="n">GetK</span><span class="p">(</span><span class="n">delta_len</span><span class="p">,</span> <span class="n">P_Matrix</span><span class="p">,</span> <span class="n">R</span><span class="p">)</span>
+
+    <span class="n">theta_bar_update</span> <span class="o">=</span> <span class="n">DelayUpdate</span><span class="p">(</span><span class="n">K</span><span class="p">,</span> <span class="n">delay</span><span class="p">,</span> <span class="n">delta_len</span><span class="p">)</span>
+
+    <span class="n">P_Matrix</span> <span class="o">=</span> <span class="n">Update_P</span><span class="p">(</span><span class="n">K</span><span class="p">,</span> <span class="n">P_Matrix</span><span class="p">,</span> <span class="n">delta_len</span><span class="p">)</span>
+
+    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;theta_bar_update:&quot;</span><span class="p">,</span> <span class="n">theta_bar_update</span><span class="p">)</span>
+</code></pre></div>
+<p>其中GetK函数的生成K卡曼滤波增益参数中，误差参数r是随机设置的。</p>
+<p>实际的r是可以通过rtp报文时间戳的差值推导出来，更为精确，详细看这个函数UpdateNoiseEstimate()</p>
+<h3>4.2 gcc卡曼滤波源码部分</h3>
+<p>在函数OveruseEstimator::Update()中，</p>
+<p>卡曼滤波公式3，计算出K:</p>
+<div class="highlight"><pre><code><span></span><span class="k">const</span><span class="w"> </span><span class="kt">double</span><span class="w"> </span><span class="n">h</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="n">fs_delta</span><span class="p">,</span><span class="w"> </span><span class="mf">1.0</span><span class="p">};</span>
+<span class="k">const</span><span class="w"> </span><span class="kt">double</span><span class="w"> </span><span class="n">Eh</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="n">E_</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">h</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">E_</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="mi">1</span><span class="p">]</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">h</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span>
+<span class="w">                      </span><span class="n">E_</span><span class="p">[</span><span class="mi">1</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">h</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">E_</span><span class="p">[</span><span class="mi">1</span><span class="p">][</span><span class="mi">1</span><span class="p">]</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">h</span><span class="p">[</span><span class="mi">1</span><span class="p">]};</span>
+<span class="k">const</span><span class="w"> </span><span class="kt">double</span><span class="w"> </span><span class="n">denom</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">var_noise_</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">h</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">Eh</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">h</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">Eh</span><span class="p">[</span><span class="mi">1</span><span class="p">];</span>
+
+<span class="k">const</span><span class="w"> </span><span class="kt">double</span><span class="w"> </span><span class="n">K</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="n">Eh</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">denom</span><span class="p">,</span><span class="w"> </span><span class="n">Eh</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">denom</span><span class="p">};</span>
+</code></pre></div>
+<p>卡曼滤波公式4，计算出1/C，和w，在源码中slope_就是1/C, offset_就是w。residual就是误差部分，其实就是测量值和估计值的差值。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// residual就是误差部分，其实就是测量值和估计值的差值</span>
+<span class="c1">// 就是python里写的：error = z - (np.dot(h_bar.T, theta_bar) + v)</span>
+<span class="k">const</span><span class="w"> </span><span class="kt">double</span><span class="w"> </span><span class="n">residual</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">t_ts_delta</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">slope_</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">h</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">offset_</span><span class="p">;</span>
+
+<span class="c1">// slope_就是1/C</span>
+<span class="n">slope_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">slope_</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">K</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">residual</span><span class="p">;</span>
+
+<span class="c1">//offset_比较关键，offset_就是w</span>
+<span class="c1">// w(i)增加，链路使用超载</span>
+<span class="c1">// w(i)减小，链路比较空</span>
+<span class="n">offset_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">offset_</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">K</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">residual</span><span class="p">;</span>
+</code></pre></div>
+<p>上面就是卡曼滤波部分，代码不多，就是原理比较复杂。</p>
+<h3>4.3 如何判断带宽增减</h3>
+<p>在4.2中已经能时刻更新<code>offset_</code>的值，也就是我们之前说的公式中:</p>
+<div class="highlight"><pre><code><span></span><span class="n">L</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">-</span><span class="n">L</span><span class="p">(</span><span class="n">i</span><span class="mi">-1</span><span class="p">)</span>
+<span class="n">d_est</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">------------</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">w</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">dL</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">/</span><span class="n">C</span><span class="o">+</span><span class="n">w</span><span class="p">(</span><span class="n">i</span><span class="p">)</span>
+<span class="w">                </span><span class="n">C</span>
+</code></pre></div>
+<p>上面公式中的w(i)就是<code>offset_</code>，</p>
+<ul>
+<li><p>w(i)增加(也就是<code>offset_</code>)，链路使用超载</p>
+</li>
+<li><p>w(i)减小(也就是<code>offset_</code>)，链路比较空</p>
+</li>
+</ul>
+<p>但是如何判断增加和减小多少，这个增量/减量多少认为该做带宽的增减操作呢？</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240618-2000-19.png" alt="图片"></p>
+<p>如上图的m(ti)就是<code>m(ti) = std::min(num_of_deltas, kMaxNumDeltas) * offset</code>;</p>
+<p>这里的offset就是w(i)</p>
+<p><code>γ (ti )</code>就是<code>threshold_</code>，下面是gcc源码中，函数BandwidthUsageOveruseDetector::Detect()，大于<code>threshold_</code>则带宽过载，小于<code>threshold_</code>则是带宽轻载，否则就保持原状态。</p>
+<div class="highlight"><pre><code><span></span><span class="n">BandwidthUsage</span><span class="w"> </span><span class="nf">OveruseDetector::Detect</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">double</span><span class="w"> </span><span class="n">T</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">num_of_deltas</span><span class="p">,</span><span class="w"> </span><span class="n">kMaxNumDeltas</span><span class="p">)</span><span class="w"> </span>
+<span class="w">                </span><span class="o">*</span><span class="w"> </span><span class="n">offset</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">T</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">threshold_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">hypothesis_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">BandwidthUsage</span><span class="o">::</span><span class="n">kBwOverusing</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">T</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="o">-</span><span class="n">threshold_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">hypothesis_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">BandwidthUsage</span><span class="o">::</span><span class="n">kBwUnderusing</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">hypothesis_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">BandwidthUsage</span><span class="o">::</span><span class="n">kBwNormal</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>通过Detect()返回值，判断是否变换预测带宽。</p>
+<p>这个<code>threshold_</code>也是动态变化的，</p>
+<p>根据OveruseDetector::UpdateThreshold()函数来更新:</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">OveruseDetector::UpdateThreshold</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="c1">// k_up_(0.0087),</span>
+<span class="w">  </span><span class="c1">// k_down_(0.039),</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">double</span><span class="w"> </span><span class="n">k</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fabs</span><span class="p">(</span><span class="n">modified_offset</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">threshold_</span><span class="w"> </span><span class="o">?</span><span class="w"> </span>
+<span class="w">                    </span><span class="nl">k_down_</span><span class="w"> </span><span class="p">:</span><span class="w"> </span><span class="n">k_up_</span><span class="p">;</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">kMaxTimeDeltaMs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">time_delta_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">now_ms</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">last_update_ms_</span><span class="p">,</span>
+<span class="w">                                </span><span class="n">kMaxTimeDeltaMs</span><span class="p">);</span>
+<span class="w">  </span><span class="n">threshold_</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">k</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="n">fabs</span><span class="p">(</span><span class="n">modified_offset</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">threshold_</span><span class="p">)</span>
+<span class="w">                    </span><span class="o">*</span><span class="w"> </span><span class="n">time_delta_ms</span><span class="p">;</span>
+<span class="w">  </span><span class="n">threshold_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">SafeClamp</span><span class="p">(</span><span class="n">threshold_</span><span class="p">,</span><span class="w"> </span><span class="mf">6.f</span><span class="p">,</span><span class="w"> </span><span class="mf">600.f</span><span class="p">);</span>
+<span class="w">  </span><span class="n">last_update_ms_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">now_ms</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这里有两个关键的参数<code>k_up_(0.0087)</code>, <code>k_down_(0.039)</code>。</p>
+<p><code>k_down_</code>明显要比<code>k_up_</code>大不少，其含义就是预测带宽降低检测的时候，需要更加敏感一些，或者说是需要降低快一些；相反，带宽增减就需要慢一点，稳当一点，保证流畅性。</p>
+<p>不少公司都对<code>k_down_</code>和<code>k_up_</code>的参数进行优化，来满足自己动态码率的需求。</p>
+<h2>5. 总结</h2>
+<p>最后总结一下，gcc的动态码率依赖两个东西：</p>
+<ul>
+<li>丢包率</li>
+</ul>
+<p>丢包率在接收端计算后，通过RTCP rr报文发送给发送端，丢包率&gt;5%，默认就要开始降低编码bitrate；</p>
+<p>如果是sfu服务器模式，sfu代码中可以把rtcp rr中的丢包率和丢包总数根据自定义条件填写0，这样发送端就不会动态调整编码bitrate，达到某些预期的效果</p>
+<ul>
+<li>接收端基于延时的卡曼滤波带宽预测</li>
+</ul>
+<p>1) 通过测试delay，和预测的delay来确定卡曼滤波模型，根据模型推导出下一步带宽预测offset。</p>
+<div class="highlight"><pre><code><span></span><span class="n">公式1</span><span class="p">(</span><span class="n">测量</span><span class="p">)</span><span class="err">：</span><span class="n">d</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">t</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">-</span><span class="n">t</span><span class="p">(</span><span class="n">i</span><span class="mi">-1</span><span class="p">)</span><span class="o">-</span><span class="p">(</span><span class="n">T</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">-</span><span class="n">T</span><span class="p">(</span><span class="n">i</span><span class="mi">-1</span><span class="p">))</span>
+<span class="n">公式2</span><span class="p">(</span><span class="n">估计</span><span class="p">)</span><span class="err">：</span><span class="w">     </span>
+<span class="w">            </span><span class="n">L</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">-</span><span class="n">L</span><span class="p">(</span><span class="n">i</span><span class="mi">-1</span><span class="p">)</span>
+<span class="n">d_est</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">------------</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">w</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">dL</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">/</span><span class="n">C</span><span class="o">+</span><span class="n">w</span><span class="p">(</span><span class="n">i</span><span class="p">)</span>
+<span class="w">                </span><span class="n">C</span>
+</code></pre></div>
+<p>2) 得到卡曼滤波的变换值offset(也就是上面的w(i))，在根据计算出的threshold，用offset与threshold比较，决定预测带宽应该增加，减少还是不变。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "webrtc gcc详解.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

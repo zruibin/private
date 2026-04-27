@@ -1,0 +1,533 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>iOS-APP-运行时防Crash工具XXShield练就 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="iOS-APP-运行时防Crash工具XXShield练就,iOS,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="iOS-APP-运行时防Crash工具XXShield练就" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>iOS-APP-运行时防Crash工具XXShield练就</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2018-01-03 11:09
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_ios.html' class='article_tag'>iOS</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://www.jianshu.com/p/f18876bbe2c4' target='blank'>iOS-APP-运行时防Crash工具XXShield练就</a></p></h4>
+<h3>前言</h3>
+<p>正在运行的 APP 突然 Crash，是一件令人不爽的事，会流失用户，影响公司发展，所以 APP 运行时拥有防 Crash 功能能有效降低 Crash 率，提升 APP 稳定性。但是有时候 APP Crash 是应有的表现，我们不让 APPCrash 可能会导致别的逻辑错误，不过我们可以抓取到应用当前的堆栈信息并上传至相关的服务器，分析并修复这些 BUG。</p>
+<p>所以本文介绍的 XXShield 库有两个重要的功能:</p>
+<ol>
+<li>防止Crash</li>
+<li>捕获异常状态下的崩溃信息</li>
+</ol>
+<p>类似的相关技术分析也有 <a href="https://mp.weixin.qq.com/s?__biz=MzA3ODg4MDk0Ng==&mid=2651113088&idx=1&sn=10b28d7fbcdf0def1a47113e5505728d&chksm=844c6f5db33be64b57fc9b4013cdbb7122d7791f3bbca9b4b29e80cce295eb341b03a9fc0f2f&mpshare=1&scene=23&srcid=0207njmGS2HWHI0BZmpjNKhv%23rd">网易iOS App运行时Crash自动防护实践</a></p>
+<h3>目前已经实现的功能</h3>
+<ol>
+<li>Unrecoginzed Selector Crash</li>
+<li>KVO Crash</li>
+<li>Container Crash</li>
+<li>NSNotification Crash</li>
+<li>NSNull Crash</li>
+<li>NSTimer Crash </li>
+<li>野指针 Crash </li>
+</ol>
+<hr>
+<h3>1 Unrecoginzed Selector Crash</h3>
+<h4>出现原因</h4>
+<p>由于 Objective-C 是动态语言，所有的消息发送都会放在运行时去解析，有时候我们把一个信息传递给了错误的类型，就会导致这个错误。</p>
+<h4>解决办法</h4>
+<p>Objective-C 在出现无法解析的方法时有三部曲来进行消息转发。
+详见<a href="https://southpeak.github.io/2014/11/03/objective-c-runtime-3/">Objective-C Runtime 运行时之三：方法与消息</a></p>
+<ol>
+<li>动态方法解析</li>
+<li>备用接收者</li>
+<li>完整转发</li>
+</ol>
+<p>1 一般适用与 Dynamic 修饰的 Property
+2 一般适用与将方法转发至其他对象
+3 一般适用与消息可以转发多个对象，可以实现类似多继承或者转发中心的概念。</p>
+<p>这里选择的是方案二，因为三里面用到了 NSInvocation 对象，此对象性能开销较大，而且这种异常如果出现必然频次较高。最适合将消息转发到一个备用者对象上。</p>
+<p>这里新建一个智能转发类。此对象将在其他对象无法解析数据时，返回一个 0 来防止 Crash。返回 0 是因为这个通用的智能转发类做的操作接近向 nil 发送一个消息。</p>
+<p>代码如下</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#import &lt;objc/runtime.h&gt;</span>
+
+<span class="cm">/**</span>
+<span class="cm"> default Implement</span>
+<span class="cm"> @param target trarget</span>
+<span class="cm"> @param cmd cmd</span>
+<span class="cm"> @param ... other param</span>
+<span class="cm"> @return default Implement is zero</span>
+<span class="cm"> */</span>
+<span class="kt">int</span><span class="w"> </span><span class="nf">smartFunction</span><span class="p">(</span><span class="kt">id</span><span class="w"> </span><span class="n">target</span><span class="p">,</span><span class="w"> </span><span class="kt">SEL</span><span class="w"> </span><span class="n">cmd</span><span class="p">,</span><span class="w"> </span><span class="p">...)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="k">static</span><span class="w"> </span><span class="kt">BOOL</span><span class="w"> </span><span class="nf">__addMethod</span><span class="p">(</span><span class="kt">Class</span><span class="w"> </span><span class="n">clazz</span><span class="p">,</span><span class="w"> </span><span class="kt">SEL</span><span class="w"> </span><span class="n">sel</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="bp">NSString</span><span class="w"> </span><span class="o">*</span><span class="n">selName</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NSStringFromSelector</span><span class="p">(</span><span class="n">sel</span><span class="p">);</span>
+
+<span class="w">    </span><span class="bp">NSMutableString</span><span class="w"> </span><span class="o">*</span><span class="n">tmpString</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[[</span><span class="bp">NSMutableString</span><span class="w"> </span><span class="n">alloc</span><span class="p">]</span><span class="w"> </span><span class="n">initWithFormat</span><span class="o">:</span><span class="s">@&quot;%@&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">selName</span><span class="p">];</span>
+
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="p">)[</span><span class="n">tmpString</span><span class="w"> </span><span class="n">replaceOccurrencesOfString</span><span class="o">:</span><span class="s">@&quot;:&quot;</span>
+<span class="w">                                                </span><span class="nl">withString</span><span class="p">:</span><span class="s">@&quot;_&quot;</span>
+<span class="w">                                                   </span><span class="nl">options</span><span class="p">:</span><span class="n">NSCaseInsensitiveSearch</span>
+<span class="w">                                                     </span><span class="nl">range</span><span class="p">:</span><span class="n">NSMakeRange</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">selName</span><span class="p">.</span><span class="n">length</span><span class="p">)];</span>
+
+<span class="w">    </span><span class="bp">NSMutableString</span><span class="w"> </span><span class="o">*</span><span class="n">val</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[[</span><span class="bp">NSMutableString</span><span class="w"> </span><span class="n">alloc</span><span class="p">]</span><span class="w"> </span><span class="n">initWithString</span><span class="o">:</span><span class="s">@&quot;i@:&quot;</span><span class="p">];</span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">count</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="p">[</span><span class="n">val</span><span class="w"> </span><span class="n">appendString</span><span class="o">:</span><span class="s">@&quot;@&quot;</span><span class="p">];</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">funcTypeEncoding</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">val</span><span class="w"> </span><span class="n">UTF8String</span><span class="p">];</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">class_addMethod</span><span class="p">(</span><span class="n">clazz</span><span class="p">,</span><span class="w"> </span><span class="n">sel</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">IMP</span><span class="p">)</span><span class="n">smartFunction</span><span class="p">,</span><span class="w"> </span><span class="n">funcTypeEncoding</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="k">@implementation</span> <span class="nc">XXShieldStubObject</span>
+
+<span class="p">+</span> <span class="p">(</span><span class="n">XXShieldStubObject</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nf">shareInstance</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="n">XXShieldStubObject</span><span class="w"> </span><span class="o">*</span><span class="n">singleton</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">singleton</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">static</span><span class="w"> </span><span class="n">dispatch_once_t</span><span class="w"> </span><span class="n">onceToken</span><span class="p">;</span>
+<span class="w">        </span><span class="n">dispatch_once</span><span class="p">(</span><span class="o">&amp;</span><span class="n">onceToken</span><span class="p">,</span><span class="w"> </span><span class="o">^</span><span class="p">{</span>
+<span class="w">            </span><span class="n">singleton</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">XXShieldStubObject</span><span class="w"> </span><span class="n">new</span><span class="p">];</span>
+<span class="w">        </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">singleton</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="p">-</span> <span class="p">(</span><span class="kt">BOOL</span><span class="p">)</span><span class="nf">addFunc:</span><span class="p">(</span><span class="kt">SEL</span><span class="p">)</span><span class="nv">sel</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">__addMethod</span><span class="p">([</span><span class="n">XXShieldStubObject</span><span class="w"> </span><span class="k">class</span><span class="p">],</span><span class="w"> </span><span class="n">sel</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="p">+</span> <span class="p">(</span><span class="kt">BOOL</span><span class="p">)</span><span class="nf">addClassFunc:</span><span class="p">(</span><span class="kt">SEL</span><span class="p">)</span><span class="nv">sel</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">Class</span><span class="w"> </span><span class="n">metaClass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">objc_getMetaClass</span><span class="p">(</span><span class="n">class_getName</span><span class="p">([</span><span class="n">XXShieldStubObject</span><span class="w"> </span><span class="k">class</span><span class="p">]));</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">__addMethod</span><span class="p">(</span><span class="n">metaClass</span><span class="p">,</span><span class="w"> </span><span class="n">sel</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="k">@end</span>
+</code></pre></div>
+<p>我们这里需要 Hook NSObject的 <code>- (id)forwardingTargetForSelector:(SEL)aSelector</code> 方法启动消息转发。
+很多人不知道的是如果想要转发类方法，只需要实现一个同名的类方法即可，虽然在头文件中此方法并未声明。</p>
+<div class="highlight"><pre><code><span></span><span class="n">XXStaticHookClass</span><span class="p">(</span><span class="bp">NSObject</span><span class="p">,</span><span class="w"> </span><span class="n">ProtectFW</span><span class="p">,</span><span class="w"> </span><span class="kt">id</span><span class="p">,</span><span class="w"> </span><span class="k">@selector</span><span class="p">(</span><span class="n">forwardingTargetForSelector</span><span class="o">:</span><span class="p">),</span><span class="w"> </span><span class="p">(</span><span class="kt">SEL</span><span class="p">)</span><span class="n">aSelector</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 1 如果是NSSNumber 和NSString没找到就是类型不对  切换下类型就好了</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">([</span><span class="nb">self</span><span class="w"> </span><span class="n">isKindOfClass</span><span class="o">:</span><span class="p">[</span><span class="bp">NSNumber</span><span class="w"> </span><span class="k">class</span><span class="p">]]</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">[</span><span class="bp">NSString</span><span class="w"> </span><span class="n">instancesRespondToSelector</span><span class="o">:</span><span class="n">aSelector</span><span class="p">])</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="bp">NSNumber</span><span class="w"> </span><span class="o">*</span><span class="n">number</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="bp">NSNumber</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nb">self</span><span class="p">;</span>
+<span class="w">        </span><span class="bp">NSString</span><span class="w"> </span><span class="o">*</span><span class="n">str</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">number</span><span class="w"> </span><span class="n">stringValue</span><span class="p">];</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">str</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">([</span><span class="nb">self</span><span class="w"> </span><span class="n">isKindOfClass</span><span class="o">:</span><span class="p">[</span><span class="bp">NSString</span><span class="w"> </span><span class="k">class</span><span class="p">]]</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">[</span><span class="bp">NSNumber</span><span class="w"> </span><span class="n">instancesRespondToSelector</span><span class="o">:</span><span class="n">aSelector</span><span class="p">])</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="bp">NSString</span><span class="w"> </span><span class="o">*</span><span class="n">str</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="bp">NSString</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nb">self</span><span class="p">;</span>
+<span class="w">        </span><span class="bp">NSNumberFormatter</span><span class="w"> </span><span class="o">*</span><span class="n">formatter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[[</span><span class="bp">NSNumberFormatter</span><span class="w"> </span><span class="n">alloc</span><span class="p">]</span><span class="w"> </span><span class="n">init</span><span class="p">];</span>
+<span class="w">        </span><span class="bp">NSNumber</span><span class="w"> </span><span class="o">*</span><span class="n">number</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">formatter</span><span class="w"> </span><span class="n">numberFromString</span><span class="o">:</span><span class="n">str</span><span class="p">];</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">number</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="kt">BOOL</span><span class="w"> </span><span class="n">aBool</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="nb">self</span><span class="w"> </span><span class="n">respondsToSelector</span><span class="o">:</span><span class="n">aSelector</span><span class="p">];</span>
+<span class="w">    </span><span class="bp">NSMethodSignature</span><span class="w"> </span><span class="o">*</span><span class="n">signatrue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="nb">self</span><span class="w"> </span><span class="n">methodSignatureForSelector</span><span class="o">:</span><span class="n">aSelector</span><span class="p">];</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">aBool</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">signatrue</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">XXHookOrgin</span><span class="p">(</span><span class="n">aSelector</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">XXShieldStubObject</span><span class="w"> </span><span class="o">*</span><span class="n">stub</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">XXShieldStubObject</span><span class="w"> </span><span class="n">shareInstance</span><span class="p">];</span>
+<span class="w">        </span><span class="p">[</span><span class="n">stub</span><span class="w"> </span><span class="n">addFunc</span><span class="o">:</span><span class="n">aSelector</span><span class="p">];</span>
+
+<span class="w">        </span><span class="bp">NSString</span><span class="w"> </span><span class="o">*</span><span class="n">reason</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="bp">NSString</span><span class="w"> </span><span class="n">stringWithFormat</span><span class="o">:</span><span class="s">@&quot;*****Warning***** logic error.target is %@ method is %@, reason : method forword to SmartFunction Object default implement like send message to nil.&quot;</span><span class="p">,</span>
+<span class="w">                            </span><span class="p">[</span><span class="nb">self</span><span class="w"> </span><span class="k">class</span><span class="p">],</span><span class="w"> </span><span class="n">NSStringFromSelector</span><span class="p">(</span><span class="n">aSelector</span><span class="p">)];</span>
+<span class="w">        </span><span class="p">[</span><span class="n">XXRecord</span><span class="w"> </span><span class="n">recordFatalWithReason</span><span class="o">:</span><span class="n">reason</span><span class="w"> </span><span class="n">errorType</span><span class="o">:</span><span class="n">EXXShieldTypeUnrecognizedSelector</span><span class="p">];</span>
+
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">stub</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+<span class="n">XXStaticHookEnd</span>
+</code></pre></div>
+<p>这里汇报了 Crash 信息，出现消息转发一般是一个 logic 错误，为必须修复的Bug，上报尤为重要。</p>
+<hr>
+<h3>2 KVO Crash</h3>
+<h4>出现原因</h4>
+<p>KVOCrash总结下来有以下2大类。</p>
+<div class="highlight"><pre><code><span></span><span class="mf">1.</span><span class="w"> </span><span class="n">不匹配的移除和添加关系</span><span class="err">。</span>
+<span class="mf">2.</span><span class="w"> </span><span class="n">观察者和被观察者释放的时候没有及时断开观察者关系</span><span class="err">。</span>
+</code></pre></div>
+<h4>解决办法</h4>
+<blockquote><p>尼古拉斯赵四说过 :<img src="../vender/image/img_loading.gif" data-src="https://timgsa.baidu.com/timg?image&quality=80&size=b9999_10000&sec=1487130185&di=41675c8578b69177ee9172e488c803f7&imgtype=jpg&er=1&src=http%3A%2F%2Fimgsrc.baidu.com%2Fforum%2Fw%3D580%2Fsign%3Dd1ac5ff09e25bc312b5d01906edf8de7%2Fcedafc039245d6882866389aa3c27d1ed21b244b.jpg" alt="赵四">
+对比到程序世界就是，程序世界没有什么难以解决的问题都是不可以通过抽象层次来解决的，如果有，那就两层。
+纵观程序的架构设计，计算机网络协议分层设计，操作系统内核设计等等都是如此。</p>
+</blockquote>
+<p>问题1 ： 不成对的添加观察者和移除观察者会导致 Crash，以往我们使用 KVO，观察者和被观察者都是直接交互的。这里的设计方案是我们找一个 Proxy 用来做转发， 真正的观察者是 Proxy，被观察者出现了通知信息，由 Proxy 做分发。所以 Proxy 里面要保存一个数据结构 {keypath : [observer1, observer2,...]} 。</p>
+<div class="highlight"><pre><code><span></span><span class="k">@interface</span> <span class="nc">XXKVOProxy</span> : <span class="bp">NSObject</span> <span class="p">{</span>
+<span class="w">    </span><span class="n">__unsafe_unretained</span><span class="w"> </span><span class="bp">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">_observed</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="cm">/**</span>
+<span class="cm"> {keypath : [ob1,ob2](NSHashTable)}</span>
+<span class="cm"> */</span>
+<span class="k">@property</span><span class="w"> </span><span class="p">(</span><span class="k">nonatomic</span><span class="p">,</span><span class="w"> </span><span class="k">strong</span><span class="p">)</span><span class="w"> </span><span class="bp">NSMutableDictionary</span><span class="o">&lt;</span><span class="bp">NSString</span><span class="w"> </span><span class="o">*</span><span class="p">,</span><span class="w"> </span><span class="bp">NSHashTable</span><span class="o">&lt;</span><span class="bp">NSObject</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">kvoInfoMap</span><span class="p">;</span>
+
+<span class="k">@end</span>
+</code></pre></div>
+<p>我们需要 Hook NSObject的 KVO 相关方法。</p>
+<div class="highlight"><pre><code><span></span><span class="p">-</span> <span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="nf">addObserver:</span><span class="p">(</span><span class="bp">NSObject</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nv">observer</span><span class="w"> </span><span class="nf">forKeyPath:</span><span class="p">(</span><span class="bp">NSString</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nv">keyPath</span><span class="w"> </span><span class="nf">options:</span><span class="p">(</span><span class="n">NSKeyValueObservingOptions</span><span class="p">)</span><span class="nv">options</span><span class="w"> </span><span class="nf">context:</span><span class="p">(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nv">context</span><span class="p">;</span>
+
+<span class="p">-</span> <span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="nf">removeObserver:</span><span class="p">(</span><span class="bp">NSObject</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nv">observer</span><span class="w"> </span><span class="nf">forKeyPath:</span><span class="p">(</span><span class="bp">NSString</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nv">keyPath</span><span class="p">;</span>
+</code></pre></div>
+<ol>
+<li>在添加观察者时
+<img src="../vender/image/img_loading.gif" data-src="http://ompeszjl2.bkt.clouddn.com/iOS-APP-%E8%BF%90%E8%A1%8C%E6%97%B6%E9%98%B2Crash%E5%B7%A5%E5%85%B7XXShield%E7%BB%83%E5%B0%B1//KVO-Add.png" alt="addObserver"></li>
+</ol>
+<ol>
+<li>在移除观察者时</li>
+</ol>
+<p><img src="../vender/image/img_loading.gif" data-src="http://ompeszjl2.bkt.clouddn.com/iOS-APP-%E8%BF%90%E8%A1%8C%E6%97%B6%E9%98%B2Crash%E5%B7%A5%E5%85%B7XXShield%E7%BB%83%E5%B0%B1/KVO-Remove.png" alt="removeObserver"></p>
+<p>问题2: 观察者和被观察者释放的时候没有断开观察者关系。
+对于观察者， 既然我们是自己用 Proxy 做的分发，我们自己就需要保存观察者，这里我们简单的使用 <code>NSHashTable</code> 指定指针持有策略为 <code>weak</code> 即可。</p>
+<p>对于被观察者，我们使用 <a href="https://www.valiantcat.cn/index.php/2017/11/03/53.html">iOS 界的毒瘤-MethodSwizzling</a>
+一文中到的方法。我们在被观察者上绑定一个关联对象，在关联对象的 dealloc 方法中做相关操作即可。</p>
+<div class="highlight"><pre><code><span></span><span class="p">-</span> <span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="nf">dealloc</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">@autoreleasepool</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="bp">NSDictionary</span><span class="o">&lt;</span><span class="bp">NSString</span><span class="w"> </span><span class="o">*</span><span class="p">,</span><span class="w"> </span><span class="bp">NSHashTable</span><span class="o">&lt;</span><span class="bp">NSObject</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">kvoinfos</span><span class="w"> </span><span class="o">=</span><span class="w">  </span><span class="nb">self</span><span class="p">.</span><span class="n">kvoInfoMap</span><span class="p">.</span><span class="k">copy</span><span class="p">;</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="bp">NSString</span><span class="w"> </span><span class="o">*</span><span class="n">keyPath</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">kvoinfos</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="c1">// call original  IMP</span>
+<span class="w">            </span><span class="n">__xx_hook_orgin_function_removeObserver</span><span class="p">(</span><span class="n">_observed</span><span class="p">,</span><span class="k">@selector</span><span class="p">(</span><span class="n">removeObserver</span><span class="o">:</span><span class="n">forKeyPath</span><span class="o">:</span><span class="p">),</span><span class="nb">self</span><span class="p">,</span><span class="w"> </span><span class="n">keyPath</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<hr>
+<h3>3 Container Crash</h3>
+<h4>出现原因</h4>
+<p>容器在任何编程语言中都尤为重要，容器是数据的载体，很多容器对容器放空值都做了容错处理。不幸的是 Objective-C 并没有，容器插入了 <code>nil</code> 就会导致 Crash，容器还有另外一个最容易 Crash 的原因就是下标越界。</p>
+<h4>解决办法</h4>
+<p>常见的容器有 NS(Mutable)Array , NS(Mutable)Dictionary, NSCache 等。我们需要 hook 常见的方法加入检测功能并且捕获堆栈信息上报。</p>
+<p>例如</p>
+<div class="highlight"><pre><code><span></span><span class="n">XXStaticHookClass</span><span class="p">(</span><span class="bp">NSArray</span><span class="p">,</span><span class="w"> </span><span class="n">ProtectCont</span><span class="p">,</span><span class="w"> </span><span class="kt">id</span><span class="p">,</span><span class="w"> </span><span class="k">@selector</span><span class="p">(</span><span class="n">objectAtIndex</span><span class="o">:</span><span class="p">),(</span><span class="n">NSUInteger</span><span class="p">)</span><span class="n">index</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nb">self</span><span class="p">.</span><span class="n">count</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+
+<span class="w">    </span><span class="bp">NSString</span><span class="w"> </span><span class="o">*</span><span class="n">reason</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="bp">NSString</span><span class="w"> </span><span class="n">stringWithFormat</span><span class="o">:</span><span class="s">@&quot;target is %@ method is %@,reason : index %@ out of count %@ of array &quot;</span><span class="p">,</span>
+<span class="w">                        </span><span class="p">[</span><span class="nb">self</span><span class="w"> </span><span class="k">class</span><span class="p">],</span><span class="w"> </span><span class="n">XXSEL2Str</span><span class="p">(</span><span class="k">@selector</span><span class="p">(</span><span class="n">objectAtIndex</span><span class="o">:</span><span class="p">)),</span><span class="w"> </span><span class="l">@(</span><span class="n">index</span><span class="l">)</span><span class="p">,</span><span class="w"> </span><span class="l">@(</span><span class="nb">self</span><span class="p">.</span><span class="n">count</span><span class="l">)</span><span class="p">];</span>
+<span class="w">    </span><span class="p">[</span><span class="n">XXRecord</span><span class="w"> </span><span class="n">recordFatalWithReason</span><span class="o">:</span><span class="n">reason</span><span class="w"> </span><span class="n">errorType</span><span class="o">:</span><span class="n">EXXShieldTypeContainer</span><span class="p">];</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">nil</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">index</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="nb">self</span><span class="p">.</span><span class="n">count</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="bp">NSString</span><span class="w"> </span><span class="o">*</span><span class="n">reason</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="bp">NSString</span><span class="w"> </span><span class="n">stringWithFormat</span><span class="o">:</span><span class="s">@&quot;target is %@ method is %@,reason : index %@ out of count %@ of array &quot;</span><span class="p">,</span>
+<span class="w">                        </span><span class="p">[</span><span class="nb">self</span><span class="w"> </span><span class="k">class</span><span class="p">],</span><span class="w"> </span><span class="n">XXSEL2Str</span><span class="p">(</span><span class="k">@selector</span><span class="p">(</span><span class="n">objectAtIndex</span><span class="o">:</span><span class="p">)),</span><span class="w"> </span><span class="l">@(</span><span class="n">index</span><span class="l">)</span><span class="p">,</span><span class="w"> </span><span class="l">@(</span><span class="nb">self</span><span class="p">.</span><span class="n">count</span><span class="l">)</span><span class="p">];</span>
+<span class="w">    </span><span class="p">[</span><span class="n">XXRecord</span><span class="w"> </span><span class="n">recordFatalWithReason</span><span class="o">:</span><span class="n">reason</span><span class="w"> </span><span class="n">errorType</span><span class="o">:</span><span class="n">EXXShieldTypeContainer</span><span class="p">];</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">nil</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="k">return</span><span class="w"> </span><span class="n">XXHookOrgin</span><span class="p">(</span><span class="n">index</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="n">XXStaticHookEnd</span>
+</code></pre></div>
+<p>但是需要注意的是 NSArray 是一个 Class Cluster 的抽象父类，所以我们需要 Hook 到我们真正的子类。</p>
+<p>这里给出一个辅助方法，获取一个类的所有直接子类：</p>
+<div class="highlight"><pre><code><span></span><span class="p">+</span> <span class="p">(</span><span class="bp">NSArray</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nf">findAllOf:</span><span class="p">(</span><span class="kt">Class</span><span class="p">)</span><span class="nv">defaultClass</span><span class="w"> </span><span class="p">{</span>
+
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">objc_getClassList</span><span class="p">(</span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">count</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+
+<span class="w">        </span><span class="k">@throw</span><span class="s">@&quot;Couldn&#39;t retrieve Obj-C class-list&quot;</span><span class="p">;</span>
+
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="l">@[</span><span class="n">defaultClass</span><span class="l">]</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="bp">NSMutableArray</span><span class="w"> </span><span class="o">*</span><span class="n">output</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="l">@[]</span><span class="p">.</span><span class="n">mutableCopy</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kt">Class</span><span class="w"> </span><span class="o">*</span><span class="n">classes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">Class</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="n">malloc</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="kt">Class</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">count</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">objc_getClassList</span><span class="p">(</span><span class="n">classes</span><span class="p">,</span><span class="w"> </span><span class="n">count</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">count</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">defaultClass</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">class_getSuperclass</span><span class="p">(</span><span class="n">classes</span><span class="p">[</span><span class="n">i</span><span class="p">]))</span><span class="c1">//子类</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">            </span><span class="p">[</span><span class="n">output</span><span class="w"> </span><span class="n">addObject</span><span class="o">:</span><span class="n">classes</span><span class="p">[</span><span class="n">i</span><span class="p">]];</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="n">free</span><span class="p">(</span><span class="n">classes</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">output</span><span class="p">.</span><span class="k">copy</span><span class="p">;</span>
+
+<span class="p">}</span>
+
+<span class="c1">// 对于NSarray ：</span>
+
+<span class="c1">//[NSarray array] 和 @[] 的类型是__NSArray0</span>
+<span class="c1">//只有一个元素的数组类型 __NSSingleObjectArrayI,</span>
+<span class="c1">// 其他的大部分是//__NSArrayI,</span>
+
+
+
+<span class="c1">// 对于NSMutableArray ：</span>
+<span class="c1">//[NSMutableDictionary dictionary] 和 @[].mutableCopy__NSArrayM</span>
+
+
+
+<span class="c1">// 对于NSDictionary: :</span>
+
+<span class="c1">//[NSDictionary dictionary];。 @{}; __NSDictionary0</span>
+<span class="c1">// 其他一般是  __NSDictionaryI</span>
+
+<span class="c1">// 对于NSMutableDictionary: :</span>
+<span class="c1">// 一般用到的是 __NSDictionaryM</span>
+</code></pre></div>
+<hr>
+<h3>4 NSNotification Crash</h3>
+<h4>出现原因</h4>
+<p>在 iOS8 及以下的操作系统中添加的观察者一般需要在 dealloc 的时候做移除，如果开发者忘记移除，则在发送通知的时候会导致 Crash，而在 iOS9 上即使移忘记除也无所谓，猜想可能是 iOS9 之后系统将通知中心持有对象由 <code>assign</code> 变为了<code>weak</code>。</p>
+<h4>解决办法</h4>
+<p>所以这里两种解决办法</p>
+<ol>
+<li>类似 KVO 中间加上 Proxy 层，使用 weak 指针来持有对象</li>
+<li>在 dealloc 的时候将未被移除的观察者移除</li>
+</ol>
+<p>这里我们使用 <a href="https://www.valiantcat.cn/index.php/2017/11/03/53.html">iOS 界的毒瘤-MethodSwizzling</a>
+一文中到的方法。</p>
+<hr>
+<h3>5 NSNull Crash</h3>
+<h4>出现原因</h4>
+<p>虽然 Objecttive-C 不允许开发者将 nil 放进容器内，但是另外一个代表用户态 <code>空</code> 的类 NSNull 却可以放进容器，但令人不爽的是这个类的实例，并不能响应任何方法。</p>
+<p>容器中出现 NSNull 一般是 API 接口返回了含有 null 的 JSON 数据，
+调用方通常将其理解为 NSNumber，NSString，NSDictionary 和 NSArray。 这时开发者如果没有做好防御 一旦对 NSNull 这个类型调用任何方法都会出现 unrecongized selector 错误。</p>
+<h4>解决办法</h4>
+<p>我们在 NSNull 的转发方法中可以判断上面的四种类型是否可以解析。如果可以解析直接将其转发给这几种对象，如果不能则调用父类的默认实现。</p>
+<div class="highlight"><pre><code><span></span><span class="n">XXStaticHookClass</span><span class="p">(</span><span class="bp">NSNull</span><span class="p">,</span><span class="w"> </span><span class="n">ProtectNull</span><span class="p">,</span><span class="w"> </span><span class="kt">id</span><span class="p">,</span><span class="w"> </span><span class="k">@selector</span><span class="p">(</span><span class="n">forwardingTargetForSelector</span><span class="o">:</span><span class="p">),</span><span class="w"> </span><span class="p">(</span><span class="kt">SEL</span><span class="p">)</span><span class="w"> </span><span class="n">aSelector</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="bp">NSArray</span><span class="w"> </span><span class="o">*</span><span class="n">sTmpOutput</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">nil</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">sTmpOutput</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nb">nil</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">sTmpOutput</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="l">@[</span><span class="s">@&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="mi">@0</span><span class="p">,</span><span class="w"> </span><span class="l">@[]</span><span class="p">,</span><span class="w"> </span><span class="l">@{}]</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">id</span><span class="w"> </span><span class="n">tmpObj</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">sTmpOutput</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">([</span><span class="n">tmpObj</span><span class="w"> </span><span class="n">respondsToSelector</span><span class="o">:</span><span class="n">aSelector</span><span class="p">])</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">return</span><span class="w"> </span><span class="n">tmpObj</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">XXHookOrgin</span><span class="p">(</span><span class="n">aSelector</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="n">XXStaticHookEnd</span>
+</code></pre></div>
+<h3>6. NSTimer Crash</h3>
+<h4>出现原因</h4>
+<p>在使用 <code>+ (NSTimer *)scheduledTimerWithTimeInterval:(NSTimeInterval)ti target:(id)aTarget selector:(SEL)aSelector userInfo:(nullable id)userInfo repeats:(BOOL)yesOrNo</code> 创建定时任务的时候，target 一般都会持有 timer，timer又会持有 target 对象，在我们没有正确关闭定时器的时候，timer 会一直持有target 导致内存泄漏。</p>
+<h4>解决办法</h4>
+<p>同 KVO 一样，既然 timer 和 target 直接交互容易出现问题，我们就再找个代理将 target 和 selctor 等信息保存到 Proxy 里，并且是弱引用 target。<br>
+这样避免因为循环引用造成的内存泄漏。然后在触发真正 target 事件的时候如果 target 置为 nil 了这时候手动去关闭定时器。</p>
+<div class="highlight"><pre><code><span></span><span class="n">XXStaticHookMetaClass</span><span class="p">(</span><span class="bp">NSTimer</span><span class="p">,</span><span class="w"> </span><span class="n">ProtectTimer</span><span class="p">,</span><span class="w">  </span><span class="bp">NSTimer</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="p">,</span><span class="k">@selector</span><span class="p">(</span><span class="n">scheduledTimerWithTimeInterval</span><span class="o">:</span><span class="n">target</span><span class="o">:</span><span class="n">selector</span><span class="o">:</span><span class="n">userInfo</span><span class="o">:</span><span class="n">repeats</span><span class="o">:</span><span class="p">),</span>
+<span class="w">                      </span><span class="p">(</span><span class="n">NSTimeInterval</span><span class="p">)</span><span class="n">ti</span><span class="w"> </span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">id</span><span class="p">)</span><span class="n">aTarget</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">SEL</span><span class="p">)</span><span class="n">aSelector</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">id</span><span class="p">)</span><span class="n">userInfo</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">BOOL</span><span class="p">)</span><span class="n">yesOrNo</span><span class="w"> </span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">yesOrNo</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="bp">NSTimer</span><span class="w"> </span><span class="o">*</span><span class="n">timer</span><span class="w"> </span><span class="o">=</span><span class="w">  </span><span class="nb">nil</span><span class="w"> </span><span class="p">;</span>
+<span class="w">        </span><span class="k">@autoreleasepool</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">XXTimerProxy</span><span class="w"> </span><span class="o">*</span><span class="n">proxy</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">XXTimerProxy</span><span class="w"> </span><span class="n">new</span><span class="p">];</span>
+<span class="w">            </span><span class="n">proxy</span><span class="p">.</span><span class="n">target</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">aTarget</span><span class="p">;</span>
+<span class="w">            </span><span class="n">proxy</span><span class="p">.</span><span class="n">aSelector</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">aSelector</span><span class="p">;</span>
+<span class="w">            </span><span class="n">timer</span><span class="p">.</span><span class="n">timerProxy</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">proxy</span><span class="p">;</span>
+<span class="w">            </span><span class="n">timer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">XXHookOrgin</span><span class="p">(</span><span class="n">ti</span><span class="p">,</span><span class="w"> </span><span class="n">proxy</span><span class="p">,</span><span class="w"> </span><span class="k">@selector</span><span class="p">(</span><span class="n">trigger</span><span class="o">:</span><span class="p">),</span><span class="w"> </span><span class="n">userInfo</span><span class="p">,</span><span class="w"> </span><span class="n">yesOrNo</span><span class="p">);</span>
+<span class="w">            </span><span class="n">proxy</span><span class="p">.</span><span class="n">sourceTimer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">timer</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="k">return</span><span class="w">  </span><span class="n">timer</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">XXHookOrgin</span><span class="p">(</span><span class="n">ti</span><span class="p">,</span><span class="w"> </span><span class="n">aTarget</span><span class="p">,</span><span class="w"> </span><span class="n">aSelector</span><span class="p">,</span><span class="w"> </span><span class="n">userInfo</span><span class="p">,</span><span class="w"> </span><span class="n">yesOrNo</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="n">XXStaticHookEnd</span>
+<span class="k">@implementation</span> <span class="nc">XXTimerProxy</span>
+
+<span class="p">-</span> <span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="nf">trigger:</span><span class="p">(</span><span class="kt">id</span><span class="p">)</span><span class="nv">userinfo</span><span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">id</span><span class="w"> </span><span class="n">strongTarget</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">self</span><span class="p">.</span><span class="n">target</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">strongTarget</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">([</span><span class="n">strongTarget</span><span class="w"> </span><span class="n">respondsToSelector</span><span class="o">:</span><span class="nb">self</span><span class="p">.</span><span class="n">aSelector</span><span class="p">]))</span><span class="w"> </span><span class="p">{</span>
+<span class="cp">#pragma clang diagnostic push</span>
+<span class="cp">#pragma clang diagnostic ignored &quot;-Warc-performSelector-leaks&quot;</span>
+<span class="w">        </span><span class="p">[</span><span class="n">strongTarget</span><span class="w"> </span><span class="n">performSelector</span><span class="o">:</span><span class="nb">self</span><span class="p">.</span><span class="n">aSelector</span><span class="w"> </span><span class="n">withObject</span><span class="o">:</span><span class="n">userinfo</span><span class="p">];</span>
+<span class="cp">#pragma clang diagnostic pop</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="bp">NSTimer</span><span class="w"> </span><span class="o">*</span><span class="n">sourceTimer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">self</span><span class="p">.</span><span class="n">sourceTimer</span><span class="p">;</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">sourceTimer</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="p">[</span><span class="n">sourceTimer</span><span class="w"> </span><span class="n">invalidate</span><span class="p">];</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="bp">NSString</span><span class="w"> </span><span class="o">*</span><span class="n">reason</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="bp">NSString</span><span class="w"> </span><span class="n">stringWithFormat</span><span class="o">:</span><span class="s">@&quot;*****Warning***** logic error target is %@ method is %@, reason : an object dealloc not invalidate Timer.&quot;</span><span class="p">,</span>
+<span class="w">                            </span><span class="p">[</span><span class="nb">self</span><span class="w"> </span><span class="k">class</span><span class="p">],</span><span class="w"> </span><span class="n">NSStringFromSelector</span><span class="p">(</span><span class="nb">self</span><span class="p">.</span><span class="n">aSelector</span><span class="p">)];</span>
+
+<span class="w">        </span><span class="p">[</span><span class="n">XXRecord</span><span class="w"> </span><span class="n">recordFatalWithReason</span><span class="o">:</span><span class="n">reason</span><span class="w"> </span><span class="n">errorType</span><span class="o">:</span><span class="p">(</span><span class="n">EXXShieldTypeTimer</span><span class="p">)];</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">@end</span>
+</code></pre></div>
+<h3>7. 野指针 Crash</h3>
+<h4>出现原因</h4>
+<p>一般在单线程条件下使用 ARC 正确的处理引用关系野指针出现的并不频繁， 但是多线程下则不尽然，通常在一个线程中释放了对象，另外一个线程还没有更新指针状态 后续访问就可能会造成随机性 bug。</p>
+<p>之所以是随机 bug 是因为被回收的内存不一定立马被使用。而且崩溃的位置可能也与原来的逻辑相聚很远，因此收集的堆栈信息也可能是杂乱无章没有什么价值。
+具体的分类请看Bugly整理的脑图。
+<img src="../vender/image/img_loading.gif" data-src="http://upload-images.jianshu.io/upload_images/783864-9fa6e25efbe248e8.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240" alt="x"></p>
+<p>更多关于野指针的文章请参考:</p>
+<ol>
+<li><a href="https://dev.qq.com/topic/59141e56ca95d00d727ba750">如何定位Obj-C野指针随机Crash(一)</a></li>
+<li><a href="https://dev.qq.com/topic/59142d61ca95d00d727ba752">如何定位Obj-C野指针随机Crash(二)</a></li>
+<li><a href="https://dev.qq.com/topic/5915134b75d11c055ca7fca0">如何定位Obj-C野指针随机Crash(三)</a></li>
+</ol>
+<h4>解决办法</h4>
+<p>这里我们可以借用系统的NSZombies对象的设计。
+参考<a href="https://mikeash.com/pyblog/friday-qa-2014-11-07-lets-build-nszombie.html">buildNSZombie</a></p>
+<p>解决过程</p>
+<ol>
+<li>建立白名单机制，由于系统的类基本不会出现野指针，而且 hook 所有的类开销较大。所以我们只过滤开发者自定义的类。</li>
+<li>hook dealloc 方法 这些需要保护的类我们并不让其释放，而是调用objc_desctructInstance 方法释放实例内部所持有属性的引用和关联对象。</li>
+<li>利用 object_setClass(id，Class) 修改 isa 指针将其指向一个Proxy 对象(类比系统的 KVO 实现)，此 Proxy 实现了一个和前面所说的智能转发类一样的 <code>return 0</code>的函数。</li>
+<li><p>在 Proxy 对象内的 <code>- (void)forwardInvocation:(NSInvocation *)anInvocation</code> 中收集 Crash 信息。</p>
+</li>
+<li><p>缓存的对象是有成本的，我们在缓存对象到达一定数量时候将其释放(object_dispose)。</p>
+</li>
+</ol>
+<h4>存在问题</h4>
+<ol>
+<li><p>延迟释放内存会造成性能浪费，所以默认缓存会造成野指针的Class实例的对象限制是50，超出之后会释放，如果这时候再此触发了刚好释放掉的野指针，还是会造成Crash的，</p>
+</li>
+<li><p>建议使用的时候如果近期没有野指针的Crash可以不必开启，如果野指针类型的Crash突然增多，可以考虑在 hot Patch 中开启野指针防护，待收取异常信息之后，再关闭此开关。</p>
+</li>
+</ol>
+<hr>
+<h3>收集信息</h3>
+<p>由于希望此库没有任何外部依赖，所以并未实现响应的上报逻辑。使用者如果需要上报信息 只需要自行实现 <code>XXRecordProtocol</code> 即可，然后在开启 SDK 之前将其注册进入 SDK。
+在实现方法里面会接收到 XXShield 内部定义的错误信息。
+开发者无论可以使用诸如 CrashLytics，友盟， bugly等第三库，或者自行 dump堆栈信息都可。</p>
+<div class="highlight"><pre><code><span></span><span class="k">@protocol</span> <span class="nc">XXRecordProtocol</span> <span class="o">&lt;</span><span class="bp">NSObject</span><span class="o">&gt;</span>
+
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">recordWithReason</span><span class="o">:</span><span class="p">(</span><span class="bp">NSError</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="p">)</span><span class="n">reason</span><span class="w"> </span><span class="n">userInfo</span><span class="o">:</span><span class="p">(</span><span class="bp">NSDictionary</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">userInfo</span><span class="p">;</span>
+
+<span class="k">@end</span>
+</code></pre></div>
+<h3>使用方法</h3>
+<h4>示例工程</h4>
+<div class="highlight"><pre><code><span></span>git<span class="w"> </span>clone<span class="w"> </span>git@github.com:ValiantCat/XXShield.git
+<span class="nb">cd</span><span class="w"> </span>Example
+pod<span class="w"> </span>install<span class="w"> </span>
+open<span class="w"> </span>XXShield.xcworkspace
+</code></pre></div>
+<h4>Install</h4>
+<div class="highlight"><pre><code><span></span><span class="n">pod</span><span class="w"> </span><span class="s2">&quot;XXShield&quot;</span>
+</code></pre></div>
+<h4>Usage</h4>
+<div class="highlight"><pre><code><span></span><span class="cm">/**</span>
+<span class="cm"> 注册汇报中心</span>
+
+<span class="cm"> @param record 汇报中心</span>
+<span class="cm"> */</span>
+<span class="p">+</span> <span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="nf">registerRecordHandler:</span><span class="p">(</span><span class="kt">id</span><span class="o">&lt;</span><span class="n">XXRecordProtocol</span><span class="o">&gt;</span><span class="p">)</span><span class="nv">record</span><span class="p">;</span>
+
+<span class="cm">/**</span>
+<span class="cm"> 注册SDK，默认只要开启就打开防Crash，如果需要DEBUG关闭，请在调用处使用条件编译</span>
+<span class="cm"> 本注册方式不包含EXXShieldTypeDangLingPointer类型</span>
+<span class="cm"> */</span>
+<span class="p">+</span> <span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="nf">registerStabilitySDK</span><span class="p">;</span>
+
+<span class="cm">/**</span>
+<span class="cm"> 本注册方式不包含EXXShieldTypeDangLingPointer类型</span>
+
+<span class="cm"> @param ability ability</span>
+<span class="cm"> */</span>
+<span class="p">+</span> <span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="nf">registerStabilityWithAbility:</span><span class="p">(</span><span class="n">EXXShieldType</span><span class="p">)</span><span class="nv">ability</span><span class="p">;</span>
+
+<span class="cm">/**</span>
+<span class="cm"> ///注册EXXShieldTypeDangLingPointer需要传入存储类名的array，暂时请不要传入系统框架类</span>
+
+<span class="cm"> @param ability ability description</span>
+<span class="cm"> @param classNames 野指针类列表</span>
+<span class="cm"> */</span>
+<span class="p">+</span> <span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="nf">registerStabilityWithAbility:</span><span class="p">(</span><span class="n">EXXShieldType</span><span class="p">)</span><span class="nv">ability</span><span class="w"> </span><span class="nf">withClassNames:</span><span class="p">(</span><span class="n">nonnull</span><span class="w"> </span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="bp">NSString</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nv">classNames</span><span class="p">;</span>
+</code></pre></div>
+<h4>ChangeLog</h4>
+<p><a href="https://github.com/ValiantCat/XXShield/blob/develop/Changelog.md">ChangeLog</a></p>
+<h4>单元测试</h4>
+<p>相关的单元测试在示例工程的Test Target下，有兴趣的开发者可以自行查看。并且已经接入 <a href="https://travis-ci.org/ValiantCat/XXShield">TrivisCI</a>保证了代码质量。</p>
+<h4>Bug&amp;Feature</h4>
+<p>如果有相关的 Bug 请提 <a href="https://github.com/ValiantCat/XXShield/issues">Issue</a>。</p>
+<p>如果觉得可以扩充新的防护类型，请提 <a href="https://github.com/ValiantCat/XXShield/pulls">PR</a> 给我。</p>
+<h4>作者</h4>
+<p>ValiantCat, 519224747@qq.com</p>
+<p><a href="https://www.valiantcat.cn/index.php/2017/11/03/53.html">个人博客</a></p>
+<p><a href="http://www.jianshu.com/u/cc1e4faec5f7">南栀倾寒的简书</a></p>
+<h3>License</h3>
+<p>XXShield 使用 Apache-2.0 开源协议.</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "iOS-APP-运行时防Crash工具XXShield练就.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

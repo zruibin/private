@@ -1,0 +1,1517 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>Mediasoup1 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="Mediasoup1,音视频,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="Mediasoup库的架构（C++部分）<br/>Mediasoup主业务流程+时序图<br/>mediasoup 3.9.10 worker 源码初步梳理<br/>Mediasoup源码分析（一）信令的传输过程<br/>Mediasoup源码分析（二）Router的建立" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>Mediasoup1</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2022-03-14 15:00
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_yin_shi_pin.html' class='article_tag'>音视频</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://blog.csdn.net/Frederick_Fung/article/details/106919882' target='blank'>Mediasoup库的架构（C++部分）</a></p></h4>
+<h2>Mediasoup库介绍</h2>
+<h3>Mediasoup基本概念</h3>
+<ul>
+<li><p>Worker：代表一个结点，下图的每一块就是一个Worker。假设操作系统是双核的，每一核都会创建一个进程，这个进程就是一个Worker</p>
+</li>
+<li><p>Router：房间或路由器</p>
+</li>
+<li><p>Producer：生产者</p>
+</li>
+<li><p>Consumer：消费者</p>
+</li>
+<li><p>Transport：客户端与服务端的一条连接线，这条线上可以有多个消费者和生产者</p>
+</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220314-1500-0.svg" alt="在这里插入图片描述"></p>
+<h3>Mediasoup包括的特性</h3>
+<ul>
+<li>支持IPv6</li>
+<li>ICE/DTLS/RTP/RTCP over UDP and TCP</li>
+<li>支持 Simulcast 和 SVC</li>
+<li>支持拥塞控制</li>
+<li>带宽评估</li>
+<li>支持STCP协议</li>
+<li>多流使用同一个ICE+DTLS传输通道</li>
+<li>底层采用进程+libuv，异步I/O的处理方式</li>
+</ul>
+<h3>Mediasoup C++核心类图</h3>
+<h4>Consumer</h4>
+<ul>
+<li><p>SimpleConsumer：普通的RTP数据消费者，对于音频和视频都一样，都是最简单的消费者</p>
+</li>
+<li><p>PipeConsumer：Pipe是用作于不同的Worker与Worker之间进行数据的流转，所以PipeConsumer就是用来接受不同的Worker传输过来的数据</p>
+</li>
+<li><p>SvcConsumer：SVC按照分层的方式分为核心层、扩展层、边缘层，这个类的作用就是用来传输不同层的数据的</p>
+</li>
+<li><p>SimulcastConsumer：当共享者传输多路流的时候，使用的是Simulcast，对于接收者来说，也要使用Simulcast进行消费</p>
+</li>
+</ul>
+<h4>Transport</h4>
+<ul>
+<li>WebRTCTransport：主要用于浏览器之间或与其他终端之间的通信，这种数据一般都是加密的，为了保证数据不被窃取掉，它有很多的安全机制，且非常复杂</li>
+<li>PlainRTPTransport：主要用于普通的非加密的RTP数据的传输</li>
+<li>PipeTransport：用于不同Worker/Router之间的传输</li>
+</ul>
+<h4>Router</h4>
+<p>对于Router来说，一个Router对应了多个Consumer、多个Producer、多个Transport，所以它是1对多的关系</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220314-1500-1.png" alt="在这里插入图片描述"></p>
+<h3>Mediasoup C++详细类图</h3>
+<h4>RtpStreamSend</h4>
+<p>可能会有人疑惑，消费者为什么会发送数据呢，不应该是接收数据吗？其实这里需要想通一点，Mediasoup是作为流媒体服务器，真正的消费者是客户端，所以服务器的Consumer需要把数据发送给客户端</p>
+<p>RtpStreamSend继承自RtpStream，这个类处理Rtp数据流的收发。RtpStream使用到了RtpPacket，这个包是用于对Rtp数据包的分析，Rtp数据有数据包头，对于包头每一个字段的定义都是在这个Packet里面操作的</p>
+<h4>SeqManager</h4>
+<p>服务端推送给客户端的数据流是会重新排序的，排序的时候便会依靠这个SeqManager，它会记录某个SSRC所对应的Sequence，以此为起始位置，然后后面
+的每个包都向下递增一个数</p>
+<h4>Producer</h4>
+<p>Producer作为服务端的生产者，它是用来接收共享者发送的数据流，所以它里面包含多个RtpStreamRecv，是一对多的关系（为什么是多个RtpStreamRecv呢？因为数据的接收有可能会丢包，丢包重传的也算作一路流，对应的音频的丢包也是需要重传）</p>
+<h4>NackGenerator</h4>
+<p>作为数据的接收端，RtpStreamRecv使用到了NackGenerator丢包产生器</p>
+<p>接收端能够知道有没有丢包，因为数据包有Sequence，比如发送了100个数据，前50个数据是连续的，但假设当50之后是55，Recv端就知道丢了51、52、53、54 这4个包了。丢包之后如何解决呢，有两种方式：</p>
+<ol>
+<li><strong>Fec</strong>：在每个包增加一些冗余，它能计算 出丢失的音频包或视频包</li>
+<li><strong>Nack</strong>：它会告诉发送端丢了哪些包，发送端会根据策略，若时间比较短的话，会把丢失的包补上来，具体补哪些包就是根据NackGenerator产生的</li>
+</ol>
+<h4>PortManager</h4>
+<p>端口管理器，对于Mediasoup来说，默认是从40000到49999共一万个端口号。UdpSocket和TcpServer通过PortManager进行对端口号的管理，首先确定端口号有没有被占用，没有被占用就使用该端口号对数据传输；若被占用，就根据PortManager的策略往后跳。注意Udp和Tcp的使用是互斥的</p>
+<h4>DtlsTransport</h4>
+<p>使用tls对Rtp包进行数据加密的协议，同时在这里面还使用到了Srtp协议，Srtp协议分为数据的收与发，所以在WebRTCTransport中有Srtp
+send和recv这两个Session</p>
+<h4>RembClient/RembServer</h4>
+<p>这两个主要用于对带宽的评估，既可用于client端也可用于server端。对于共享者来说，Mediasoup的WebRTCTransport就是RembClient端；对于消费者来说，就是RembServer端</p>
+<h4>IceCandidate</h4>
+<p>候选者包括Host、Server reflexive、Relay reflexive三种，对于WebRTC一般设置成Host，最高优先级</p>
+<h4>IceServer</h4>
+<p>包括证书验证、指纹识别等一系列安全验证机制，它里面也包含了多个TransportTuple</p>
+<h4>TransportTuple</h4>
+<p>如果使用TCP连接，它里面便含有TcpConnection</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220314-1500-2.png" alt="在这里插入图片描述"></p>
+<hr>
+
+
+<h4><p>原文出处：<a href='https://blog.csdn.net/Frederick_Fung/article/details/106947135' target='blank'>Mediasoup主业务流程+时序图</a></p></h4>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220314-1600-1.png" alt="在这里插入图片描述"></p>
+<ol>
+<li>createRouter</li>
+<li>createTransport</li>
+<li>connect</li>
+<li>createProducer</li>
+<li>createConsumer</li>
+</ol>
+<p>connect的细节：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220314-1600-2.png" alt="在这里插入图片描述"></p>
+<p><strong>时序图</strong></p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220314-1600-3.png" alt="在这里插入图片描述"></p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220314-1600-4.png" alt="在这里插入图片描述"></p>
+<hr>
+
+
+<h4><p>原文出处：<a href='http://blog.tubumu.com/2022/04/21/mediasoup-source-01/' target='blank'>mediasoup 3.9.10 worker 源码初步梳理</a></p></h4>
+<h2>一、概述</h2>
+<p>Mediasoup 主要提供了 3 个库和 1 个 demo。</p>
+<table>
+<thead>
+<tr>
+<th>库名</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a target="_blank" rel="noopener" href="https://github.com/versatica/mediasoup">mediasoup</a></td>
+<td>主要包含三部分。一是 worker 可执行程序，由 C++ 实现，是本系列分析的重点；二是 Node 库，由 TypeScript 实现；三是 Rust 库，和 Node 的主要不同在于它没有以进程方式而是以静态库方式使用 mediasoup-worker。</td>
+</tr>
+<tr>
+<td><a target="_blank" rel="noopener" href="https://github.com/versatica/mediasoup-client">mediasoup-client</a></td>
+<td>Web 客户端库。TypeScript 实现。</td>
+</tr>
+<tr>
+<td><a target="_blank" rel="noopener" href="https://github.com/versatica/libmediasoupclient">libmediasoupclient</a></td>
+<td>Native 客户端库。C++ 实现。</td>
+</tr>
+<tr>
+<td><a target="_blank" rel="noopener" href="https://github.com/versatica/mediasoup-demo">mediasoup-demo</a></td>
+<td>官方 Demo。</td>
+</tr>
+<tr>
+<td><a target="_blank" rel="noopener" href="https://mediasoup.org/documentation/examples/">Examples</a></td>
+<td>各种示例。</td>
+</tr>
+</tbody></table><p>网络上对 mediasoup 的 <code>Node.js</code> 层——准确说是对官方的 <code>mediasoup-demo</code> 的源码分析比较多，对于<code>mediasoup-client</code> 和 <code>mediasoup-worker</code> (之后简 worker) 等的源码详细分析相对较少。本人之前有将<code>GB28281</code> 集成进 mediasoup 的想法并验证了可行性，以及使用 <code>.Net</code> 重新实现过 Node.js 层（含 mediasoup-client 和 mediasoup-demo），对 worker 的源码进行过比较粗略地浏览。最近基于想要弥补一些比较模糊的认知，并且 mediaoup本身也在进化，故就再做了一次源码的梳理。</p>
+<blockquote><p>至于 mediasoup 是什么、能做什么、与其他 SFU 相较而言的优缺点、Demo 如何运行、为什么不用单一语言来实现等等讨论不是本系列关注的重点。</p>
+</blockquote>
+<h2>二、名词/概念</h2>
+<p>mediasoup 定义和抽象了一些名词和概念，为了方便描述，做整理如下表：</p>
+<table>
+<thead>
+<tr>
+<th>名词/概念</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Settings</td>
+<td>设置。用于读取命令行配置、将配置输出到日志，以及运行时更新配置。另外用 <code>线程本地存储</code> 保存配置以确保每个线程都有一个 Settings 配置对象。当然，以 worker 进程方式运行不存在这个问题。设置的选项（option: getopt.h）具体包括：<code>logLevel</code>、<code>logTags</code>、<code>rtcMinPort</code> 和 <code>rtcMaxPort</code>、<code>dtlsCertificateFile</code> 和 <code>dtlsPrivateKeyFile</code> 这六项，分别表示日志等级、日志标签（如ice、dtls等，控制哪些类的日志才会传出）、最小和最大 rtc 端口，以及 dtls 证书文件和私钥的物理路径。这些参数都是可选的，如果未提供则会使用默认值或自动生成。</td>
+</tr>
+<tr>
+<td>Logger</td>
+<td>日志。有 <code>debug</code>、<code>warn</code>、<code>error</code> 和 <code>none</code> 四个等级。日志通过 <code>ChannelSocket</code> 传输到父进程，如果 ChannelSocket 尚未创建则会在标准输出中打印日志。mediasoup 给很多方法都加了 Trace 日志，打开 <code>MS_LOG_TRACE</code> 编译宏开关并且设置日志等级为 debug 则会输出。类似于 Settings，Logger 也用线程本地存储保存 Buffer 和 ChannelSocket 以确保每个线程都有一个对象。</td>
+</tr>
+<tr>
+<td>ChannelSocket</td>
+<td>通道 Socket。抽象了 worker 进程和父进程的通信。得益于 <code>libuv</code>，对于进程间通信开发者不用关心操作系统是用的 Linux/UNIX 的 <code>UNIX Domain Socket</code> 还是 Windows 的 <code>IPC</code> 等。而 mediasoup 的这层 ChannelSocket 抽象，也为后来支持的 <code>以库的方式使用 worker</code> 打下基础。ChannelSocket 是双向的，主要向父进程传输日志；接受父进程的如创建 <code>Transport</code>、<code>Producer</code> 等指令请求；向父进程传输指令请求的执行结果；向父进程传输 Producer 暂停关闭、SCTP 发送 Buffer 已满之类的通知。所有消息都是基于文本的。</td>
+</tr>
+<tr>
+<td>PayloadChannelSocket</td>
+<td>负载通道 Socket。类似于 ChannelSocket，不同的是 PayloadChannelSocket 用于 <code>DirectTransport</code> 向父进程发送 RTP 或 RTCP 数据包等。消息是基于文本和二进制的。</td>
+</tr>
+<tr>
+<td>Worker</td>
+<td>工作者。注意这里并非指 worker 进程，但某种意义下可以指代 worker 进程。ChannelSocket 和 PayloadChannelSocket 只负责消息的接收和发送，而 Worker 是具体消息的处理入口。它根据消息的类别进行处理，对于自身可以负责的请求比如获取资源使用率、创建及关闭 <code>Router</code>、dump 获取本 Worker 下的 Router 的 Id 集合等则直接处理，其余的就交给 Router 来处理。遵循谁创建谁销毁的原则，Router 的销毁工作也由 Worker 负责。</td>
+</tr>
+<tr>
+<td>Router</td>
+<td>路由。Router 是比较重要的概念，不准确地说可以将 Router 和房间对应起来。其保存了 Transport、Producer、<code>Consumer</code>、Producer下对应的 Consumer 以及 <code>DataProducer</code> 和 <code>DataConsumer</code> 相关的集合。如上文所述，Worker 将其处理不了的工作交给 Router，Router 能够处创建和关闭 Transport 以及和 <code>RtpObserver</code> 相关的几个操作请求，其余的就交给 Transport 处理。另外，Router 只负责 Transport 和 RtpObserver 的销毁工作，对于 Producer、Consumer 等则由创建这些对象的 Transport 负责。</td>
+</tr>
+<tr>
+<td>Transport</td>
+<td>传输通道。Transport 是抽象类，具体类包括：<code>WebRtcTransport</code>、<code>PlainTransport</code>、<code>DirectTransport</code> 和 <code>PipeTransport</code>。</td>
+</tr>
+<tr>
+<td>WebRtcTransport</td>
+<td>WebRtc 传输通道。WebRtcTransport 包含 Socket 服务端，将接收到的数据包尝试转换为 <code>StunPacket</code>、<code>Rtcp Packet</code>、<code>RtpPacket</code> 或 <code>Dtls 数据</code> 中的一种。StunPacket 由 IceServer 处理，Rtcp Packet 会经过处理后发送给 Consumer, RtpPacket 由相应的 Producer 处理，Dtls 数据当然是先解密再处理；也会通过 Sokcet 将数据发送到本 Transport 下对应的 Consumer 中去。</td>
+</tr>
+<tr>
+<td>PlainTransport</td>
+<td>Plain 传输通道。类似于 WebRtcTransport，不同的是不会收到 StunPacket 。</td>
+</tr>
+<tr>
+<td>PipeTransport</td>
+<td>Pipe 传输通道。用于跨 Router/worker Rtp 包传输。</td>
+</tr>
+<tr>
+<td>DirectTransport</td>
+<td>Direct 传输通道。DirectTransport 不包含 Socket 服务端，将接收到的数据直接通过 PayloadChannel 发送给 Consumer。</td>
+</tr>
+<tr>
+<td>Producer</td>
+<td>生产者。类型有四类：SIMPLE、SIMULCAST、SVC 和 PIPE。</td>
+</tr>
+<tr>
+<td>Consumer</td>
+<td>消费者。Consumer 是抽象类，具体类包括：<code>SimpleConsumer</code>、<code>SimulcastConsumer</code>、<code>SvcConsumer</code> 和 <code>PipeConsumer</code>。如果是 PipeTranspor 进行消费，则 type 为 “pipe”，否则为 Producer 的 type。</td>
+</tr>
+<tr>
+<td>SimpleConsumer</td>
+<td>单体消费者。</td>
+</tr>
+<tr>
+<td>SimulcastConsumer</td>
+<td>Simulcast消费者。</td>
+</tr>
+<tr>
+<td>SvcConsumer</td>
+<td>Svc 消费者。</td>
+</tr>
+<tr>
+<td>PipeConsumer</td>
+<td>Pipe 消费者。</td>
+</tr>
+<tr>
+<td>DataProducer</td>
+<td>Data 生产者。类型有两类：SCTP 和 DIRECT。只有传递 enableSctp 为 true 的参数才能创建类型为 SCTP 的 DataProducer；只能在 DirectTransport 之上创建类型为 DIRECT 的 DataProducer。</td>
+</tr>
+<tr>
+<td>DataConsumer</td>
+<td>Data 消费者。只有传递 enableSctp 为 true 的参数才能创建类型为 SCTP 的 DataProducer；只能在 DirectTransport 之上创建类型为 DIRECT 的 DataConsumer。</td>
+</tr>
+<tr>
+<td>RtpObserver</td>
+<td>Rtp 观察者。RtpObserver 是抽象类，具体类包括：<code>AudioLevelObserver</code> 和 <code>ActiveSpeakerObserver</code>。</td>
+</tr>
+<tr>
+<td>AudioLevelObserver</td>
+<td>音量观察者。收到音频 Rtp 包后累计音量。比如每1秒间隔计算触发一次计算，如果对应 Producer 收集了 10 个及以上的包则计算音频的平均值，如果值大于默认 -80dB 则将 Producder 的 Id 收集起来，最多收集指定参数 <code>maxEntries</code> 那么多个。如果存在符合条件的 Producer 则发出 <code>volumes</code> 事件，否则发出 <code>silence</code> 事件。事件会发送给父进程，而父进程会发送给相应的客户端。</td>
+</tr>
+<tr>
+<td>ActiveSpeakerObserver</td>
+<td>说话人观察者。ActiveSpeakerObserver 是 3.8.0 新增的。具体算法不算太简单，大致看并不是谁说话就算，而是计算出会议中说话人中谁是主导者。如果存在符合条件的唯一 Producer 则发出 <code>dominantspeaker</code> 事件。事件会发送给父进程，而父进程会发送给相应的客户端。</td>
+</tr>
+</tbody></table><blockquote><p>父对象通常会监听子对象的相关事件，比如 Worker 会监听 ChannelSocket 和 PayloadChannelSocket 的相关事件(Router没有监听器)，Router 会监听 Transport 的相关事件， Transport 会监听 Producer 、Consumer 等的相关事件。<br>
+如果要扩展其他协议，比如支持 GB28181 的 PS 流，可以创建自定义 Transport 。<br>
+如果要集成一些 AI 功能，比如目标识别，手势识别，语音指令识别等，可以创建自定义 RtpObserver 。</p>
+</blockquote>
+<h2>三、ChannelSocket 消息类型</h2>
+<p><code>ChannelRequest::MethodId</code> 枚举定义了各种消息。其命名有一定规律，除 <code>*.close</code> 和 <code>RtpObServer</code>相关的消息外，第一个下划线前的第一个单词通常标明了消息由谁来处理。比如 <code>TRANSPORT_PRODUCE</code>，表示 Transport 需要处理 Produce 消息。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// File: worker/src/Channel/ChannelRequest.cpp  </span>
+<span class="n">absl</span><span class="o">::</span><span class="n">flat_hash_map</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="p">,</span><span class="w"> </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">&gt;</span><span class="w"> </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">string2MethodId</span><span class="w"> </span><span class="o">=</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 关闭 Worker 。通常发生在 worker 进程被关闭时，由 Worker 的析构函数触发。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;worker.close&quot;</span><span class="p">,</span><span class="w">                                </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">WORKER_CLOSE</span><span class="w">                                     </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 获取 Worker 转储。返回值包含 worker 进程 Id 和本 Worker 下的 Router 的 routerIds 集合。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;worker.dump&quot;</span><span class="p">,</span><span class="w">                                 </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">WORKER_DUMP</span><span class="w">                                      </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 获取 Worker 资源使用率。结构见 http://docs.libuv.org/en/v1.x/misc.html#c.uv_rusage_t 或 mediasoup-client 库。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;worker.getResourceUsage&quot;</span><span class="p">,</span><span class="w">                     </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">WORKER_GET_RESOURCE_USAGE</span><span class="w">                        </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 更新设置。具体是更新日志等级(logLevel)和日志标签(logTags)。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;worker.updateSettings&quot;</span><span class="p">,</span><span class="w">                       </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">WORKER_UPDATE_SETTINGS</span><span class="w">                           </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 创建 Router。请求参数的 routerId 有调用方提供。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;worker.createRouter&quot;</span><span class="p">,</span><span class="w">                         </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">WORKER_CREATE_ROUTER</span><span class="w">                             </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 关闭 Router。该消息由 Worker 处理。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;router.close&quot;</span><span class="p">,</span><span class="w">                                </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">ROUTER_CLOSE</span><span class="w">                                     </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 获取 Router 转储。返回值包含本 Router 的 id、transportIds、rtpObserverIds、mapProducerIdConsumerIds、mapConsumerIdProducerId、mapProducerIdObserverIds、mapDataProducerIdDataConsumerIds 和 mapDataConsumerIdDataProducerId。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;router.dump&quot;</span><span class="p">,</span><span class="w">                                 </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">ROUTER_DUMP</span><span class="w">                                      </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 创建 WebRtcTransport。请求参数主要主要有监听 IP 和 Port（旧版可能无法指定端口而只能使用允许范围内的随机端口）；是否启用 UDP 和(或) TCP；是否首选 UDP 和(或) TCP。返回值包含客户端创建 Transport 所需参数，暂略。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;router.createWebRtcTransport&quot;</span><span class="p">,</span><span class="w">                </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">ROUTER_CREATE_WEBRTC_TRANSPORT</span><span class="w">                   </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 创建 PlainTransport。请求参数类似有创建 WebRtcTransport，但无需指定使用 UDP 还是 TCP，因为只支持 UDP。额外的 comedia 表示是否需要预先连接 Transport；rtcpMux 表示是否 RTCP 复用 RTP 端口；enableSrtp 表示是否使用 Srtp，true 则需要提供 srtpCryptoSuite 参数。返回值包含客户端创建 Transport 所需参数，暂略。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;router.createPlainTransport&quot;</span><span class="p">,</span><span class="w">                 </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">ROUTER_CREATE_PLAIN_TRANSPORT</span><span class="w">                    </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 创建 PipeTransport。请求参数类似有创建 WebRtcTransport，但无需指定使用 UDP 还是 TCP，因为只支持 UDP。额外的 enableRtx 是否启用 Rtx 重传。返回值包含打通管道所需参数，暂略。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;router.createPipeTransport&quot;</span><span class="p">,</span><span class="w">                  </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">ROUTER_CREATE_PIPE_TRANSPORT</span><span class="w">                     </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 创建 DirectTransport。请求参数不能将 enableSctp 设置为 true，因为没必要。也无需提供监听 IP 和 Port 等信息。返回值包含直连需参数，暂略。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;router.createDirectTransport&quot;</span><span class="p">,</span><span class="w">                </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">ROUTER_CREATE_DIRECT_TRANSPORT</span><span class="w">                   </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 创建 ActiveSpeakerObserver。 请求参数必须提供 interval 。返回会议中发言人的音量。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;router.createActiveSpeakerObserver&quot;</span><span class="p">,</span><span class="w">          </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">ROUTER_CREATE_ACTIVE_SPEAKER_OBSERVER</span><span class="w">            </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 创建 AudioLevelObserver。请求参数必须提供 interval，maxEntries 和 threshold 。返回会议中唯一主导说话者。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;router.createAudioLevelObserver&quot;</span><span class="p">,</span><span class="w">             </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">ROUTER_CREATE_AUDIO_LEVEL_OBSERVER</span><span class="w">               </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 关闭 Transport。该消息由 Router 处理。Transport 的关闭会触发连锁反应，以确保其上的 Consumer、Producer，其他人消费本 Transport 上的 Producer 的 Consumer(有点绕) 得以关闭。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;transport.close&quot;</span><span class="p">,</span><span class="w">                             </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">TRANSPORT_CLOSE</span><span class="w">                                  </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 获取 Transport 转储。返回值包含本 Transport 的 Id、是否是 DirectTransport 的 direct 等。更多返回参数详见：Transport.cpp 的 void Transport::FillJson(json&amp; jsonObject) const 方法。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;transport.dump&quot;</span><span class="p">,</span><span class="w">                              </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">TRANSPORT_DUMP</span><span class="w">                                   </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 获取 Transport 的状态值。返回值见：Transport.cpp 的 void Transport::FillJsonStats(json&amp; jsonArray) 方法。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;transport.getStats&quot;</span><span class="p">,</span><span class="w">                          </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">TRANSPORT_GET_STATS</span><span class="w">                              </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 连接 Transport。DirectTransport 不会发送该请求，创建 PipeTransport 时如果参数 comedia 为 true 也无需发送该请求。返回值暂略。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;transport.connect&quot;</span><span class="p">,</span><span class="w">                           </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">TRANSPORT_CONNECT</span><span class="w">                                </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 设置最大传入码率。用于拥塞控制。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;transport.setMaxIncomingBitrate&quot;</span><span class="p">,</span><span class="w">             </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">TRANSPORT_SET_MAX_INCOMING_BITRATE</span><span class="w">               </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 设置最大传出码率。用于拥塞控制。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;transport.setMaxOutgoingBitrate&quot;</span><span class="p">,</span><span class="w">             </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">TRANSPORT_SET_MAX_OUTGOING_BITRATE</span><span class="w">               </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 重启 ICE。 仅 WebRtcTransport 会发送该请求。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;transport.restartIce&quot;</span><span class="p">,</span><span class="w">                        </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">TRANSPORT_RESTART_ICE</span><span class="w">                            </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 创建 Producer。返回值暂略。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;transport.produce&quot;</span><span class="p">,</span><span class="w">                           </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">TRANSPORT_PRODUCE</span><span class="w">                                </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 创建 Consumer。返回值暂略。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;transport.consume&quot;</span><span class="p">,</span><span class="w">                           </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">TRANSPORT_CONSUME</span><span class="w">                                </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 创建 DataProducer。返回值暂略。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;transport.produceData&quot;</span><span class="p">,</span><span class="w">                       </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">TRANSPORT_PRODUCE_DATA</span><span class="w">                           </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 创建 DataConsumer。返回值暂略。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;transport.consumeData&quot;</span><span class="p">,</span><span class="w">                       </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">TRANSPORT_CONSUME_DATA</span><span class="w">                           </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 启用 Transport 的跟踪事件。可选事件包括：probation 和 bwe。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;transport.enableTraceEvent&quot;</span><span class="p">,</span><span class="w">                  </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">TRANSPORT_ENABLE_TRACE_EVENT</span><span class="w">                     </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 关闭 Producer。该消息由 Transport 处理。Producer 的关闭会触发连锁反应，以确消费本 Producer 的 Consumer 和监听本 Producer 的 RtpObserver 得以关闭。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;producer.close&quot;</span><span class="p">,</span><span class="w">                              </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">PRODUCER_CLOSE</span><span class="w">                                   </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 获取 Producer 转储。返回值暂略。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;producer.dump&quot;</span><span class="p">,</span><span class="w">                               </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">PRODUCER_DUMP</span><span class="w">                                    </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 获取 Producer 状态。返回值暂略。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;producer.getStats&quot;</span><span class="p">,</span><span class="w">                           </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">PRODUCER_GET_STATS</span><span class="w">                               </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 暂停 Producer 的生产。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;producer.pause&quot;</span><span class="p">,</span><span class="w">                              </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">PRODUCER_PAUSE</span><span class="w">                                   </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 恢复 Producer 的生产。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;producer.resume&quot;</span><span class="w"> </span><span class="p">,</span><span class="w">                            </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">PRODUCER_RESUME</span><span class="w">                                  </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 启用 Producer 的跟踪事件。可选事件包括：rtp、keyframe、nack、pli 和 fir。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;producer.enableTraceEvent&quot;</span><span class="p">,</span><span class="w">                   </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">PRODUCER_ENABLE_TRACE_EVENT</span><span class="w">                      </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 关闭 Consumer。该消息由 Transport 处理。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;consumer.close&quot;</span><span class="p">,</span><span class="w">                              </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">CONSUMER_CLOSE</span><span class="w">                                   </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 获取 Consumer 转储。返回值暂略。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;consumer.dump&quot;</span><span class="p">,</span><span class="w">                               </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">CONSUMER_DUMP</span><span class="w">                                    </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 获取 Consumer 状态。返回值暂略。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;consumer.getStats&quot;</span><span class="p">,</span><span class="w">                           </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">CONSUMER_GET_STATS</span><span class="w">                               </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 暂停 Consumer 的消费。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;consumer.pause&quot;</span><span class="p">,</span><span class="w">                              </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">CONSUMER_PAUSE</span><span class="w">                                   </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 暂停 Consumer 的消费。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;consumer.resume&quot;</span><span class="p">,</span><span class="w">                             </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">CONSUMER_RESUME</span><span class="w">                                  </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 设置 Consumer 的首选 Layers。仅对 SimulcastConsumer 和 SvcConsumer 有效。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;consumer.setPreferredLayers&quot;</span><span class="p">,</span><span class="w">                 </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">CONSUMER_SET_PREFERRED_LAYERS</span><span class="w">                    </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 设置 Consumer 的码率优先级。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;consumer.setPriority&quot;</span><span class="p">,</span><span class="w">                        </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">CONSUMER_SET_PRIORITY</span><span class="w">                            </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// Consumer 请求关键帧。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;consumer.requestKeyFrame&quot;</span><span class="p">,</span><span class="w">                    </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">CONSUMER_REQUEST_KEY_FRAME</span><span class="w">                       </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 启用 Consumer 的跟踪事件。可选事件包括：rtp、keyframe、nack、pli 和 fir。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;consumer.enableTraceEvent&quot;</span><span class="p">,</span><span class="w">                   </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">CONSUMER_ENABLE_TRACE_EVENT</span><span class="w">                      </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 如下 DataProducer 和 DataProducer 的请求类似于 Producer 和 Consumer   </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;dataProducer.close&quot;</span><span class="p">,</span><span class="w">                          </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">DATA_PRODUCER_CLOSE</span><span class="w">                              </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;dataProducer.dump&quot;</span><span class="p">,</span><span class="w">                           </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">DATA_PRODUCER_DUMP</span><span class="w">                               </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;dataProducer.getStats&quot;</span><span class="p">,</span><span class="w">                       </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">DATA_PRODUCER_GET_STATS</span><span class="w">                          </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;dataConsumer.close&quot;</span><span class="p">,</span><span class="w">                          </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">DATA_CONSUMER_CLOSE</span><span class="w">                              </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;dataConsumer.dump&quot;</span><span class="p">,</span><span class="w">                           </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">DATA_CONSUMER_DUMP</span><span class="w">                               </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;dataConsumer.getStats&quot;</span><span class="p">,</span><span class="w">                       </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">DATA_CONSUMER_GET_STATS</span><span class="w">                          </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 获取尚未发出的 Sctp buffer 数量。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;dataConsumer.getBufferedAmount&quot;</span><span class="p">,</span><span class="w">              </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">DATA_CONSUMER_GET_BUFFERED_AMOUNT</span><span class="w">                </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 降低 Sctp buffer 阈值。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;dataConsumer.setBufferedAmountLowThreshold&quot;</span><span class="p">,</span><span class="w">  </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">DATA_CONSUMER_SET_BUFFERED_AMOUNT_LOW_THRESHOLD</span><span class="w">  </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 关闭 RtpObserver。该消息由 Router 处理。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;rtpObserver.close&quot;</span><span class="p">,</span><span class="w">                           </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">RTP_OBSERVER_CLOSE</span><span class="w">                               </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 暂停 RtpObserver 的监听。该消息由 Router 处理。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;rtpObserver.pause&quot;</span><span class="p">,</span><span class="w">                           </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">RTP_OBSERVER_PAUSE</span><span class="w">                               </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 恢复 RtpObserver 的监听。该消息由 Router 处理。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;rtpObserver.resume&quot;</span><span class="p">,</span><span class="w">                          </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">RTP_OBSERVER_RESUME</span><span class="w">                              </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 向 RtpObserver 新增 Producer。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;rtpObserver.addProducer&quot;</span><span class="p">,</span><span class="w">                     </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">RTP_OBSERVER_ADD_PRODUCER</span><span class="w">                        </span><span class="p">},</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 从 RtpObserver 移除 Producer。返回值无具体内容。  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;rtpObserver.removeProducer&quot;</span><span class="p">,</span><span class="w">                  </span><span class="n">ChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">RTP_OBSERVER_REMOVE_PRODUCER</span><span class="w">                     </span><span class="p">}</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<h2>四、PayloadChannelSocket 消息类型</h2>
+<p><code>PayloadChannelRequest::MethodId</code> 枚举定义一种消息。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// File: worker/src/PayloadChannel/PayloadChannelRequest.cpp  </span>
+<span class="n">absl</span><span class="o">::</span><span class="n">flat_hash_map</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="p">,</span><span class="w"> </span><span class="n">PayloadChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">&gt;</span><span class="w"> </span><span class="n">PayloadChannelRequest</span><span class="o">::</span><span class="n">string2MethodId</span><span class="w"> </span><span class="o">=</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// DataConsumer 发送  </span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;dataConsumer.send&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">PayloadChannelRequest</span><span class="o">::</span><span class="n">MethodId</span><span class="o">::</span><span class="n">DATA_CONSUMER_SEND</span><span class="w"> </span><span class="p">},</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<h2>五、ChannelSocket 通知类型</h2>
+<p>为了方便使用, mediasoup 定义了 <code>ChannelNotifier</code> 类用于 worker 向父进程发送通知。通知类型整理如下：</p>
+<table>
+<thead>
+<tr>
+<th>Sender</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Workder</td>
+<td>running</td>
+<td>worker 运行中。</td>
+</tr>
+<tr>
+<td>ActiveSpeakerObserver</td>
+<td>dominantspeaker</td>
+<td>当前主导发言者。</td>
+</tr>
+<tr>
+<td>AudioLevelObserver</td>
+<td>volumes</td>
+<td>当前发言者的音量。</td>
+</tr>
+<tr>
+<td>-</td>
+<td>silence</td>
+<td>之前发言者已静音。</td>
+</tr>
+<tr>
+<td>Consumer</td>
+<td>producerpause</td>
+<td>生产者已暂停。</td>
+</tr>
+<tr>
+<td>-</td>
+<td>producerresume</td>
+<td>生产者已恢复。</td>
+</tr>
+<tr>
+<td>-</td>
+<td>producerclose</td>
+<td>生产者已关闭</td>
+</tr>
+<tr>
+<td>-</td>
+<td>trace</td>
+<td>跟踪消费者信息。类型包括：rtp、keyframe、nack、pli 和 fir。</td>
+</tr>
+<tr>
+<td>DataConsumer</td>
+<td>bufferedamountlow</td>
+<td>数据消费者 Sctp Buffer 低。</td>
+</tr>
+<tr>
+<td>-</td>
+<td>dataproducerclose</td>
+<td>数据生产者已关闭。</td>
+</tr>
+<tr>
+<td>PlainTransport</td>
+<td>tuple</td>
+<td>TransportTuple。 当 comedia 为 true 时，通过收到的数据提取到 TransportTuple。</td>
+</tr>
+<tr>
+<td>-</td>
+<td>rtcptuple</td>
+<td>TransportTuple。 当 comedia 为 true 且 rtcpMux 为 false, 通过收到的数据提取到 TransportTuple。</td>
+</tr>
+<tr>
+<td>Producer</td>
+<td>videoorientationchange</td>
+<td>视频方向发生改变。</td>
+</tr>
+<tr>
+<td>-</td>
+<td>score</td>
+<td>Rtp 流的质量评分。</td>
+</tr>
+<tr>
+<td>-</td>
+<td>trace</td>
+<td>跟踪生产者信息。类型包括：rtp、keyframe、nack、pli 和 fir。</td>
+</tr>
+<tr>
+<td>SctpAssociation</td>
+<td>sctpsendbufferfull</td>
+<td>DataConsumer 的 Sctp 发送 Buffer 已满。</td>
+</tr>
+<tr>
+<td>SimpleConsumer</td>
+<td>score</td>
+<td>Rtp 流的质量评分。</td>
+</tr>
+<tr>
+<td>SimulcastConsumer</td>
+<td>score</td>
+<td>Rtp 流的质量评分。包含自身的和 Producer 的。</td>
+</tr>
+<tr>
+<td>-</td>
+<td>layerschange</td>
+<td>Layers 已改变。</td>
+</tr>
+<tr>
+<td>SvcConsumer</td>
+<td>score</td>
+<td>Rtp 流的质量评分。包含自身的和 Producer 的。</td>
+</tr>
+<tr>
+<td>-</td>
+<td>layerschange</td>
+<td>Layers 已改变。</td>
+</tr>
+<tr>
+<td>Transport</td>
+<td>trace</td>
+<td>跟踪 Transport 信息。类型包括：probation 和 bwe。</td>
+</tr>
+<tr>
+<td>-</td>
+<td>sctpstatechange</td>
+<td>Sctp 状态已改变。</td>
+</tr>
+<tr>
+<td>WebRtcTransport</td>
+<td>iceselectedtuplechange</td>
+<td>Ice 选择的 TransportTuple 已改变。</td>
+</tr>
+<tr>
+<td>-</td>
+<td>icestatechange</td>
+<td>Ice 状态已改变。</td>
+</tr>
+<tr>
+<td>-</td>
+<td>dtlsstatechange</td>
+<td>Dtls 状态已改变。 状态包括：connecting、connected、completed、disconnected、closed 和 failed。</td>
+</tr>
+</tbody></table><h2>六、PayloadChannelSocket 通知类型</h2>
+<p>为了方便使用, mediasoup 定义了 <code>PayloadChannelNotifier</code> 类用于 worker 向父进程发送通知。通知类型整理如下：</p>
+<table>
+<thead>
+<tr>
+<th>Sender</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>DirectTransport</td>
+<td>rtp</td>
+<td>Rtp 包。</td>
+</tr>
+<tr>
+<td>-</td>
+<td>rtcp</td>
+<td>Rtcp 包。</td>
+</tr>
+<tr>
+<td>-</td>
+<td>message</td>
+<td>消息。</td>
+</tr>
+</tbody></table><h3>七、worker 进程的启动</h3>
+<p>worker 是可执行程序，(一般来说)需要通过其他进程来启动。</p>
+<p>启动时首先需要设置环境变量 <code>MEDIASOUP_VERSION</code>，通常设置为 mediaoup 真实的版本号。当然，如果非要设置成其他内容也没关系。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// File: worker/src/main.cpp  </span>
+<span class="c1">// Ensure we are called by our Node library.  </span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">std</span><span class="o">::</span><span class="n">getenv</span><span class="p">(</span><span class="s">&quot;MEDIASOUP_VERSION&quot;</span><span class="p">))</span><span class="w">  </span>
+<span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">MS_ERROR_STD</span><span class="p">(</span><span class="s">&quot;you don&#39;t seem to be my real father!&quot;</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">_Exit</span><span class="p">(</span><span class="n">EXIT_FAILURE</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>还可以以命令行参数的方式设置 <code>logLevel</code>、<code>logTags</code>、<code>rtcMinPort</code> 和 <code>rtcMaxPort</code>、<code>dtlsCertificateFile</code> 和<code>dtlsPrivateKeyFile</code>，分别表示日志等级、日志标签（如ice、dtls等，控制哪些类的日志才会传出）、最小和最大 rtc 端口，以及dtls 证书文件和私钥的物理路径。这些参数都是可选的，如果未提供则会使用默认值或自动生成。</p>
+<p>因为 worker 是独立进程，需要和父进程通信。以 <code>Linux</code> 为例，在 <code>fork</code> 子进程后会将父进程的文件描述符传递到子进程中。具体来说Node.js 程序 fork worker 进程之前，会创建几个 <code>libuv</code> 概念下而非 Linux 概念下的抽象意义上的 <code>pipe</code>，在Linux 中使用的是 <code>UNIX Domain Socket</code>。fork 进程后，会在子进程将要使用的文件描述符重定向。这里子进程期望持有的文件描述符是3-6，而实际上父进程创建的可能是 11-15，fork 之后子进程得到的还是 11-15，只要在子进程中使用 <code>fcntl</code>系统调用重定向即可。通过合理的数量和顺序上的约定能确定重定向为 3-6。最终在子进程中 exec mediasoup-
+worker（见：<code>uv__process_child_init</code>）。</p>
+<p>mediasoup 抽象出叫做 <code>ChannelSocket</code> 和 <code>PayloadChannelSocket</code> 的概念来表示 worker
+和父进程的通信信道。</p>
+<blockquote><p>mediasoup 最初只使用了 1 个文件描述符，后来改为了 2 个，再后来改为了 4 个。</p>
+</blockquote>
+<h3>八、以库的方式使用 worker</h3>
+<p>在较长的一段时间，worker 都是以进程的方式运行，不过直到 2021 年 3 月发布的 <code>3.7.0</code> 开始, 准确地说是从 <code>1a805366</code>的这次提交开始，已经支持以库的方式使用。</p>
+<p>如果要像 <a href="https://github.com/yanhua133/mediasoup-sfu-cpp">mediasoup-sfu-cpp</a> 那样用纯C++ 实现整个 mediasoup 服务端，则可以直接调用 <code>mediasoup_worker_run</code> 方法。当然，也就不用设置环境 <code>MEDIASOUP_VERSION</code> 变量了。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// File: worker/src/lib.hpp  </span>
+<span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">mediasoup_worker_run</span><span class="p">(</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">argv</span><span class="p">[],</span><span class="w">  </span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">version</span><span class="p">,</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">consumerChannelFd</span><span class="p">,</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">producerChannelFd</span><span class="p">,</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">payloadConsumeChannelFd</span><span class="p">,</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">payloadProduceChannelFd</span><span class="p">,</span><span class="w">  </span>
+<span class="w">  </span><span class="n">ChannelReadFn</span><span class="w"> </span><span class="n">channelReadFn</span><span class="p">,</span><span class="w">  </span>
+<span class="w">  </span><span class="n">ChannelReadCtx</span><span class="w"> </span><span class="n">channelReadCtx</span><span class="p">,</span><span class="w">  </span>
+<span class="w">  </span><span class="n">ChannelWriteFn</span><span class="w"> </span><span class="n">channelWriteFn</span><span class="p">,</span><span class="w">  </span>
+<span class="w">  </span><span class="n">ChannelWriteCtx</span><span class="w"> </span><span class="n">channelWriteCtx</span><span class="p">,</span><span class="w">  </span>
+<span class="w">  </span><span class="n">PayloadChannelReadFn</span><span class="w"> </span><span class="n">payloadChannelReadFn</span><span class="p">,</span><span class="w">  </span>
+<span class="w">  </span><span class="n">PayloadChannelReadCtx</span><span class="w"> </span><span class="n">payloadChannelReadCtx</span><span class="p">,</span><span class="w">  </span>
+<span class="w">  </span><span class="n">PayloadChannelWriteFn</span><span class="w"> </span><span class="n">payloadChannelWriteFn</span><span class="p">,</span><span class="w">  </span>
+<span class="w">  </span><span class="n">PayloadChannelWriteCtx</span><span class="w"> </span><span class="n">payloadChannelWriteCtx</span><span class="p">);</span>
+</code></pre></div>
+<p>以进程方式运行时进程间通所使用的是文件描述符(consumerChannelFd等)，以库的方式运行则可以将函数指针传递给 <code>mediasoup_worker_run</code> 的其他参数（PayloadChannelReadFn等），都能够构造出 ChannelSocket 和 PayloadChannelSocket。</p>
+<p>还可以用多个线程执行 <code>mediasoup_worker_run</code>，以达到多个 worker 进程的效果。</p>
+<blockquote><p>备注：mediasoup-sfu-cpp 是基于旧版 mediasoup，尚未更新至可以使用 mediasoup_worker_run 方法的版本。</p>
+</blockquote>
+<h3>参考资料</h3>
+<ul>
+<li><a href="https://zhangbin.blog.csdn.net/article/details/122351260">现代C++和Mediasoup的WebRTC集群服务实践</a></li>
+<li><a href="https://github.com/yanhua133/mediasoup-sfu-cpp">纯 C++ 实现的 Mediasoup 闫华</a></li>
+<li><a href="https://blog.csdn.net/Frederick_Fung/article/details/106919882">【流媒体】Mediasoup库的架构（C++部分）</a></li>
+<li><a href="https://github.com/libuv/libuv">libuv</a>  </li>
+<li><a href="https://mediasoup.org/documentation/v3/mediasoup/design/">mediasoup v3 Design</a></li>
+<li><a href="https://mediasoup.org/documentation/v3/mediasoup/api/">mediasoup v3 API</a></li>
+<li><a href="https://mediasoup.org/documentation/v3/mediasoup-client/api/">mediasoup-client v3 API</a></li>
+</ul>
+<hr>
+
+<h4><p>原文出处：<a href='https://blog.csdn.net/Frederick_Fung/article/details/107063392' target='blank'>Mediasoup源码分析（一）信令的传输过程</a></p></h4>
+<h2>JS部分</h2>
+<p>JS部分的重点是Worker.js</p>
+<h3>1、先看整体</h3>
+<p><strong>从Worker.JS这个文件来看，上面构造了一些变量，如process、channel等，下面是一个Worker的类</strong></p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220314-1700-0.png" alt="在这里插入图片描述"></p>
+<h3>2、展开Worker</h3>
+<blockquote><p><strong>展开Worker类可以看见它有11个函数，分别是</strong></p>
+</blockquote>
+<p><strong>1.constructor()——构造函数</strong><br>
+<strong>2.get pid()——获得Worker进程的ID</strong><br>
+<strong>3.get closed()——确认Worker是否关闭</strong><br>
+<strong>4.get appData()——返回custom的数据</strong><br>
+<strong>5.set appData()——当设置无效时抛出异常信息</strong><br>
+<strong>6.get observer()——开启观察者模式</strong><br>
+<strong>7.close()——关闭Worker</strong><br>
+<strong>8.async dump()——转存Worker</strong><br>
+<strong>9.async getResourceUsage()——获得worker进程资源使用信息</strong><br>
+<strong>10.async updateSettings()——更新设置</strong><br>
+<strong>11.async createRouter()——创建房间</strong></p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220314-1700-1.png" alt="在这里插入图片描述">
+<img src="../vender/image/img_loading.gif" data-src="../file/image/20220314-1700-2.png" alt="在这里插入图片描述"></p>
+<h3>3、constructor</h3>
+<p>我们的重点是channel怎么建立的，所以重点关注<strong>第1个构造函数constructor()</strong></p>
+<div class="highlight"><pre><code><span></span><span class="k">this</span><span class="p">.</span><span class="nx">_child</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">child_process_1</span><span class="p">.</span><span class="nx">spawn</span><span class="p">(</span>
+<span class="w">       </span><span class="c1">// command</span>
+<span class="w">       </span><span class="nx">spawnBin</span><span class="p">,</span><span class="w"> </span>
+<span class="w">       </span><span class="c1">// args</span>
+<span class="w">       </span><span class="nx">spawnArgs</span><span class="p">,</span><span class="w"> </span>
+<span class="w">       </span><span class="c1">// options</span>
+<span class="w">       </span><span class="p">{</span>
+<span class="w">           </span><span class="nx">env</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">               </span><span class="nx">MEDIASOUP_VERSION</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;3.6.7&#39;</span>
+<span class="w">           </span><span class="p">},</span>
+<span class="w">           </span><span class="nx">detached</span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">           </span><span class="c1">// fd 0 (stdin)   : Just ignore it.</span>
+<span class="w">           </span><span class="c1">// fd 1 (stdout)  : Pipe it for 3rd libraries that log their own stuff.</span>
+<span class="w">           </span><span class="c1">// fd 2 (stderr)  : Same as stdout.</span>
+<span class="w">           </span><span class="c1">// fd 3 (channel) : Producer Channel fd.</span>
+<span class="w">           </span><span class="c1">// fd 4 (channel) : Consumer Channel fd.</span>
+<span class="w">           </span><span class="c1">// fd 5 (channel) : Producer PayloadChannel fd.</span>
+<span class="w">           </span><span class="c1">// fd 6 (channel) : Consumer PayloadChannel fd.</span>
+<span class="w">           </span><span class="nx">stdio</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s1">&#39;ignore&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;pipe&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;pipe&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;pipe&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;pipe&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;pipe&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;pipe&#39;</span><span class="p">],</span>
+<span class="w">           </span><span class="nx">windowsHide</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span>
+<span class="w">       </span><span class="p">});</span>
+<span class="w">       </span><span class="k">this</span><span class="p">.</span><span class="nx">_pid</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">_child</span><span class="p">.</span><span class="nx">pid</span><span class="p">;</span>
+<span class="w">       </span><span class="k">this</span><span class="p">.</span><span class="nx">_channel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Channel_1</span><span class="p">.</span><span class="nx">Channel</span><span class="p">({</span>
+<span class="w">           </span><span class="nx">producerSocket</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">_child</span><span class="p">.</span><span class="nx">stdio</span><span class="p">[</span><span class="mf">3</span><span class="p">],</span>
+<span class="w">           </span><span class="nx">consumerSocket</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">_child</span><span class="p">.</span><span class="nx">stdio</span><span class="p">[</span><span class="mf">4</span><span class="p">],</span>
+<span class="w">           </span><span class="nx">pid</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">_pid</span>
+<span class="w">       </span><span class="p">});</span>
+<span class="w">       </span><span class="k">this</span><span class="p">.</span><span class="nx">_payloadChannel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">PayloadChannel_1</span><span class="p">.</span><span class="nx">PayloadChannel</span><span class="p">({</span>
+<span class="w">           </span><span class="c1">// NOTE: TypeScript does not like more than 5 fds.</span>
+<span class="w">           </span><span class="c1">// @ts-ignore</span>
+<span class="w">           </span><span class="nx">producerSocket</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">_child</span><span class="p">.</span><span class="nx">stdio</span><span class="p">[</span><span class="mf">5</span><span class="p">],</span>
+<span class="w">           </span><span class="c1">// @ts-ignore</span>
+<span class="w">           </span><span class="nx">consumerSocket</span><span class="o">:</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">_child</span><span class="p">.</span><span class="nx">stdio</span><span class="p">[</span><span class="mf">6</span><span class="p">]</span>
+<span class="w">       </span><span class="p">});</span>
+</code></pre></div>
+<p>spawn里标准io口有7个参数，分别是标准输入、标准输出、标准错误、以及4个通道，源码中对标准输入规定的是ignore，其它6个参数是pipe（管道），<strong>这里要注意的是，这个管道并不是Linux进程间通信的匿名管道或有名管道，它是UnixSocketPair，因为只有UnixSocketPair才是全双工通信，从代码中我们也能看出它是全双工的，而匿名（有名）管道是半双工通信</strong></p>
+<p>接着重点是 <code>this._channel = new Channel_1.Channel</code> ，它创建了一个channel，并传入了3个参数，分别是stdio[3]和stdio[4]，以及pid（因为可能会有多个Worker，而一个进程对应一个Worker，所以需要知道每个进程的ID），这样通过这个channel，JS部分便能和C++部分通信了</p>
+<h3>4、channel的建立</h3>
+<p>创建这个channel会调用channel.js里的构造函数，我们来看看channel.js里的代码</p>
+<div class="highlight"><pre><code><span></span><span class="k">this</span><span class="p">.</span><span class="nx">_consumerSocket</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;data&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">buffer</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">   </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="k">this</span><span class="p">.</span><span class="nx">_recvBuffer</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">       </span><span class="k">this</span><span class="p">.</span><span class="nx">_recvBuffer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">buffer</span><span class="p">;</span>
+<span class="w">   </span><span class="p">}</span>
+<span class="w">   </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">       </span><span class="k">this</span><span class="p">.</span><span class="nx">_recvBuffer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">Buffer</span><span class="p">.</span><span class="nx">concat</span><span class="p">([</span><span class="k">this</span><span class="p">.</span><span class="nx">_recvBuffer</span><span class="p">,</span><span class="w"> </span><span class="nx">buffer</span><span class="p">],</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">_recvBuffer</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">buffer</span><span class="p">.</span><span class="nx">length</span><span class="p">);</span>
+<span class="w">   </span><span class="p">}</span>
+<span class="w">   </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">_recvBuffer</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="nx">NS_PAYLOAD_MAX_LEN</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">       </span><span class="nx">logger</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;receiving buffer is full, discarding all data into it&#39;</span><span class="p">);</span>
+<span class="w">       </span><span class="c1">// Reset the buffer and exit.</span>
+<span class="w">       </span><span class="k">this</span><span class="p">.</span><span class="nx">_recvBuffer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">undefined</span><span class="p">;</span>
+<span class="w">       </span><span class="k">return</span><span class="p">;</span>
+<span class="w">   </span><span class="p">}</span>
+<span class="w">   </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="kc">true</span><span class="p">)</span><span class="w"> </span><span class="c1">// eslint-disable-line no-constant-condition</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">       </span><span class="kd">let</span><span class="w"> </span><span class="nx">nsPayload</span><span class="p">;</span>
+<span class="w">       </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">           </span><span class="nx">nsPayload</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">netstring</span><span class="p">.</span><span class="nx">nsPayload</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">_recvBuffer</span><span class="p">);</span>
+<span class="w">       </span><span class="p">}</span>
+<span class="w">       </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">           </span><span class="nx">logger</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;invalid netstring data received from the worker process: %s&#39;</span><span class="p">,</span><span class="w"> </span><span class="nb">String</span><span class="p">(</span><span class="nx">error</span><span class="p">));</span>
+<span class="w">           </span><span class="c1">// Reset the buffer and exit.</span>
+<span class="w">           </span><span class="k">this</span><span class="p">.</span><span class="nx">_recvBuffer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">undefined</span><span class="p">;</span>
+<span class="w">           </span><span class="k">return</span><span class="p">;</span>
+<span class="w">       </span><span class="p">}</span>
+<span class="w">       </span><span class="c1">// Incomplete netstring message.</span>
+<span class="w">       </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">nsPayload</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="o">-</span><span class="mf">1</span><span class="p">)</span>
+<span class="w">           </span><span class="k">return</span><span class="p">;</span>
+<span class="w">       </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">           </span><span class="c1">// We can receive JSON messages (Channel messages) or log strings.</span>
+<span class="w">           </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="nx">nsPayload</span><span class="p">[</span><span class="mf">0</span><span class="p">])</span><span class="w"> </span><span class="p">{</span>
+<span class="w">               </span><span class="c1">// 123 = &#39;{&#39; (a Channel JSON messsage).</span>
+<span class="w">               </span><span class="k">case</span><span class="w"> </span><span class="mf">123</span><span class="o">:</span>
+<span class="w">                   </span><span class="k">this</span><span class="p">.</span><span class="nx">_processMessage</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">nsPayload</span><span class="p">.</span><span class="nx">toString</span><span class="p">(</span><span class="s1">&#39;utf8&#39;</span><span class="p">)));</span>
+<span class="w">                   </span><span class="k">break</span><span class="p">;</span>
+<span class="w">               </span><span class="c1">// 68 = &#39;D&#39; (a debug log).</span>
+<span class="w">               </span><span class="k">case</span><span class="w"> </span><span class="mf">68</span><span class="o">:</span>
+<span class="w">                   </span><span class="nx">logger</span><span class="p">.</span><span class="nx">debug</span><span class="p">(</span><span class="sb">`[pid:</span><span class="si">${</span><span class="nx">pid</span><span class="si">}</span><span class="sb">] </span><span class="si">${</span><span class="nx">nsPayload</span><span class="p">.</span><span class="nx">toString</span><span class="p">(</span><span class="s1">&#39;utf8&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">                   </span><span class="k">break</span><span class="p">;</span>
+<span class="w">               </span><span class="c1">// 87 = &#39;W&#39; (a warn log).</span>
+<span class="w">               </span><span class="k">case</span><span class="w"> </span><span class="mf">87</span><span class="o">:</span>
+<span class="w">                   </span><span class="nx">logger</span><span class="p">.</span><span class="nx">warn</span><span class="p">(</span><span class="sb">`[pid:</span><span class="si">${</span><span class="nx">pid</span><span class="si">}</span><span class="sb">] </span><span class="si">${</span><span class="nx">nsPayload</span><span class="p">.</span><span class="nx">toString</span><span class="p">(</span><span class="s1">&#39;utf8&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">                   </span><span class="k">break</span><span class="p">;</span>
+<span class="w">               </span><span class="c1">// 69 = &#39;E&#39; (an error log).</span>
+<span class="w">               </span><span class="k">case</span><span class="w"> </span><span class="mf">69</span><span class="o">:</span>
+<span class="w">                   </span><span class="nx">logger</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="sb">`[pid:</span><span class="si">${</span><span class="nx">pid</span><span class="si">}</span><span class="sb"> </span><span class="si">${</span><span class="nx">nsPayload</span><span class="p">.</span><span class="nx">toString</span><span class="p">(</span><span class="s1">&#39;utf8&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="w">                   </span><span class="k">break</span><span class="p">;</span>
+<span class="w">               </span><span class="c1">// 88 = &#39;X&#39; (a dump log).</span>
+<span class="w">               </span><span class="k">case</span><span class="w"> </span><span class="mf">88</span><span class="o">:</span>
+<span class="w">                   </span><span class="c1">// eslint-disable-next-line no-console</span>
+<span class="w">                   </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">nsPayload</span><span class="p">.</span><span class="nx">toString</span><span class="p">(</span><span class="s1">&#39;utf8&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">1</span><span class="p">));</span>
+<span class="w">                   </span><span class="k">break</span><span class="p">;</span>
+<span class="w">               </span><span class="k">default</span><span class="o">:</span>
+<span class="w">                   </span><span class="c1">// eslint-disable-next-line no-console</span>
+<span class="w">                   </span><span class="nx">console</span><span class="p">.</span><span class="nx">warn</span><span class="p">(</span><span class="sb">`worker[pid:</span><span class="si">${</span><span class="nx">pid</span><span class="si">}</span><span class="sb">] unexpected data: %s`</span><span class="p">,</span><span class="w"> </span><span class="nx">nsPayload</span><span class="p">.</span><span class="nx">toString</span><span class="p">(</span><span class="s1">&#39;utf8&#39;</span><span class="p">,</span><span class="w"> </span><span class="mf">1</span><span class="p">));</span>
+<span class="w">           </span><span class="p">}</span>
+<span class="w">       </span><span class="p">}</span>
+<span class="w">       </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">           </span><span class="nx">logger</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">&#39;received invalid message from the worker process: %s&#39;</span><span class="p">,</span><span class="w"> </span><span class="nb">String</span><span class="p">(</span><span class="nx">error</span><span class="p">));</span>
+<span class="w">       </span><span class="p">}</span>
+<span class="w">       </span><span class="c1">// Remove the read payload from the buffer.</span>
+<span class="w">       </span><span class="k">this</span><span class="p">.</span><span class="nx">_recvBuffer</span><span class="w"> </span><span class="o">=</span>
+<span class="w">           </span><span class="k">this</span><span class="p">.</span><span class="nx">_recvBuffer</span><span class="p">.</span><span class="nx">slice</span><span class="p">(</span><span class="nx">netstring</span><span class="p">.</span><span class="nx">nsLength</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">_recvBuffer</span><span class="p">));</span>
+<span class="w">       </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="k">this</span><span class="p">.</span><span class="nx">_recvBuffer</span><span class="p">.</span><span class="nx">length</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">           </span><span class="k">this</span><span class="p">.</span><span class="nx">_recvBuffer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">undefined</span><span class="p">;</span>
+<span class="w">           </span><span class="k">return</span><span class="p">;</span>
+<span class="w">       </span><span class="p">}</span>
+<span class="w">   </span><span class="p">}</span>
+<span class="p">});</span>
+</code></pre></div>
+<p>在channel.js中，上面这片代码启动了Socket的侦听函数，当C++传来数据时，会促发recvBuffer接收数据，然后进入while循环处理数据，做出相应的处理</p>
+<h3>5、JS部分的总结</h3>
+<p>经过上述步骤后，便拿到了SocketPair一端的文件描述符，实际不管是Socket还是普通文件，都是通过文件描述符的方式来进行的操作</p>
+<h2>C++部分</h2>
+<h3>1、main流程图</h3>
+<p>main主函数部分的模块可分为下图的几个步骤，在最新版V3的源码中，main创建了两个Socket，分别是Channel和PayloadChannel</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220314-1700-3.png" alt="在这里插入图片描述"></p>
+<h3>2、main.cpp</h3>
+<div class="highlight"><pre><code><span></span><span class="cp">#define MS_CLASS &quot;mediasoup-worker&quot;</span>
+<span class="c1">// #define MS_LOG_DEV_LEVEL 3</span>
+
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;common.hpp&quot;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;DepLibSRTP.hpp&quot;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;DepLibUV.hpp&quot;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;DepLibWebRTC.hpp&quot;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;DepOpenSSL.hpp&quot;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;DepUsrSCTP.hpp&quot;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;Logger.hpp&quot;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;MediaSoupErrors.hpp&quot;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;Settings.hpp&quot;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;Utils.hpp&quot;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;Worker.hpp&quot;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;Channel/Notifier.hpp&quot;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;Channel/UnixStreamSocket.hpp&quot;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;PayloadChannel/Notifier.hpp&quot;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;PayloadChannel/UnixStreamSocket.hpp&quot;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;RTC/DtlsTransport.hpp&quot;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;RTC/SrtpSession.hpp&quot;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;uv.h&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;cerrno&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;csignal&gt;</span><span class="c1">  // sigaction()</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;cstdlib&gt;</span><span class="c1">  // std::_Exit(), std::genenv()</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span><span class="c1"> // std::cerr, std::endl</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;map&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;string&gt;</span>
+
+<span class="k">static</span><span class="w"> </span><span class="k">constexpr</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">ConsumerChannelFd</span><span class="p">{</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="p">};</span>
+<span class="k">static</span><span class="w"> </span><span class="k">constexpr</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">ProducerChannelFd</span><span class="p">{</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="p">};</span>
+<span class="k">static</span><span class="w"> </span><span class="k">constexpr</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">PayloadConsumerChannelFd</span><span class="p">{</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="p">};</span>
+<span class="k">static</span><span class="w"> </span><span class="k">constexpr</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">PayloadProducerChannelFd</span><span class="p">{</span><span class="w"> </span><span class="mi">6</span><span class="w"> </span><span class="p">};</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">IgnoreSignals</span><span class="p">();</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">argv</span><span class="p">[])</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="c1">// Ensure we are called by our Node library.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">getenv</span><span class="p">(</span><span class="s">&quot;MEDIASOUP_VERSION&quot;</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="k">nullptr</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">MS_ERROR_STD</span><span class="p">(</span><span class="s">&quot;you don&#39;t seem to be my real father!&quot;</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">_Exit</span><span class="p">(</span><span class="n">EXIT_FAILURE</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">version</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">getenv</span><span class="p">(</span><span class="s">&quot;MEDIASOUP_VERSION&quot;</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// Initialize libuv stuff (we need it for the Channel).</span>
+<span class="w">  </span><span class="n">DepLibUV</span><span class="o">::</span><span class="n">ClassInit</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// Channel socket (it will be handled and deleted by the Worker).</span>
+<span class="w">  </span><span class="n">Channel</span><span class="o">::</span><span class="n">UnixStreamSocket</span><span class="o">*</span><span class="w"> </span><span class="n">channel</span><span class="p">{</span><span class="w"> </span><span class="k">nullptr</span><span class="w"> </span><span class="p">};</span>
+
+<span class="w">  </span><span class="c1">// PayloadChannel socket (it will be handled and deleted by the Worker).</span>
+<span class="w">  </span><span class="n">PayloadChannel</span><span class="o">::</span><span class="n">UnixStreamSocket</span><span class="o">*</span><span class="w"> </span><span class="n">payloadChannel</span><span class="p">{</span><span class="w"> </span><span class="k">nullptr</span><span class="w"> </span><span class="p">};</span>
+
+<span class="w">  </span><span class="k">try</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">channel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">Channel</span><span class="o">::</span><span class="n">UnixStreamSocket</span><span class="p">(</span><span class="n">ConsumerChannelFd</span><span class="p">,</span><span class="w"> </span><span class="n">ProducerChannelFd</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">MediaSoupError</span><span class="o">&amp;</span><span class="w"> </span><span class="n">error</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">MS_ERROR_STD</span><span class="p">(</span><span class="s">&quot;error creating the Channel: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">error</span><span class="p">.</span><span class="n">what</span><span class="p">());</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">_Exit</span><span class="p">(</span><span class="n">EXIT_FAILURE</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">try</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">payloadChannel</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="k">new</span><span class="w"> </span><span class="n">PayloadChannel</span><span class="o">::</span><span class="n">UnixStreamSocket</span><span class="p">(</span><span class="n">PayloadConsumerChannelFd</span><span class="p">,</span><span class="w"> </span><span class="n">PayloadProducerChannelFd</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">MediaSoupError</span><span class="o">&amp;</span><span class="w"> </span><span class="n">error</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">MS_ERROR_STD</span><span class="p">(</span><span class="s">&quot;error creating the RTC Channel: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">error</span><span class="p">.</span><span class="n">what</span><span class="p">());</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">_Exit</span><span class="p">(</span><span class="n">EXIT_FAILURE</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// Initialize the Logger.</span>
+<span class="w">  </span><span class="n">Logger</span><span class="o">::</span><span class="n">ClassInit</span><span class="p">(</span><span class="n">channel</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">try</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">Settings</span><span class="o">::</span><span class="n">SetConfiguration</span><span class="p">(</span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="n">argv</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">MediaSoupTypeError</span><span class="o">&amp;</span><span class="w"> </span><span class="n">error</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">MS_ERROR_STD</span><span class="p">(</span><span class="s">&quot;settings error: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">error</span><span class="p">.</span><span class="n">what</span><span class="p">());</span>
+
+<span class="w">    </span><span class="c1">// 42 is a custom exit code to notify &quot;settings error&quot; to the Node library.</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">_Exit</span><span class="p">(</span><span class="mi">42</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">MediaSoupError</span><span class="o">&amp;</span><span class="w"> </span><span class="n">error</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">MS_ERROR_STD</span><span class="p">(</span><span class="s">&quot;unexpected settings error: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">error</span><span class="p">.</span><span class="n">what</span><span class="p">());</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">_Exit</span><span class="p">(</span><span class="n">EXIT_FAILURE</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">MS_DEBUG_TAG</span><span class="p">(</span><span class="n">info</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;starting mediasoup-worker process [version:%s]&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">version</span><span class="p">.</span><span class="n">c_str</span><span class="p">());</span>
+
+<span class="cp">#if defined(MS_LITTLE_ENDIAN)</span>
+<span class="w">  </span><span class="n">MS_DEBUG_TAG</span><span class="p">(</span><span class="n">info</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;little-endian CPU detected&quot;</span><span class="p">);</span>
+<span class="cp">#elif defined(MS_BIG_ENDIAN)</span>
+<span class="w">  </span><span class="n">MS_DEBUG_TAG</span><span class="p">(</span><span class="n">info</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;big-endian CPU detected&quot;</span><span class="p">);</span>
+<span class="cp">#else</span>
+<span class="w">  </span><span class="n">MS_WARN_TAG</span><span class="p">(</span><span class="n">info</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;cannot determine whether little-endian or big-endian&quot;</span><span class="p">);</span>
+<span class="cp">#endif</span>
+
+<span class="cp">#if defined(INTPTR_MAX) &amp;&amp; defined(INT32_MAX) &amp;&amp; (INTPTR_MAX == INT32_MAX)</span>
+<span class="w">  </span><span class="n">MS_DEBUG_TAG</span><span class="p">(</span><span class="n">info</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;32 bits architecture detected&quot;</span><span class="p">);</span>
+<span class="cp">#elif defined(INTPTR_MAX) &amp;&amp; defined(INT64_MAX) &amp;&amp; (INTPTR_MAX == INT64_MAX)</span>
+<span class="w">  </span><span class="n">MS_DEBUG_TAG</span><span class="p">(</span><span class="n">info</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;64 bits architecture detected&quot;</span><span class="p">);</span>
+<span class="cp">#else</span>
+<span class="w">  </span><span class="n">MS_WARN_TAG</span><span class="p">(</span><span class="n">info</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;cannot determine 32 or 64 bits architecture&quot;</span><span class="p">);</span>
+<span class="cp">#endif</span>
+
+<span class="w">  </span><span class="n">Settings</span><span class="o">::</span><span class="n">PrintConfiguration</span><span class="p">();</span>
+<span class="w">  </span><span class="n">DepLibUV</span><span class="o">::</span><span class="n">PrintVersion</span><span class="p">();</span>
+
+<span class="w">  </span><span class="k">try</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Initialize static stuff.</span>
+<span class="w">    </span><span class="n">DepOpenSSL</span><span class="o">::</span><span class="n">ClassInit</span><span class="p">();</span>
+<span class="w">    </span><span class="n">DepLibSRTP</span><span class="o">::</span><span class="n">ClassInit</span><span class="p">();</span>
+<span class="w">    </span><span class="n">DepUsrSCTP</span><span class="o">::</span><span class="n">ClassInit</span><span class="p">();</span>
+<span class="w">    </span><span class="n">DepLibWebRTC</span><span class="o">::</span><span class="n">ClassInit</span><span class="p">();</span>
+<span class="w">    </span><span class="n">Utils</span><span class="o">::</span><span class="n">Crypto</span><span class="o">::</span><span class="n">ClassInit</span><span class="p">();</span>
+<span class="w">    </span><span class="n">RTC</span><span class="o">::</span><span class="n">DtlsTransport</span><span class="o">::</span><span class="n">ClassInit</span><span class="p">();</span>
+<span class="w">    </span><span class="n">RTC</span><span class="o">::</span><span class="n">SrtpSession</span><span class="o">::</span><span class="n">ClassInit</span><span class="p">();</span>
+<span class="w">    </span><span class="n">Channel</span><span class="o">::</span><span class="n">Notifier</span><span class="o">::</span><span class="n">ClassInit</span><span class="p">(</span><span class="n">channel</span><span class="p">);</span>
+<span class="w">    </span><span class="n">PayloadChannel</span><span class="o">::</span><span class="n">Notifier</span><span class="o">::</span><span class="n">ClassInit</span><span class="p">(</span><span class="n">payloadChannel</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Ignore some signals.</span>
+<span class="w">    </span><span class="n">IgnoreSignals</span><span class="p">();</span>
+
+<span class="w">    </span><span class="c1">// Run the Worker.</span>
+<span class="w">    </span><span class="n">Worker</span><span class="w"> </span><span class="n">worker</span><span class="p">(</span><span class="n">channel</span><span class="p">,</span><span class="w"> </span><span class="n">payloadChannel</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// Free static stuff.</span>
+<span class="w">    </span><span class="n">DepLibUV</span><span class="o">::</span><span class="n">ClassDestroy</span><span class="p">();</span>
+<span class="w">    </span><span class="n">DepLibSRTP</span><span class="o">::</span><span class="n">ClassDestroy</span><span class="p">();</span>
+<span class="w">    </span><span class="n">Utils</span><span class="o">::</span><span class="n">Crypto</span><span class="o">::</span><span class="n">ClassDestroy</span><span class="p">();</span>
+<span class="w">    </span><span class="n">DepLibWebRTC</span><span class="o">::</span><span class="n">ClassDestroy</span><span class="p">();</span>
+<span class="w">    </span><span class="n">RTC</span><span class="o">::</span><span class="n">DtlsTransport</span><span class="o">::</span><span class="n">ClassDestroy</span><span class="p">();</span>
+<span class="w">    </span><span class="n">DepUsrSCTP</span><span class="o">::</span><span class="n">ClassDestroy</span><span class="p">();</span>
+
+<span class="w">    </span><span class="c1">// Wait a bit so peding messages to stdout/Channel arrive to the Node</span>
+<span class="w">    </span><span class="c1">// process.</span>
+<span class="w">    </span><span class="n">uv_sleep</span><span class="p">(</span><span class="mi">200</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">_Exit</span><span class="p">(</span><span class="n">EXIT_SUCCESS</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">MediaSoupError</span><span class="o">&amp;</span><span class="w"> </span><span class="n">error</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">MS_ERROR_STD</span><span class="p">(</span><span class="s">&quot;failure exit: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">error</span><span class="p">.</span><span class="n">what</span><span class="p">());</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">_Exit</span><span class="p">(</span><span class="n">EXIT_FAILURE</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">IgnoreSignals</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="cp">#ifndef _WIN32</span>
+<span class="w">  </span><span class="n">MS_TRACE</span><span class="p">();</span>
+
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">err</span><span class="p">;</span>
+<span class="w">  </span><span class="k">struct</span><span class="w"> </span><span class="nc">sigaction</span><span class="w"> </span><span class="n">act</span><span class="p">;</span><span class="w"> </span><span class="c1">// NOLINT(cppcoreguidelines-pro-type-member-init)</span>
+
+<span class="w">  </span><span class="c1">// clang-format off</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">map</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">ignoredSignals</span><span class="w"> </span><span class="o">=</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;PIPE&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">SIGPIPE</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;HUP&quot;</span><span class="p">,</span><span class="w">  </span><span class="n">SIGHUP</span><span class="w">  </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;ALRM&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">SIGALRM</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;USR1&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">SIGUSR1</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="s">&quot;USR2&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">SIGUSR2</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">};</span>
+<span class="w">  </span><span class="c1">// clang-format on</span>
+
+<span class="w">  </span><span class="n">act</span><span class="p">.</span><span class="n">sa_handler</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">SIG_IGN</span><span class="p">;</span><span class="w"> </span><span class="c1">// NOLINT(cppcoreguidelines-pro-type-cstyle-cast)</span>
+<span class="w">  </span><span class="n">act</span><span class="p">.</span><span class="n">sa_flags</span><span class="w">   </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="n">err</span><span class="w">            </span><span class="o">=</span><span class="w"> </span><span class="n">sigfillset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">act</span><span class="p">.</span><span class="n">sa_mask</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">    </span><span class="n">MS_THROW_ERROR</span><span class="p">(</span><span class="s">&quot;sigfillset() failed: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">strerror</span><span class="p">(</span><span class="n">errno</span><span class="p">));</span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">kv</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">ignoredSignals</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">sigName</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kv</span><span class="p">.</span><span class="n">first</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">sigId</span><span class="w">     </span><span class="o">=</span><span class="w"> </span><span class="n">kv</span><span class="p">.</span><span class="n">second</span><span class="p">;</span>
+
+<span class="w">    </span><span class="n">err</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sigaction</span><span class="p">(</span><span class="n">sigId</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">act</span><span class="p">,</span><span class="w"> </span><span class="k">nullptr</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">      </span><span class="n">MS_THROW_ERROR</span><span class="p">(</span><span class="s">&quot;sigaction() failed for signal %s: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">sigName</span><span class="p">.</span><span class="n">c_str</span><span class="p">(),</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">strerror</span><span class="p">(</span><span class="n">errno</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="cp">#endif</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>3、Channel Socket的建立</h3>
+<p>提取socket这部分的代码，可以看见源码中创建了2个socket，分别是Channel和PayloadChannel</p>
+<p>然后在try{}catch{}表达式中，分别对两个socket对象实例化，这里要注意的是，new中传入的参数Fd，对照JS部分代码的注释可以知道这是固定的3456，而非标准输入0、输出1、错误2</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// Channel socket (it will be handled and deleted by the Worker).</span>
+<span class="n">Channel</span><span class="o">::</span><span class="n">UnixStreamSocket</span><span class="o">*</span><span class="w"> </span><span class="n">channel</span><span class="p">{</span><span class="w"> </span><span class="k">nullptr</span><span class="w"> </span><span class="p">};</span>
+
+<span class="c1">// PayloadChannel socket (it will be handled and deleted by the Worker).</span>
+<span class="n">PayloadChannel</span><span class="o">::</span><span class="n">UnixStreamSocket</span><span class="o">*</span><span class="w"> </span><span class="n">payloadChannel</span><span class="p">{</span><span class="w"> </span><span class="k">nullptr</span><span class="w"> </span><span class="p">};</span>
+
+<span class="k">try</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">channel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">Channel</span><span class="o">::</span><span class="n">UnixStreamSocket</span><span class="p">(</span><span class="n">ConsumerChannelFd</span><span class="p">,</span><span class="w"> </span><span class="n">ProducerChannelFd</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">MediaSoupError</span><span class="o">&amp;</span><span class="w"> </span><span class="n">error</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">MS_ERROR_STD</span><span class="p">(</span><span class="s">&quot;error creating the Channel: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">error</span><span class="p">.</span><span class="n">what</span><span class="p">());</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">_Exit</span><span class="p">(</span><span class="n">EXIT_FAILURE</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="k">try</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">payloadChannel</span><span class="w"> </span><span class="o">=</span>
+<span class="w">    </span><span class="k">new</span><span class="w"> </span><span class="n">PayloadChannel</span><span class="o">::</span><span class="n">UnixStreamSocket</span><span class="p">(</span><span class="n">PayloadConsumerChannelFd</span><span class="p">,</span><span class="w"> </span><span class="n">PayloadProducerChannelFd</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">MediaSoupError</span><span class="o">&amp;</span><span class="w"> </span><span class="n">error</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">MS_ERROR_STD</span><span class="p">(</span><span class="s">&quot;error creating the RTC Channel: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">error</span><span class="p">.</span><span class="n">what</span><span class="p">());</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">_Exit</span><span class="p">(</span><span class="n">EXIT_FAILURE</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>4、UnixStreamSocket.cpp</h3>
+<p>上述 socket 在 new 之后会跳转到 UnixStreamSocket.cpp 执行下面这个函数</p>
+<div class="highlight"><pre><code><span></span><span class="n">UnixStreamSocket</span><span class="o">::</span><span class="n">UnixStreamSocket</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">consumerFd</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">producerFd</span><span class="p">)</span>
+<span class="w">  </span><span class="o">:</span><span class="w"> </span><span class="n">consumerSocket</span><span class="p">(</span><span class="n">consumerFd</span><span class="p">,</span><span class="w"> </span><span class="n">NsMessageMaxLen</span><span class="p">,</span><span class="w"> </span><span class="k">this</span><span class="p">),</span><span class="w"> </span><span class="n">producerSocket</span><span class="p">(</span><span class="n">producerFd</span><span class="p">,</span><span class="w"> </span><span class="n">NsMessageMaxLen</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">MS_TRACE_STD</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这个函数的关键不是函数体里的内容，而是在参数后面又创建了一个consumerScoket和producerSocket，并传入参数Fd和消息最大长度</p>
+<h3>5、consumerSocket</h3>
+<p>接着再进入consumerSocket，可以看到在这个构造函数后面对其父类进行初始化，传入参数fd，缓冲区大小，以及角色</p>
+<div class="highlight"><pre><code><span></span><span class="n">ConsumerSocket</span><span class="o">::</span><span class="n">ConsumerSocket</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">fd</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">bufferSize</span><span class="p">,</span><span class="w"> </span><span class="n">Listener</span><span class="o">*</span><span class="w"> </span><span class="n">listener</span><span class="p">)</span>
+<span class="w">  </span><span class="o">:</span><span class="w"> </span><span class="o">::</span><span class="n">UnixStreamSocket</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span><span class="w"> </span><span class="n">bufferSize</span><span class="p">,</span><span class="w"> </span><span class="o">::</span><span class="n">UnixStreamSocket</span><span class="o">::</span><span class="n">Role</span><span class="o">::</span><span class="n">CONSUMER</span><span class="p">),</span><span class="w"> </span><span class="n">listener</span><span class="p">(</span><span class="n">listener</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">MS_TRACE_STD</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>6、UnixStreamSocket</h3>
+<p>继续追根溯源，进入UnixStreamSocket的构造函数</p>
+<p>在这部分代码中先构造了一个<code>uv_pipe_t</code>的对象，这个是libuv库中的pipe，赋值给uvHandle。然后把对象指针this赋值给私有定义的data</p>
+<p>接着是对uv_pipe的初始化，有3个参数，分别是</p>
+<ol>
+<li>事件循环中的loop</li>
+<li>刚才创建的对象</li>
+<li>ipc，用于指示pipe是否被用于两个进程之间</li>
+</ol>
+<p>初始化结束后，调用<code>uv_pipe_open</code>打开fd所指向的pipe</p>
+<p>打开之后进入<code>uv_read_start</code>，这个函数是用来启动读的操作，它同样也有三个参数：</p>
+<ol>
+<li>uvHandle，里面存放的是这个对象本身</li>
+<li>onAlloc，当buffer不足时回调这个函数，便能重新创建一个buffer</li>
+<li>onRead，接收pipe的另一端发送的数据</li>
+</ol>
+<div class="highlight"><pre><code><span></span><span class="n">UnixStreamSocket</span><span class="o">::</span><span class="n">UnixStreamSocket</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">fd</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">bufferSize</span><span class="p">,</span><span class="w"> </span><span class="n">UnixStreamSocket</span><span class="o">::</span><span class="n">Role</span><span class="w"> </span><span class="n">role</span><span class="p">)</span>
+<span class="w">  </span><span class="o">:</span><span class="w"> </span><span class="n">bufferSize</span><span class="p">(</span><span class="n">bufferSize</span><span class="p">),</span><span class="w"> </span><span class="n">role</span><span class="p">(</span><span class="n">role</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">MS_TRACE_STD</span><span class="p">();</span>
+
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">err</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">uvHandle</span><span class="w">       </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">uv_pipe_t</span><span class="p">;</span>
+<span class="w">  </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">uvHandle</span><span class="o">-&gt;</span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">void</span><span class="o">*&gt;</span><span class="p">(</span><span class="k">this</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">err</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_pipe_init</span><span class="p">(</span><span class="n">DepLibUV</span><span class="o">::</span><span class="n">GetLoop</span><span class="p">(),</span><span class="w"> </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">uvHandle</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">delete</span><span class="w"> </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">uvHandle</span><span class="p">;</span>
+<span class="w">    </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">uvHandle</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+
+<span class="w">    </span><span class="n">MS_THROW_ERROR_STD</span><span class="p">(</span><span class="s">&quot;uv_pipe_init() failed: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">err</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">err</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_pipe_open</span><span class="p">(</span><span class="k">this</span><span class="o">-&gt;</span><span class="n">uvHandle</span><span class="p">,</span><span class="w"> </span><span class="n">fd</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">uv_close</span><span class="p">(</span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="n">uv_handle_t</span><span class="o">*&gt;</span><span class="p">(</span><span class="k">this</span><span class="o">-&gt;</span><span class="n">uvHandle</span><span class="p">),</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">uv_close_cb</span><span class="o">&gt;</span><span class="p">(</span><span class="n">onClose</span><span class="p">));</span>
+
+<span class="w">    </span><span class="n">MS_THROW_ERROR_STD</span><span class="p">(</span><span class="s">&quot;uv_pipe_open() failed: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">err</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="o">-&gt;</span><span class="n">role</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">UnixStreamSocket</span><span class="o">::</span><span class="n">Role</span><span class="o">::</span><span class="n">CONSUMER</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Start reading.</span>
+<span class="w">    </span><span class="n">err</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_read_start</span><span class="p">(</span>
+<span class="w">      </span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="n">uv_stream_t</span><span class="o">*&gt;</span><span class="p">(</span><span class="k">this</span><span class="o">-&gt;</span><span class="n">uvHandle</span><span class="p">),</span>
+<span class="w">      </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">uv_alloc_cb</span><span class="o">&gt;</span><span class="p">(</span><span class="n">onAlloc</span><span class="p">),</span>
+<span class="w">      </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">uv_read_cb</span><span class="o">&gt;</span><span class="p">(</span><span class="n">onRead</span><span class="p">));</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">uv_close</span><span class="p">(</span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="n">uv_handle_t</span><span class="o">*&gt;</span><span class="p">(</span><span class="k">this</span><span class="o">-&gt;</span><span class="n">uvHandle</span><span class="p">),</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">uv_close_cb</span><span class="o">&gt;</span><span class="p">(</span><span class="n">onClose</span><span class="p">));</span>
+
+<span class="w">      </span><span class="n">MS_THROW_ERROR_STD</span><span class="p">(</span><span class="s">&quot;uv_read_start() failed: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">err</span><span class="p">));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">// NOTE: Don&#39;t allocate the buffer here. Instead wait for the first uv_alloc_cb().</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>7、onRead</h3>
+<p>重点是这个onRead函数，接下来看这部分的代码</p>
+<p>onRead有三个参数，分别是：</p>
+<ol>
+<li>handle，刚才创建的对象</li>
+<li>nread，读取的数据大小</li>
+<li>buf，存放数据的地方</li>
+</ol>
+<p>在函数体里，因为要访问到另一端JS传过来的数据，所以得使用static全局静态函数。具体怎么做呢？首先对handle-&gt;data做了强制类型转换，拿到对象里的socket，这样便可在对象里进行操作，最后再调用socket-&gt;OnUvRead这个方法</p>
+<div class="highlight"><pre><code><span></span><span class="kr">inline</span><span class="w"> </span><span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">onRead</span><span class="p">(</span><span class="n">uv_stream_t</span><span class="o">*</span><span class="w"> </span><span class="n">handle</span><span class="p">,</span><span class="w"> </span><span class="kt">ssize_t</span><span class="w"> </span><span class="n">nread</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">uv_buf_t</span><span class="o">*</span><span class="w"> </span><span class="n">buf</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="k">auto</span><span class="o">*</span><span class="w"> </span><span class="n">socket</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">UnixStreamSocket</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">handle</span><span class="o">-&gt;</span><span class="n">data</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">socket</span><span class="p">)</span>
+<span class="w">    </span><span class="n">socket</span><span class="o">-&gt;</span><span class="n">OnUvRead</span><span class="p">(</span><span class="n">nread</span><span class="p">,</span><span class="w"> </span><span class="n">buf</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>8、OnUvRead</h3>
+<p>我们再进入OnUvRead这个函数</p>
+<p>在这个函数中首先对nread做了一些判断，如果数据不为空则调用<strong>UserOnUnixStreamRead()</strong>，注意看它的注释 <em>//Notifythe subclass 通知子类</em></p>
+<div class="highlight"><pre><code><span></span><span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">UnixStreamSocket::OnUvRead</span><span class="p">(</span><span class="kt">ssize_t</span><span class="w"> </span><span class="n">nread</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">uv_buf_t</span><span class="o">*</span><span class="w"> </span><span class="cm">/*buf*/</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">MS_TRACE_STD</span><span class="p">();</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">nread</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">// Data received.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">nread</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Update the buffer data length.</span>
+<span class="w">    </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">bufferDataLen</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">nread</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// Notify the subclass.</span>
+<span class="w">    </span><span class="n">UserOnUnixStreamRead</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// Peer disconnected.</span>
+<span class="w">  </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">nread</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">UV_EOF</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">nread</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">UV_ECONNRESET</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">isClosedByPeer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// Close local side of the pipe.</span>
+<span class="w">    </span><span class="n">Close</span><span class="p">();</span>
+<span class="w">    </span><span class="c1">// Notify the subclass.</span>
+<span class="w">    </span><span class="n">UserOnUnixStreamSocketClosed</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// Some error.</span>
+<span class="w">  </span><span class="k">else</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">MS_ERROR_STD</span><span class="p">(</span><span class="s">&quot;read error, closing the pipe: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">nread</span><span class="p">));</span>
+<span class="w">    </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">hasError</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// Close the socket.</span>
+<span class="w">    </span><span class="n">Close</span><span class="p">();</span>
+<span class="w">    </span><span class="c1">// Notify the subclass.</span>
+<span class="w">    </span><span class="n">UserOnUnixStreamSocketClosed</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>9、UserOnUnixStreamRead</h3>
+<p>进入子类函数，先是netstring_read()函数进行字符串读取，返回0</p>
+<p>接着做一个判断，若 nsRet ！=0 说明出错，没有读取到数据，后面的switch都是在做错误类型的判断</p>
+<p>如果没有出错的话，会先计算读取的字符串，然后再调用OnConsumerSocketMessage()这个函数</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">ConsumerSocket::UserOnUnixStreamRead</span><span class="p">()</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">MS_TRACE_STD</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// Be ready to parse more than a single message in a single chunk.</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="nb">true</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">IsClosed</span><span class="p">())</span>
+<span class="w">      </span><span class="k">return</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kt">size_t</span><span class="w"> </span><span class="n">readLen</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">bufferDataLen</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">msgStart</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">msgStart</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">size_t</span><span class="w"> </span><span class="n">msgLen</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">nsRet</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">netstring_read</span><span class="p">(</span>
+<span class="w">      </span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="kt">char</span><span class="o">*&gt;</span><span class="p">(</span><span class="k">this</span><span class="o">-&gt;</span><span class="n">buffer</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">msgStart</span><span class="p">),</span><span class="w"> </span><span class="n">readLen</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">msgStart</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">msgLen</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">nsRet</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">nsRet</span><span class="p">)</span>
+<span class="w">      </span><span class="p">{</span>
+<span class="w">        </span><span class="k">case</span><span class="w"> </span><span class="no">NETSTRING_ERROR_TOO_SHORT</span><span class="p">:</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="c1">// Check if the buffer is full.</span>
+<span class="w">          </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="o">-&gt;</span><span class="n">bufferDataLen</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">bufferSize</span><span class="p">)</span>
+<span class="w">          </span><span class="p">{</span>
+<span class="w">            </span><span class="c1">// First case: the incomplete message does not begin at position 0 of</span>
+<span class="w">            </span><span class="c1">// the buffer, so move the incomplete message to the position 0.</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="o">-&gt;</span><span class="n">msgStart</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">            </span><span class="p">{</span>
+<span class="w">              </span><span class="n">std</span><span class="o">::</span><span class="n">memmove</span><span class="p">(</span><span class="k">this</span><span class="o">-&gt;</span><span class="n">buffer</span><span class="p">,</span><span class="w"> </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">buffer</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">msgStart</span><span class="p">,</span><span class="w"> </span><span class="n">readLen</span><span class="p">);</span>
+<span class="w">              </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">msgStart</span><span class="w">      </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">              </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">bufferDataLen</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">readLen</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">            </span><span class="c1">// Second case: the incomplete message begins at position 0 of the buffer.</span>
+<span class="w">            </span><span class="c1">// The message is too big, so discard it.</span>
+<span class="w">            </span><span class="k">else</span>
+<span class="w">            </span><span class="p">{</span>
+<span class="w">              </span><span class="n">MS_ERROR_STD</span><span class="p">(</span>
+<span class="w">                </span><span class="s">&quot;no more space in the buffer for the unfinished message being parsed, &quot;</span>
+<span class="w">                </span><span class="s">&quot;discarding it&quot;</span><span class="p">);</span>
+
+<span class="w">              </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">msgStart</span><span class="w">      </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">              </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">bufferDataLen</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">          </span><span class="p">}</span>
+
+<span class="w">          </span><span class="c1">// Otherwise the buffer is not full, just wait.</span>
+<span class="w">          </span><span class="k">return</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">        </span><span class="k">case</span><span class="w"> </span><span class="no">NETSTRING_ERROR_TOO_LONG</span><span class="p">:</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="n">MS_ERROR_STD</span><span class="p">(</span><span class="s">&quot;NETSTRING_ERROR_TOO_LONG&quot;</span><span class="p">);</span>
+
+<span class="w">          </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">        </span><span class="k">case</span><span class="w"> </span><span class="no">NETSTRING_ERROR_NO_COLON</span><span class="p">:</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="n">MS_ERROR_STD</span><span class="p">(</span><span class="s">&quot;NETSTRING_ERROR_NO_COLON&quot;</span><span class="p">);</span>
+
+<span class="w">          </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">        </span><span class="k">case</span><span class="w"> </span><span class="no">NETSTRING_ERROR_NO_COMMA</span><span class="p">:</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="n">MS_ERROR_STD</span><span class="p">(</span><span class="s">&quot;NETSTRING_ERROR_NO_COMMA&quot;</span><span class="p">);</span>
+
+<span class="w">          </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">        </span><span class="k">case</span><span class="w"> </span><span class="no">NETSTRING_ERROR_LEADING_ZERO</span><span class="p">:</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="n">MS_ERROR_STD</span><span class="p">(</span><span class="s">&quot;NETSTRING_ERROR_LEADING_ZERO&quot;</span><span class="p">);</span>
+
+<span class="w">          </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">        </span><span class="k">case</span><span class="w"> </span><span class="no">NETSTRING_ERROR_NO_LENGTH</span><span class="p">:</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="n">MS_ERROR_STD</span><span class="p">(</span><span class="s">&quot;NETSTRING_ERROR_NO_LENGTH&quot;</span><span class="p">);</span>
+
+<span class="w">          </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">}</span>
+
+<span class="w">      </span><span class="c1">// Error, so reset and exit the parsing loop.</span>
+<span class="w">      </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">msgStart</span><span class="w">      </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">      </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">bufferDataLen</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+
+<span class="w">      </span><span class="k">return</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// If here it means that msgStart points to the beginning of a message</span>
+<span class="w">    </span><span class="c1">// with msgLen bytes length, so recalculate readLen.</span>
+<span class="w">    </span><span class="n">readLen</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="kt">uint8_t</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">msgStart</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="o">-&gt;</span><span class="n">buffer</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">msgStart</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">msgLen</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">listener</span><span class="o">-&gt;</span><span class="n">OnConsumerSocketMessage</span><span class="p">(</span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="n">msgStart</span><span class="p">,</span><span class="w"> </span><span class="n">msgLen</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// If there is no more space available in the buffer and that is because</span>
+<span class="w">    </span><span class="c1">// the latest parsed message filled it, then empty the full buffer.</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="k">this</span><span class="o">-&gt;</span><span class="n">msgStart</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">readLen</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">bufferSize</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">msgStart</span><span class="w">      </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">      </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">bufferDataLen</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// If there is still space in the buffer, set the beginning of the next</span>
+<span class="w">    </span><span class="c1">// parsing to the next position after the parsed message.</span>
+<span class="w">    </span><span class="k">else</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">msgStart</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">readLen</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// If there is more data in the buffer after the parsed message</span>
+<span class="w">    </span><span class="c1">// then parse again. Otherwise break here and wait for more data.</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">this</span><span class="o">-&gt;</span><span class="n">bufferDataLen</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">msgStart</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">break</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>10、OnConsumerSocketMessage</h3>
+<p>进入OnConsumerSocketMessage()这个函数</p>
+<p>JS在传输之前会先把数据做成json的格式，然后以字符串的形式传输过来，C++收到字符串后，会把它转化为json对象</p>
+<p>又调用Channel::Request，传入这个json对象</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">UnixStreamSocket::OnConsumerSocketMessage</span><span class="p">(</span>
+<span class="w">    </span><span class="n">ConsumerSocket</span><span class="o">*</span><span class="w"> </span><span class="cm">/*consumerSocket*/</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">msg</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">msgLen</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">MS_TRACE_STD</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">try</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">json</span><span class="w"> </span><span class="n">jsonMessage</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">json</span><span class="o">::</span><span class="n">parse</span><span class="p">(</span><span class="n">msg</span><span class="p">,</span><span class="w"> </span><span class="n">msg</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">msgLen</span><span class="p">);</span>
+<span class="w">      </span><span class="k">auto</span><span class="o">*</span><span class="w"> </span><span class="n">request</span><span class="w">    </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">Channel</span><span class="o">::</span><span class="n">Request</span><span class="p">(</span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="n">jsonMessage</span><span class="p">);</span>
+<span class="w">      </span><span class="c1">// Notify the listener.</span>
+<span class="w">      </span><span class="k">try</span>
+<span class="w">      </span><span class="p">{</span>
+<span class="w">        </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">listener</span><span class="o">-&gt;</span><span class="n">OnChannelRequest</span><span class="p">(</span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="n">request</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">MediaSoupTypeError</span><span class="o">&amp;</span><span class="w"> </span><span class="n">error</span><span class="p">)</span>
+<span class="w">      </span><span class="p">{</span>
+<span class="w">        </span><span class="n">request</span><span class="o">-&gt;</span><span class="n">TypeError</span><span class="p">(</span><span class="n">error</span><span class="p">.</span><span class="n">what</span><span class="p">());</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">MediaSoupError</span><span class="o">&amp;</span><span class="w"> </span><span class="n">error</span><span class="p">)</span>
+<span class="w">      </span><span class="p">{</span>
+<span class="w">        </span><span class="n">request</span><span class="o">-&gt;</span><span class="n">Error</span><span class="p">(</span><span class="n">error</span><span class="p">.</span><span class="n">what</span><span class="p">());</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="c1">// Delete the Request.</span>
+<span class="w">      </span><span class="k">delete</span><span class="w"> </span><span class="n">request</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">json</span><span class="o">::</span><span class="n">parse_error</span><span class="o">&amp;</span><span class="w"> </span><span class="n">error</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">MS_ERROR_STD</span><span class="p">(</span><span class="s">&quot;JSON parsing error: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">error</span><span class="p">.</span><span class="n">what</span><span class="p">());</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">MediaSoupError</span><span class="o">&amp;</span><span class="w"> </span><span class="n">error</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">MS_ERROR_STD</span><span class="p">(</span><span class="s">&quot;discarding wrong Channel request&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+</code></pre></div>
+<h3>11、Request</h3>
+<p>进入Channel::Request</p>
+<p>可以看到这个json里面封装的是一个四元组，其包含：</p>
+<ul>
+<li>id——方法的id</li>
+<li>method——字符串的名字</li>
+<li>internal——自定义的内部格式</li>
+<li>data——传入的数据（可能有可能没有）</li>
+</ul>
+<p>解析完数据之后，就把它们放入Request对象中的各个数据域this-&gt;id、this-&gt;method、this-&gt;internal、this-&gt;data</p>
+<div class="highlight"><pre><code><span></span><span class="n">Request</span><span class="o">::</span><span class="n">Request</span><span class="p">(</span><span class="n">Channel</span><span class="o">::</span><span class="n">UnixStreamSocket</span><span class="o">*</span><span class="w"> </span><span class="n">channel</span><span class="p">,</span><span class="w"> </span><span class="n">json</span><span class="o">&amp;</span><span class="w"> </span><span class="n">jsonRequest</span><span class="p">)</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">channel</span><span class="p">(</span><span class="n">channel</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="n">MS_TRACE</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">jsonIdIt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">jsonRequest</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="s">&quot;id&quot;</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">jsonIdIt</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">jsonRequest</span><span class="p">.</span><span class="n">end</span><span class="p">()</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">!</span><span class="n">Utils</span><span class="o">::</span><span class="n">Json</span><span class="o">::</span><span class="n">IsPositiveInteger</span><span class="p">(</span><span class="o">*</span><span class="n">jsonIdIt</span><span class="p">))</span>
+<span class="w">      </span><span class="n">MS_THROW_ERROR</span><span class="p">(</span><span class="s">&quot;missing id&quot;</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">jsonIdIt</span><span class="o">-&gt;</span><span class="n">get</span><span class="o">&lt;</span><span class="kt">uint32_t</span><span class="o">&gt;</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">jsonMethodIt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">jsonRequest</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="s">&quot;method&quot;</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">jsonMethodIt</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">jsonRequest</span><span class="p">.</span><span class="n">end</span><span class="p">()</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">!</span><span class="n">jsonMethodIt</span><span class="o">-&gt;</span><span class="n">is_string</span><span class="p">())</span>
+<span class="w">      </span><span class="n">MS_THROW_ERROR</span><span class="p">(</span><span class="s">&quot;missing method&quot;</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">method</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">jsonMethodIt</span><span class="o">-&gt;</span><span class="n">get</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&gt;</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">methodIdIt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Request</span><span class="o">::</span><span class="n">string2MethodId</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="k">this</span><span class="o">-&gt;</span><span class="n">method</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">methodIdIt</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">Request</span><span class="o">::</span><span class="n">string2MethodId</span><span class="p">.</span><span class="n">end</span><span class="p">())</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">Error</span><span class="p">(</span><span class="s">&quot;unknown method&quot;</span><span class="p">);</span>
+
+<span class="w">      </span><span class="n">MS_THROW_ERROR</span><span class="p">(</span><span class="s">&quot;unknown method &#39;%s&#39;&quot;</span><span class="p">,</span><span class="w"> </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">method</span><span class="p">.</span><span class="n">c_str</span><span class="p">());</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">methodId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">methodIdIt</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">jsonInternalIt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">jsonRequest</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="s">&quot;internal&quot;</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">jsonInternalIt</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">jsonRequest</span><span class="p">.</span><span class="n">end</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">jsonInternalIt</span><span class="o">-&gt;</span><span class="n">is_object</span><span class="p">())</span>
+<span class="w">      </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">internal</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">jsonInternalIt</span><span class="p">;</span>
+<span class="w">    </span><span class="k">else</span>
+<span class="w">      </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">internal</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">json</span><span class="o">::</span><span class="n">object</span><span class="p">();</span>
+
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">jsonDataIt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">jsonRequest</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="s">&quot;data&quot;</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">jsonDataIt</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">jsonRequest</span><span class="p">.</span><span class="n">end</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">jsonDataIt</span><span class="o">-&gt;</span><span class="n">is_object</span><span class="p">())</span>
+<span class="w">      </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">jsonDataIt</span><span class="p">;</span>
+<span class="w">    </span><span class="k">else</span>
+<span class="w">      </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">json</span><span class="o">::</span><span class="n">object</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+</code></pre></div>
+<h3>12、OnConsumerSocketMessage</h3>
+<p>完成上述步骤后，便又返回OnConsumerSocketMessage()</p>
+<p>因为之前已经把数据转存到Request中，所以可以直接对其进行操作，这时候调用</p>
+<div class="highlight"><pre><code><span></span><span class="k">this</span><span class="o">-&gt;</span><span class="n">listener</span><span class="o">-&gt;</span><span class="n">OnChannelRequest</span><span class="p">(</span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="n">request</span><span class="p">);</span>
+</code></pre></div>
+<p><strong>要注意的是，这里的listener实际上是Worker</strong></p>
+<h3>13、OnChannelRequest</h3>
+<p>当Worker接收到Request的数据后，便能做出相应的处理了，接下来进入Worker.cpp的<strong>OnChannelRequest()</strong></p>
+<p>switch里就会根据methodId做出相应的处理，当它为</p>
+<ul>
+<li><code>WORKER_DUMP</code>，表示将Worker中的Router信息都打印出来</li>
+<li><code>WORKER_GET_RESOURCE_USAGE</code>，表示将RU的参数信息打印出来</li>
+<li><code>WORKER_UPDATE_SETTINGS</code>，表示更新设置</li>
+<li><code>WORKER_CREATE_ROUTER</code>，表示创建Router</li>
+<li><code>ROUTER_CLOSE</code>，表示关闭</li>
+</ul>
+<p>如果为其他的，就跳转到router相关的处理函数中，若router处理不了，就再往下传，一层一层传下去</p>
+<div class="highlight"><pre><code><span></span><span class="kr">inline</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">Worker::OnChannelRequest</span><span class="p">(</span><span class="n">Channel</span><span class="o">::</span><span class="n">UnixStreamSocket</span><span class="o">*</span><span class="w"> </span><span class="cm">/*channel*/</span><span class="p">,</span><span class="w"> </span><span class="n">Channel</span><span class="o">::</span><span class="n">Request</span><span class="o">*</span><span class="w"> </span><span class="n">request</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">MS_TRACE</span><span class="p">();</span>
+
+<span class="w">  </span><span class="n">MS_DEBUG_DEV</span><span class="p">(</span>
+<span class="w">    </span><span class="s">&quot;Channel request received [method:%s, id:%&quot;</span><span class="w"> </span><span class="n">PRIu32</span><span class="w"> </span><span class="s">&quot;]&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">request</span><span class="o">-&gt;</span><span class="n">method</span><span class="p">.</span><span class="n">c_str</span><span class="p">(),</span><span class="w"> </span><span class="n">request</span><span class="o">-&gt;</span><span class="n">id</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">request</span><span class="o">-&gt;</span><span class="n">methodId</span><span class="p">)</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">Channel</span><span class="o">::</span><span class="no">Request</span><span class="o">::</span><span class="no">MethodId</span><span class="o">::</span><span class="no">WORKER_DUMP</span><span class="p">:</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">json</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">json</span><span class="o">::</span><span class="n">object</span><span class="p">();</span>
+
+<span class="w">      </span><span class="n">FillJson</span><span class="p">(</span><span class="n">data</span><span class="p">);</span>
+
+<span class="w">      </span><span class="n">request</span><span class="o">-&gt;</span><span class="n">Accept</span><span class="p">(</span><span class="n">data</span><span class="p">);</span>
+
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">Channel</span><span class="o">::</span><span class="no">Request</span><span class="o">::</span><span class="no">MethodId</span><span class="o">::</span><span class="no">WORKER_GET_RESOURCE_USAGE</span><span class="p">:</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">json</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">json</span><span class="o">::</span><span class="n">object</span><span class="p">();</span>
+
+<span class="w">      </span><span class="n">FillJsonResourceUsage</span><span class="p">(</span><span class="n">data</span><span class="p">);</span>
+
+<span class="w">      </span><span class="n">request</span><span class="o">-&gt;</span><span class="n">Accept</span><span class="p">(</span><span class="n">data</span><span class="p">);</span>
+
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">Channel</span><span class="o">::</span><span class="no">Request</span><span class="o">::</span><span class="no">MethodId</span><span class="o">::</span><span class="no">WORKER_UPDATE_SETTINGS</span><span class="p">:</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">Settings</span><span class="o">::</span><span class="n">HandleRequest</span><span class="p">(</span><span class="n">request</span><span class="p">);</span>
+
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">Channel</span><span class="o">::</span><span class="no">Request</span><span class="o">::</span><span class="no">MethodId</span><span class="o">::</span><span class="no">WORKER_CREATE_ROUTER</span><span class="p">:</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">routerId</span><span class="p">;</span>
+
+<span class="w">      </span><span class="c1">// This may throw.</span>
+<span class="w">      </span><span class="n">SetNewRouterIdFromInternal</span><span class="p">(</span><span class="n">request</span><span class="o">-&gt;</span><span class="n">internal</span><span class="p">,</span><span class="w"> </span><span class="n">routerId</span><span class="p">);</span>
+
+<span class="w">      </span><span class="k">auto</span><span class="o">*</span><span class="w"> </span><span class="n">router</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">RTC</span><span class="o">::</span><span class="n">Router</span><span class="p">(</span><span class="n">routerId</span><span class="p">);</span>
+
+<span class="w">      </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">mapRouters</span><span class="p">[</span><span class="n">routerId</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">router</span><span class="p">;</span>
+
+<span class="w">      </span><span class="n">MS_DEBUG_DEV</span><span class="p">(</span><span class="s">&quot;Router created [routerId:%s]&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">routerId</span><span class="p">.</span><span class="n">c_str</span><span class="p">());</span>
+
+<span class="w">      </span><span class="n">request</span><span class="o">-&gt;</span><span class="n">Accept</span><span class="p">();</span>
+
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">Channel</span><span class="o">::</span><span class="no">Request</span><span class="o">::</span><span class="no">MethodId</span><span class="o">::</span><span class="no">ROUTER_CLOSE</span><span class="p">:</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// This may throw.</span>
+<span class="w">      </span><span class="n">RTC</span><span class="o">::</span><span class="n">Router</span><span class="o">*</span><span class="w"> </span><span class="n">router</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">GetRouterFromInternal</span><span class="p">(</span><span class="n">request</span><span class="o">-&gt;</span><span class="n">internal</span><span class="p">);</span>
+
+<span class="w">      </span><span class="c1">// Remove it from the map and delete it.</span>
+<span class="w">      </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">mapRouters</span><span class="p">.</span><span class="n">erase</span><span class="p">(</span><span class="n">router</span><span class="o">-&gt;</span><span class="n">id</span><span class="p">);</span>
+<span class="w">      </span><span class="k">delete</span><span class="w"> </span><span class="n">router</span><span class="p">;</span>
+
+<span class="w">      </span><span class="n">MS_DEBUG_DEV</span><span class="p">(</span><span class="s">&quot;Router closed [id:%s]&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">router</span><span class="o">-&gt;</span><span class="n">id</span><span class="p">.</span><span class="n">c_str</span><span class="p">());</span>
+
+<span class="w">      </span><span class="n">request</span><span class="o">-&gt;</span><span class="n">Accept</span><span class="p">();</span>
+
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// Any other request must be delivered to the corresponding Router.</span>
+<span class="w">    </span><span class="k">default</span><span class="o">:</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// This may throw.</span>
+<span class="w">      </span><span class="n">RTC</span><span class="o">::</span><span class="n">Router</span><span class="o">*</span><span class="w"> </span><span class="n">router</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">GetRouterFromInternal</span><span class="p">(</span><span class="n">request</span><span class="o">-&gt;</span><span class="n">internal</span><span class="p">);</span>
+
+<span class="w">      </span><span class="n">router</span><span class="o">-&gt;</span><span class="n">HandleRequest</span><span class="p">(</span><span class="n">request</span><span class="p">);</span>
+
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<hr>
+
+<h4><p>原文出处：<a href='https://blog.csdn.net/Frederick_Fung/article/details/107090169' target='blank'>Mediasoup源码分析（二）Router的建立</a></p></h4>
+<p>在Channel建立后，上层应用发送数据请求传给底层C++，Router便能成功创建，本文将接着C++ Request继续分析源码，前面相关的流程请看（一）</p>
+<h2>Request</h2>
+<p>当传来的 MethodId 是 WORKER_CREATE_ROUTER 时，就表示要创建一个Router了，调用SetNewRouterIdFromInternal() 函数从internal中可以获取到Router的ID，然后再执行Router的构造函数，同时传入ID</p>
+<p>接着调用Worker的私有成员mapRouters（这是一个无序键值对容器）存储Router和它的ID，最后再返还一个消息确认的信息给上层</p>
+<p>这样Router便创建好了</p>
+<div class="highlight"><pre><code><span></span><span class="k">case</span><span class="w"> </span><span class="no">Channel</span><span class="o">::</span><span class="no">Request</span><span class="o">::</span><span class="no">MethodId</span><span class="o">::</span><span class="no">WORKER_CREATE_ROUTER</span><span class="p">:</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">routerId</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// This may throw.</span>
+<span class="w">  </span><span class="n">SetNewRouterIdFromInternal</span><span class="p">(</span><span class="n">request</span><span class="o">-&gt;</span><span class="n">internal</span><span class="p">,</span><span class="w"> </span><span class="n">routerId</span><span class="p">);</span>
+<span class="w">  </span><span class="k">auto</span><span class="o">*</span><span class="w"> </span><span class="n">router</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">RTC</span><span class="o">::</span><span class="n">Router</span><span class="p">(</span><span class="n">routerId</span><span class="p">);</span>
+<span class="w">  </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">mapRouters</span><span class="p">[</span><span class="n">routerId</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">router</span><span class="p">;</span>
+<span class="w">  </span><span class="n">MS_DEBUG_DEV</span><span class="p">(</span><span class="s">&quot;Router created [routerId:%s]&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">routerId</span><span class="p">.</span><span class="n">c_str</span><span class="p">());</span>
+<span class="w">  </span><span class="n">request</span><span class="o">-&gt;</span><span class="n">Accept</span><span class="p">();</span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "Mediasoup1.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

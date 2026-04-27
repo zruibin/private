@@ -1,0 +1,985 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>调度系统设计精要 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="调度系统设计精要,算法,系统,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="调度系统设计精要" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>调度系统设计精要</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2020-03-21 14:19
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_suan_fa.html' class='article_tag'>算法</a>
+
+<a href='../article/tag_xi_tong.html' class='article_tag'>系统</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://draveness.me/system-design-scheduler' target='blank'>调度系统设计精要.md</a></p></h4>
+<p>系统设计精要是一系列深入研究系统设计方法的系列文章，文中不仅会分析系统设计的理论，还会分析多个实际场景下的具体实现。这是一个季更或者半年更的系列，如果你有想要了解的问题，可以在文章下面留言。</p>
+<p>调度是一个非常广泛的概念，很多领域都会使用调度这个术语，在计算机科学中，调度就是一种将任务（Work）分配给资源的方法1。任务可能是虚拟的计算任务，例如线程、进程或者数据流，这些任务会被调度到硬件资源上执行，例如：处理器 CPU 等设备。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141952-0.png" alt="system-design-and-scheduler"></p>
+<p><strong>图 1 - 调度系统设计精要</strong></p>
+<p>本文会介绍调度系统的常见场景以及设计过程中的一些关键问题，调度器的设计最终都会归结到一个问题上 — 如何对资源高效的分配和调度以达到我们的目的，可能包括对资源的合理利用、最小化成本、快速匹配供给和需求。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141952-1.png" alt="mind-node"></p>
+<p><strong>图 2 - 文章脉络和内容</strong></p>
+<p>除了介绍调度系统设计时会遇到的常见问题之外，本文还会深入分析几种常见的调度器的设计、演进与实现原理，包括操作系统的进程调度器，Go 语言的运行时调度器以及Kubernetes 的工作负载调度器，帮助我们理解调度器设计的核心原理。</p>
+<h5>设计原理</h5>
+<p>调度系统其实就是调度器（Scheduler），我们在很多系统中都能见到调度器的身影，就像我们在上面说的，不止操作系统中存在调度器，编程语言、容器编排以及很多业务系统中都会存在调度系统或者调度模块。这些调度模块的核心作用就是对有限的资源进行分配以实现最大化资源的利用率或者降低系统的尾延迟，调度系统面对的就是<strong>资源的需求和供给不平衡</strong>的问题。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141952-2.png" alt="scheduler-works-and-resources"></p>
+<p><strong>图 3 - 调度器的任务和资源</strong></p>
+<p>我们在这一节中将从多个方面介绍调度系统设计时需要重点考虑的问题，其中包括调度系统的需求调研、调度原理以及架构设计。</p>
+<h6>需求调研</h6>
+<p>在着手构建调度系统之前，首要的工作就是进行详细的需求调研和分析，在这个过程中需要完成以下两件事：</p>
+<ul>
+<li>调研调度系统的应用场景，深入研究场景中待执行的任务（Work）和能用来执行任务的资源（Resource）的特性；</li>
+<li>分析调度系统的目的，可能是成本优先、质量优先、最大化资源的利用率等，调度目的一般都是动态的，会随着需求的变化而转变；</li>
+</ul>
+<h6>#应用场景</h6>
+<p>调度系统应用的场景是我们首先需要考虑的问题，对应用场景的分析至关重要，我们需要深入了解当前场景下待执行任务和能用来执行任务的资源的特点。我们需要分析待执行任务的以下特征：</p>
+<ul>
+<li>任务是否有截止日期，必须在某个时间点之前完成；</li>
+<li>任务是否支持抢占，抢占的具体规则是什么；</li>
+<li>任务是否包含前置的依赖条件；</li>
+<li>任务是否只能在指定的资源上运行；</li>
+<li>…</li>
+</ul>
+<p>而用于执行任务的资源也可能存在资源不平衡，不同资源处理任务的速度不一致的问题。</p>
+<p>资源和任务特点的多样性决定了调度系统的设计，我们在这里举几个简单的例子帮助各位读者理解调度系统需求分析的过程。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141952-3.jpg" alt="linux-banner"></p>
+<p><strong>图 4 - Linux 操作系统</strong></p>
+<p>在操作系统的进程调度器（Process Scheduler）中，待调度的任务就是线程，这些任务一般只会处于正在执行或者未执行（等待或者终止）的状态；而用于处理这些任务的 CPU 往往都是不可再分的，同一个 CPU 在同一时间只能执行一个任务，这是物理上的限制。简单总结一下，操作系统调度器的任务和资源有以下特性：</p>
+<ul>
+<li>任务 —— Thread <ul>
+<li>状态简单：只会处于正在执行或者未被执行两种状态；</li>
+<li>优先级不同：待执行的任务可能有不同的优先级，在考虑优先级的情况下，需要保证不同任务的公平性；</li>
+</ul>
+</li>
+<li>资源 —— CPU 时间 <ul>
+<li>资源不可再分：同一时间只能运行一个任务；</li>
+</ul>
+</li>
+</ul>
+<p>在上述场景中，待执行的任务是操作系统调度的基本单位 —— 线程，而可分配的资源是 CPU 的时间。Go语言的调度器与操作系统的调度器面对的是几乎相同的场景，其中的任务是 Goroutine，可以分配的资源是在 CPU 上运行的线程。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141952-4.png" alt="kubernetes-banner"></p>
+<p><strong>图 5 - 容器编排系统 Kubernetes</strong></p>
+<p>除了操作系统和编程语言这种较为底层的调度器之外，容器和计算任务调度在今天也很常见，Kubernetes作为容器编排系统会负责调取集群中的容器，对它稍有了解的人都知道，Kubernetes 中调度的基本单元是 Pod，这些 Pod 会被调度到节点 Node 上执行：</p>
+<ul>
+<li>任务 —— Pod <ul>
+<li>优先级不同：Pod 的优先级可能不同，高优先级的系统 Pod 可以抢占低优先级 Pod 的资源；</li>
+<li>有状态：Pod 可以分为无状态和有状态，有状态的 Pod 需要依赖持久存储卷；</li>
+</ul>
+</li>
+<li>资源 —— Node <ul>
+<li>类型不同：不同节点上的资源类型不同，包括 CPU、GPU 和内存等，这些资源可以被拆分但是都属于当前节点；</li>
+<li>不稳定：节点可能由于突发原因不可用，例如：无网络连接、磁盘损坏等；</li>
+</ul>
+</li>
+</ul>
+<p>调度系统在生活和工作中都很常见，除了上述的两个场景之外，其他需要调度系统的场景包括 CDN的资源调度、订单调度以及离线任务调度系统等。在不同场景中，我们都需要深入思考任务和资源的特性，它们对系统的设计起者指导作用。</p>
+<h6>#调度目的</h6>
+<p>在深入分析调度场景后，我们需要理解调度的目的。我们可以将调度目的理解成机器学习中的成本函数（Cost function），确定调度目的就是确定成本函数的定义，调度理论一书中曾经介绍过常见的调度目的包含以下的内容2：</p>
+<ul>
+<li>完成跨度（Makesapan） — 第一个到最后一个任务完成调度的时间跨度；</li>
+<li>最大延迟（Maximum Lateness） — 超过截止时间最长的任务；</li>
+<li>加权完成时间的和（Total weighted completion time）— 权重乘完成时间的总和；</li>
+<li>…</li>
+</ul>
+<p>这些都是偏理论的调度的目的，多数业务调度系统的调度目的都是优化与业务联系紧密的指标 — 成本和质量。如何在成本和质量之间达到平衡是需要仔细思考和设计的，由于篇幅所限以及业务场景的复杂，本文不会分析如何权衡成本和质量，这往往都是需要结合业务考虑的事情，不具有足够的相似性。</p>
+<h6>调度原理</h6>
+<p>性能优异的调度器是实现特定调度目的前提，我们在讨论调度场景和目的时往往都会忽略调度的额外开销，然而调度器执行时的延时和吞吐量等指标在调度负载较重时是不可忽视的。本节会分析与调度器实现相关的一些重要概念，这些概念能够帮助我们实现高性能的调度器：</p>
+<ul>
+<li>协作式调度与抢占式调度；</li>
+<li>单调度器与多调度器；</li>
+<li>任务分享与任务窃取；</li>
+</ul>
+<h6>#协作式与抢占式</h6>
+<p>协作式（Cooperative）与抢占式（Preemptive）调度是操作系统中常见的多任务运行策略。这两种调度方法的定义完全不同：</p>
+<ul>
+<li>协作式调度允许任务执行任意长的时间，直到<strong>任务主动通知调度器</strong>让出资源；</li>
+<li>抢占式调度允许任务在执行过程中被调度器挂起，<strong>调度器会重新决定</strong>下一个运行的任务；</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141952-5.png" alt="cooperative-and-preemptive"></p>
+<p><strong>图 6 - 协作式调度与抢占式调度</strong></p>
+<p>任务的执行时间和任务上下文切换的额外开销决定了哪种调度方式会带来更好的性能。如下图所示，图 7 展示了一个协作式调度器调度任务的过程，调度器一旦为某个任务分配了资源，它就会等待该任务主动释放资源，图中 4 个任务尽管执行时间不同，但是它们都会在任务执行完成后释放资源，整个过程也只需要 4 次上下文的切换。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141953-6.png" alt="cooperative-scheduling"></p>
+<p><strong>图 7 - 协作式调度</strong></p>
+<p>图 8 展示了抢占式调度的过程，由于调度器不知道所有任务的执行时间，所以它为每一个任务分配了一段时间切片。任务 1 和任务 4 由于执行时间较短，所以在第一次被调度时就完成了任务；但是任务 2 和任务 3 因为执行时间较长，超过了调度器分配的上限，所以为了保证公平性会触发抢占，等待队列中的其他任务会获得资源。在整个调度过程中，一共发生了 6 次上下文切换。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141953-7.png" alt="preemptive-scheduling"></p>
+<p><strong>图 8 - 抢占式调度</strong></p>
+<p>如果部分任务的执行时间很长，协作式的任务调度会使部分执行时间长的任务饿死其他任务；不过如果待执行的任务执行时间较短并且几乎相同，那么使用协作式的任务调度能减少任务中断带来的额外开销，从而带来更好的调度性能。</p>
+<p>因为多数情况下任务执行的时间都不确定，在协作式调度中一旦任务没有主动让出资源，那么就会导致其它任务等待和阻塞，所以调度系统一般都会以抢占式的任务调度为主，同时支持任务的协作式调度。</p>
+<h6>#单调度器与多调度器</h6>
+<p>使用单个调度器还是多个调度器也是设计调度系统时需要仔细考虑的，多个调度器并不一定意味着多个进程，也有可能是一个进程中的多个调度线程，它们既可以选择在多核上并行调度、在单核上并发调度，也可以同时利用并行和并发提高性能。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141953-8.png" alt="single-schedule"></p>
+<p><strong>图 9 - 单调度器调度任务和资源</strong></p>
+<p>不过对于调度系统来说，因为它<strong>做出的决策会改变资源的状态和系统的上下文进而影响后续的调度决策</strong>，所以单调度器的串行调度是能够精准调度资源的唯一方法。单个调度器利用不同渠道收集调度需要的上下文，并在收到调度请求后会根据任务和资源情况做出当下最优的决策。</p>
+<p>随着调度器的不断演变，单调度器的性能和吞吐量可能会受到限制，我们还是需要引入并行或者并发调度来解决性能上的瓶颈，这时我们需要将待调度的资源分区，让多个调度器分别负责调度不同区域中的资源。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141953-9.png" alt="multi-scheduler"></p>
+<p><strong>图 10 - 多调度器与资源分区</strong></p>
+<p>多调度器的并发调度能够极大提升调度器的整体性能，例如 Go 语言的调度器。Go 语言运行时会将多个CPU交给不同的处理器分别调度，这样通过并行调度能够提升调度器的性能。</p>
+<p>上面介绍的两种调度方法都建立在需要精准调度的前提下，多调度器中的每一个调度器都会面对无关的资源，所以对于同一个分区的资源，调度还是串行的。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141953-10.png" alt="multi-scheduler-with-coarse-grained"></p>
+<p><strong>图 11 - 多调度器粗粒度调度</strong></p>
+<p>使用多个调度器同时调度多个资源也是可行的，只是可能需要牺牲调度的精确性 — 不同的调度器可能会在不同时间接收到状态的更新，这就会导致不同调度器做出不同的决策。负载均衡就可以看做是多线程和多进程的调度器，因为对任务和资源掌控的信息有限，这种粗粒度调度的结果很可能就是不同机器的负载会有较大差异，所以无论是小规模集群还是大规模集群都很有可能导致某些实例的负载过高。</p>
+<h6>#工作分享与工作窃取</h6>
+<p>这一小节将继续介绍在多个调度器间重新分配任务的两个调度范式 — 工作分享（Work Sharing）和工作窃取（Work Stealing）3。独立的调度器可以同时处理所有的任务和资源，所以它不会遇到多调度器的任务和资源的不平衡问题。在多数的调度场景中，任务的执行时间都是不确定的，假设多个调度器分别调度相同的资源，由于任务的执行时间不确定，多个调度器中等待调度的任务队列最终会发生差异 —部分队列中包含大量任务，而另外一些队列不包含任务，这时就需要引入任务再分配策略。</p>
+<p>工作分享和工作窃取是完全不同的两种再分配策略。在工作分享中，当调度器创建了新任务时，它会将一部分任务分给其他调度器；而在工作窃取中，当调度器的资源没有被充分利用时，它会从其他调度器中窃取一些待分配的任务，如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141954-11.png" alt="work-stealing-scheduler"></p>
+<p><strong>图 12 - 工作窃取调度器</strong></p>
+<p>这两种任务再分配的策略都为系统增加了额外的开销，与工作分享相比，工作窃取只会在当前调度器的资源没有被充分利用时才会触发，所以工作窃取引入的额外开销更小。工作窃取在生产环境中更加常用，Linux 操作系统和 Go 语言都选择了工作窃取策略。</p>
+<h6>架构设计</h6>
+<p>本节将从调度器内部和外部两个角度分析调度器的架构设计，前者分析调度器内部多个组件的关系和做出调度决策的过程；后者分析多个调度器应该如何协作，是否有其他的外部服务可以辅助调度器做出更合理的调度决策。</p>
+<h6>#调度器内部</h6>
+<p>当调度器收到待调度任务时，会根据采集到的状态和待调度任务的规格（Spec）做出合理的调度决策，我们可以从下图中了解常见调度系统的内部逻辑。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141954-12.png" alt="how-scheduler-works"></p>
+<p><strong>图 13 - 调度器做出调度决策</strong></p>
+<p>常见的调度器一般由两部分组成 — 用于收集状态的状态模块和负责做决策的决策模块。</p>
+<h6>##状态模块</h6>
+<p>状态模块会从不同途径收集尽可能多的信息为调度提供丰富的上下文，其中可能包括资源的属性、利用率和可用性等信息。根据场景的不同，上下文可能需要存储在MySQL 等持久存储中，一般也会在内存中缓存一份以减少调度器访问上下文的开销。</p>
+<h6>##决策模块</h6>
+<p>决策模块会根据状态模块收集的上下文和任务的规格做出调度决策，需要注意的是做出的<strong>调度决策只是在当下有效</strong>，在未来某个时间点，状态的改变可能会导致之前做的决策不符合任务的需求，例如：当我们使用 Kubernetes调度器将工作负载调度到某些节点上，这些节点可能由于网络问题突然不可用，该节点上的工作负载也就不能正常工作，即调度决策失效。</p>
+<p>调度器在调度时都会通过以下的三个步骤为任务调度合适的资源：</p>
+<ol>
+<li>通过优先级、任务创建时间等信息确定不同任务的调度顺序；</li>
+<li>通过过滤和打分两个阶段为任务选择合适的资源；</li>
+<li>不存在满足条件的资源时，选择牺牲的抢占对象；</li>
+</ol>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141954-13.png" alt="scheduling-framework"></p>
+<p><strong>图 14 - 调度框架</strong></p>
+<p>上图展示了常见调度器决策模块执行的几个步骤，确定优先级、对闲置资源进行打分、确定抢占资源的牺牲者，上述三个步骤中的最后一个往往都是可选的，部分调度系统不需要支持抢占式调度的功能。</p>
+<h6>#调度器外部</h6>
+<p>如果我们将调度器看成一个整体，从调度器外部看架构设计就会得到完全不同的角度 —如何利用外部系统增强调度器的功能。在这里我们将介绍两种调度器外部的设计，分别是多调度器和反调度器（Descheduler）。</p>
+<h6>##多调度器</h6>
+<p>串行调度与并行调度一节已经分析了多调度器的设计，我们可以将待调度的资源进行分区，让多个调度器线程或者进程分别负责各个区域中资源的调度，充分利用多和 CPU 的并行能力。</p>
+<h6>##反调度器</h6>
+<p>反调度器是一个比较有趣的概念，它能够<strong>移除决策不再正确</strong>的调度，降低系统中的熵，让调度器根据当前的状态重新决策。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141954-14.png" alt="scheduler-and-descheduler"></p>
+<p><strong>图 15 - 调度器与反调度器</strong></p>
+<p>反调度器的引入使得整个调度系统变得更加健壮。调度器负责根据当前的状态做出正确的调度决策，反调度器根据当前的状态移除错误的调度决策，它们的作用看起来相反，但是目的都是为任务调度更合适的资源。</p>
+<p>反调度器的使用没有那么广泛，实际的应用场景也比较有限。作者第一次发现这个概念是在 Kubernetes 孵化的<a href="https://github.com/kubernetes-sigs/descheduler">descheduler</a>项目4中，不过因为反调度器移除调度关系可能会影响正在运行的线上服务，所以 Kubernetes 也只会在特定场景下使用。</p>
+<h5>操作系统</h5>
+<p>调度器是操作系统中的重要组件，操作系统中有进程调度器（Process Scheduler）、网络调度器（Network Scheduler）和 I/O 调度器（I/O Scheduler）等组件，本节介绍的是操作系统中的进程调度器。</p>
+<p>有一些读者可能会感到困惑，操作系统调度的最小单位不是线程么，为什么这里使用的是进程调度。在 Linux操作系统中，调度器调度的不是进程也不是线程，它调度的是 <code>[task_struct</code>](<a href="https://github.com/torvalds/linux/blob/05ef8b97ddf9aed40df977477daeab01760d7f9a/include/linux/sched.h#L629">https://github.com/torvalds/linux/blob/05ef8b97ddf9aed40df977477daeab01760d7f9a/include/linux/sched.h#L629</a>) 结构体，该结构体既可以表示线程，也可以表示进程，而调度器会将进程和线程都看成任务，我们在这里先说明这一问题，避免读者感到困惑5。我们会使用进程调度器这个术语，但是一定要注意 Linux 调度器中并不区分线程和进程。</p>
+<blockquote><p>Linux incorporates process and thread scheduling by treating them as one in the same. A process can be viewed as a single thread, but a process can contain multiple threads that share some number of resources (code and/or data).</p>
+</blockquote>
+<p>接下来，本节会研究操作系统中调度系统的类型以及 Linux 进程调度器的演进过程。</p>
+<h6>调度系统类型</h6>
+<p>操作系统会将进程调度器分成三种不同的类型，即长期调度器、中期调度器和短期调度器。这三种不同类型的调度器分别提供了不同的功能，我们将在这一节中依次介绍它们。</p>
+<h6>#长期调度器</h6>
+<p>长期调度器（Long-Term Scheduler）也被称作任务调度器（Job Scheduler），它能够决定哪些任务会进入调度器的准备队列。当我们尝试执行新的程序时，长期调度器会负责授权或者延迟该程序的执行。长期调度器的作用是平衡同时正在运行的 I/O 密集型或者 CPU 密集型进程的任务数量：</p>
+<ul>
+<li>如果 I/O 密集型任务过多，就绪队列中就不存在待调度的任务，短期调度器不需要执行调度，CPU 资源就会面临闲置；</li>
+<li>如果 CPU 密集型任务过多，I/O 等待队列中就不存在待调度的任务，I/O 设备就会面临闲置；</li>
+</ul>
+<p>长期调度器能平衡同时正在运行的 I/O 密集型和 CPU 密集型任务，最大化的利用操作系统的 I/O 和 CPU 资源。</p>
+<h6>#中期调度器</h6>
+<p>中期调度器会将不活跃的、低优先级的、发生大量页错误的或者占用大量内存的进程从内存中移除，为其他的进程释放资源。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141954-15.png" alt="mid-term-scheduler"></p>
+<p><strong>图 16 - 中期调度器</strong></p>
+<p>当正在运行的进程陷入 I/O 操作时，该进程只会占用计算资源，在这种情况下，中期调度器就会将它从内存中移除等待 I/O操作完成后，该进程会重新加入就绪队列并等待短期调度器的调度。</p>
+<h6>#短期调度器</h6>
+<p>短期调度器应该是我们最熟悉的调度器，它会从就绪队列中选出一个进程执行。进程的选择会使用特定的调度算法，它会同时考虑进程的优先级、入队时间等特征。因为每个进程能够得到的执行时间有限，所以短期调度器的执行十分频繁。</p>
+<h6>设计与演进</h6>
+<p>本节将重点介绍 Linux 的 CPU 调度器，也就是短期调度器。Linux 的 CPU 调度器并不是从设计之初就是像今天这样复杂的，在很长的一段时间里（v0.01 ~ v2.4），Linux的进程调度都由几十行的简单函数负责，我们先了解一下不同版本调度器的历史：</p>
+<ul>
+<li>初始调度器 · v0.01 ~ v2.4 <ul>
+<li>由几十行代码实现，功能非常简陋；</li>
+<li>同时最多处理 64 个任务；</li>
+</ul>
+</li>
+<li>$O(n)$ 调度器 · v2.4 ~ v2.6 <ul>
+<li>调度时需要遍历全部任务；</li>
+<li>当待执行的任务较多时，同一个任务两次执行的间隔很长，会有比较严重的饥饿问题；</li>
+</ul>
+</li>
+<li>$O(1)$ 调度器 · v2.6.0 ~ v2.6.22 <ul>
+<li>通过引入运行队列和优先数组实现 $O(1)$ 的时间复杂度;</li>
+<li>使用本地运行队列替代全局运行队列增强在对称多处理器的扩展性；</li>
+<li>引入工作窃取保证多个运行队列中任务的平衡；</li>
+</ul>
+</li>
+<li>完全公平调度器 · v2.6.23 ~ 至今 <ul>
+<li>引入红黑树和运行时间保证调度的公平性；</li>
+<li>引入调度类实现不同任务类型的不同调度策略；</li>
+</ul>
+</li>
+</ul>
+<p>这里会详细介绍从最初的调度器到今天复杂的完全公平调度器（Completely Fair Scheduler，CFS）的演变过程。</p>
+<h6>#初始调度器</h6>
+<p>Linux 最初的进程调度器仅由 <code>[sched.h</code>](<a href="https://github.com/draveness/linux-archive/blob/master/0.01/include/linux/sched.h">https://github.com/draveness/linux-archive/blob/master/0.01/include/linux/sched.h</a>) 和 <code>[sched.c</code>](<a href="https://github.com/draveness/linux-archive/blob/master/0.01/kernel/sched.c">https://github.com/draveness/linux-archive/blob/master/0.01/kernel/sched.c</a>) 两个文件构成。你可能很难想象 Linux 早期版本使用只有几十行的<code>[schedule</code>](<a href="https://github.com/draveness/linux-archive/blob/master/0.01/kernel/sched.c#L68">https://github.com/draveness/linux-archive/blob/master/0.01/kernel/sched.c#L68</a>) 函数负责了操作系统进程的调度6：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">schedule</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="p">,</span><span class="n">next</span><span class="p">,</span><span class="n">c</span><span class="p">;</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">task_struct</span><span class="w"> </span><span class="o">**</span><span class="w"> </span><span class="n">p</span><span class="p">;</span>
+<span class="w">    </span><span class="k">for</span><span class="p">(</span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">LAST_TASK</span><span class="w"> </span><span class="p">;</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="o">&amp;</span><span class="n">FIRST_TASK</span><span class="w"> </span><span class="p">;</span><span class="w"> </span><span class="o">--</span><span class="n">p</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="p">...</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">c</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">-1</span><span class="p">;</span>
+<span class="w">      </span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">      </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NR_TASKS</span><span class="p">;</span>
+<span class="w">      </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">task</span><span class="p">[</span><span class="n">NR_TASKS</span><span class="p">];</span>
+<span class="w">      </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="o">--</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!*--</span><span class="n">p</span><span class="p">)</span><span class="w"> </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="o">*</span><span class="n">p</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">state</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">TASK_RUNNING</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">p</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">counter</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">c</span><span class="p">)</span>
+<span class="w">          </span><span class="n">c</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">p</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">counter</span><span class="p">,</span><span class="w"> </span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">i</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">c</span><span class="p">)</span><span class="w"> </span><span class="k">break</span><span class="p">;</span>
+<span class="w">      </span><span class="k">for</span><span class="p">(</span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">LAST_TASK</span><span class="w"> </span><span class="p">;</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="o">&amp;</span><span class="n">FIRST_TASK</span><span class="w"> </span><span class="p">;</span><span class="w"> </span><span class="o">--</span><span class="n">p</span><span class="p">)</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">p</span><span class="p">)</span>
+<span class="w">          </span><span class="p">(</span><span class="o">*</span><span class="n">p</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">counter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">((</span><span class="o">*</span><span class="n">p</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">counter</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">p</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">priority</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">switch_to</span><span class="p">(</span><span class="n">next</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>无论是进程还是线程，在 Linux 中都被看做是 <code>[task_struct</code>](<a href="https://github.com/draveness/linux-archive/blob/master/0.01/include/linux/sched.h#L77">https://github.com/draveness/linux-archive/blob/master/0.01/include/linux/sched.h#L77</a>) 结构体，所有的调度进程都存储在上限仅为<a href="https://github.com/draveness/linux-archive/blob/master/0.01/include/linux/sched.h#L4">64</a> 的数组中，调度器能够处理的进程上限也只有 64 个。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141954-16.png" alt="linux-initial-scheduler"></p>
+<p><strong>图 17 - 最初的进程调度器</strong></p>
+<p>上述函数会先唤醒获得信号的可中断进程，然后从队列倒序查找计数器 <code>counter</code> 最大的可执行进程，<code>counter</code>是进程能够占用的时间切片数量，该函数会根据时间切片的值执行不同的逻辑：</p>
+<ul>
+<li>如果最大的 <code>counter</code> 时间切片大于 0，调用汇编语言的实现的 <code>[switch_to</code>](<a href="https://github.com/draveness/linux-archive/blob/master/0.01/include/linux/sched.h#L168">https://github.com/draveness/linux-archive/blob/master/0.01/include/linux/sched.h#L168</a>) 切换进程；</li>
+<li>如果最大的 <code>counter</code> 时间切片等于 0，意味着所有进程的可执行时间都为 0，那么所有进程都会获得新的时间切片；</li>
+</ul>
+<p>Linux 操作系统的计时器会每隔 10ms 触发一次 <code>[do_timer</code>](<a href="https://github.com/draveness/linux-archive/blob/master/0.01/kernel/sched.c#L159">https://github.com/draveness/linux-archive/blob/master/0.01/kernel/sched.c#L159</a>) 将当前正在运行进程的 <code>counter</code>减一，当前进程的计数器归零时就会重新触发调度。</p>
+<h6>#O(n) 调度器</h6>
+<p>$O(n)$ 调度器是 Linux 在 v2.4 ~ v2.6版本使用的调度器，由于该调取器在最坏的情况下会遍历所有的任务，所以它调度任务的时间复杂度就是 $O(n)$。Linux 调度算法将 CPU时间分割成了不同的时期（Epoch），也就是每个任务能够使用的时间切片。</p>
+<p>我们可以在 <code>[sched.h</code>](<a href="https://github.com/draveness/linux-archive/blob/master/2.4.0/include/linux/sched.h">https://github.com/draveness/linux-archive/blob/master/2.4.0/include/linux/sched.h</a>) 和<code>[sched.c</code>](<a href="https://github.com/draveness/linux-archive/blob/master/2.4.0/kernel/sched.c">https://github.com/draveness/linux-archive/blob/master/2.4.0/kernel/sched.c</a>) 两个文件中找到 $O(n)$调度器的源代码。与上一个版本的调度器相比，$O(n)$ 调度器的实现复杂了很多，该调度器会在<code>[schedule</code>](<a href="https://github.com/draveness/linux-archive/blob/master/2.4.0/kernel/sched.c#L508">https://github.com/draveness/linux-archive/blob/master/2.4.0/kernel/sched.c#L508</a>) 函数中遍历运行队列中的所有任务并调用<code>[goodness</code>](<a href="https://github.com/draveness/linux-archive/blob/master/2.4.0/kernel/sched.c#L137">https://github.com/draveness/linux-archive/blob/master/2.4.0/kernel/sched.c#L137</a>) 函数分别计算它们的权重获得下一个运行的进程7：</p>
+<div class="highlight"><pre><code><span></span><span class="n">asmlinkage</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">schedule</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="w">    </span><span class="nl">still_running_back</span><span class="p">:</span>
+<span class="w">    </span><span class="n">list_for_each</span><span class="p">(</span><span class="n">tmp</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">runqueue_head</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">list_entry</span><span class="p">(</span><span class="n">tmp</span><span class="p">,</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">task_struct</span><span class="p">,</span><span class="w"> </span><span class="n">run_list</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">can_schedule</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="w"> </span><span class="n">this_cpu</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">weight</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">goodness</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="w"> </span><span class="n">this_cpu</span><span class="p">,</span><span class="w"> </span><span class="n">prev</span><span class="o">-&gt;</span><span class="n">active_mm</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">weight</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">c</span><span class="p">)</span>
+<span class="w">          </span><span class="n">c</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">weight</span><span class="p">,</span><span class="w"> </span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p</span><span class="p">;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在每个时期开始时，上述代码都会为所有的任务计算时间切片，因为需要执行 n 次，所以调度器被称作 $O(n)$调度器。在默认情况下，每个任务在一个周期都会分配到 200ms 左右的时间切片，然而这种调度和分配方式是 $O(n)$ 调度器的最大问题：</p>
+<ul>
+<li>每轮调度完成之后就会陷入没有任务需要调度的情况，需要提升交互性能的场景会受到严重影响，例如：在桌面拖动鼠标会感觉到明显的卡顿；</li>
+<li>每次查找权重最高的任务都需要遍历数组中的全部任务；</li>
+<li>调度器分配的平均时间片大小为 210ms8，当程序中包含 100 个进程时，同一个进程被运行两次的间隔是 21s，这严重影响了操作系统的可用性；</li>
+</ul>
+<p>正是因为 $O(n)$ 调度器存在了上述的问题，所以 Linux 内核在两个版本后使用新的 $O(1)$ 调度器替换该实现。</p>
+<h6>#O(1) 调度器</h6>
+<p>$O(1)$ 调度器在 v2.6.0 到 v2.6.22 的 Linux 内核中使用了四年的时间，它能够在常数时间内完成进程调度，你可以在<code>[sched.h</code>](<a href="https://github.com/draveness/linux-archive/blob/master/2.6.8.1/include/linux/sched.h">https://github.com/draveness/linux-archive/blob/master/2.6.8.1/include/linux/sched.h</a>) 和<code>[sched.c</code>](<a href="https://github.com/draveness/linux-">https://github.com/draveness/linux-</a>
+archive/blob/master/2.6.8.1/kernel/sched.c) 中查看 $O(1)$调度器的源代码。因为实现和功能复杂性的增加，调度器的代码行数从 $O(n)$ 的 2100 行增加到 5000 行，它在 $O(n)$调度器的基础上进行了如下的改进9：</p>
+<ul>
+<li>调度器支持了 $O(1)$ 时间复杂度的调度；</li>
+<li>调度器支持了对称多处理（Symmetric multiprocessing，SMP）的扩展性；</li>
+<li>调度器优化了对称多处理的亲和性；</li>
+</ul>
+<h6>##数据结构</h6>
+<p>调度器通过运行队列 <code>[runqueue</code>](<a href="https://github.com/draveness/linux-archive/blob/master/2.6.8.1/kernel/sched.c#L206">https://github.com/draveness/linux-archive/blob/master/2.6.8.1/kernel/sched.c#L206</a>) 和优先数组<code>[prio_array</code>](<a href="https://github.com/draveness/linux-archive/blob/master/2.6.8.1/kernel/sched.c#L193">https://github.com/draveness/linux-archive/blob/master/2.6.8.1/kernel/sched.c#L193</a>) 两个重要的数据结构实现了 $O(1)$的时间复杂度。每一个运行队列都持有两个优先数组，分别存储活跃的和过期的进程数组：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">runqueue</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="w">    </span><span class="n">prio_array_t</span><span class="w"> </span><span class="o">*</span><span class="n">active</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">expired</span><span class="p">,</span><span class="w"> </span><span class="n">arrays</span><span class="p">[</span><span class="mi">2</span><span class="p">];</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="p">}</span>
+
+<span class="k">struct</span><span class="w"> </span><span class="nc">prio_array</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">nr_active</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">bitmap</span><span class="p">[</span><span class="n">BITMAP_SIZE</span><span class="p">];</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">list_head</span><span class="w"> </span><span class="n">queue</span><span class="p">[</span><span class="n">MAX_PRIO</span><span class="p">];</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>优先数组中的 <code>nr_active</code> 表示活跃的进程数，而 <code>bitmap</code> 和 <code>list_head</code> 共同组成了如下图所示的数据结构：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141954-17.png" alt="runqueue-and-prio-array"></p>
+<p><strong>图 18 - 优先数组</strong></p>
+<p>优先数组的 <code>bitmap</code> 总共包含 140 位，每一位都表示对应优先级的进程是否存在。图 17 中的优先数组包含 3 个优先级为 2 的进程和 1个优先级为 5 的进程。每一个优先级的标志位都对应一个 <code>list_head</code> 数组中的链表。$O(1)$ 调度器使用上述的数据结构进行如下所示的调度：</p>
+<ol>
+<li>调用 <code>[sched_find_first_bit</code>](<a href="https://github.com/draveness/linux-archive/blob/master/2.6.8.1/include/asm-x86_64/bitops.h#L436">https://github.com/draveness/linux-archive/blob/master/2.6.8.1/include/asm-x86_64/bitops.h#L436</a>) 按照优先级分配 CPU 资源；</li>
+<li>调用 <code>[schedule</code>](<a href="https://github.com/draveness/linux-archive/blob/master/2.6.8.1/kernel/sched.c#L2268">https://github.com/draveness/linux-archive/blob/master/2.6.8.1/kernel/sched.c#L2268</a>) 从链表头选择进程执行；</li>
+<li>通过 <code>[schedule</code>](<a href="https://github.com/draveness/linux-archive/blob/master/2.6.8.1/kernel/sched.c#L2275-L2285">https://github.com/draveness/linux-archive/blob/master/2.6.8.1/kernel/sched.c#L2275-L2285</a>) 轮询调度同一优先级的进程，该函数在每次选中待执行的进程后，将进程添加到队列的末尾，这样可以保证同一优先级的进程会依次执行（Round-Robin）；</li>
+<li>计时器每隔 1ms 会触发一次 <code>[scheduler_tick</code>](<a href="https://github.com/draveness/linux-archive/blob/master/2.6.8.1/kernel/sched.c#L2057">https://github.com/draveness/linux-archive/blob/master/2.6.8.1/kernel/sched.c#L2057</a>) 函数，如果当前进程的执行时间已经耗尽，就会将其移入过期数组；</li>
+<li>当活跃队列中不存在待运行的进程时，<code>[schedule</code>](<a href="https://github.com/draveness/linux-archive/blob/master/2.6.8.1/kernel/sched.c#L2254-L2264">https://github.com/draveness/linux-archive/blob/master/2.6.8.1/kernel/sched.c#L2254-L2264</a>) 会交换活跃优先数组和过期优先数组；</li>
+</ol>
+<p>上述的这些规则是 $O(1)$ 调度器运行遵守的主要规则，除了上述规则之外，调度器还需要支持抢占、CPU 亲和等功能，不过在这里就不展开介绍了。</p>
+<h6>##本地运行队列</h6>
+<p>全局的运行队列是 $O(n)$ 调度器难以在对称多处理器架构上扩展的主要原因。为了保证运行队列的一致性，调度器在调度时需要获取运行队列的全局锁，随着处理器数量的增加，多个处理器在调度时会导致更多的锁竞争，严重影响调度性能。$O(1)$ 调度器通过引入本地运行队列解决这个问题，不同的 CPU 可以通过<code>[this_rq</code>](<a href="https://github.com/draveness/linux-archive/blob/master/2.6.8.1/kernel/sched.c#L244">https://github.com/draveness/linux-archive/blob/master/2.6.8.1/kernel/sched.c#L244</a>) 获取绑定在当前 CPU上的运行队列，降低了锁的粒度和冲突的可能性。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#define this_rq()        (&amp;__get_cpu_var(runqueues))</span>
+</code></pre></div>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141954-18.png" alt="global-runqueue-and-local-runqueue"></p>
+<p><strong>图 19 - 全局运行队列和本地运行队列</strong></p>
+<p>多个处理器由于不再需要共享全局的运行队列，所以增强了在对称对处理器架构上的扩展性，当我们增加新的处理器时，只需要增加新的运行队列，这种方式不会引入更多的锁冲突。</p>
+<h6>##优先级和时间切片</h6>
+<p>调度器中包含两种不同的优先级计算方式，一种是静态任务优先级，另一种是动态任务优先级。在默认情况下，任务的静态任务优先级都是 0，不过我们可以通过系统调用<code>[nice</code>](<a href="https://github.com/draveness/linux-archive/blob/master/2.6.8.1/kernel/sched.c#L2618">https://github.com/draveness/linux-archive/blob/master/2.6.8.1/kernel/sched.c#L2618</a>) 改变任务的优先级；$O(1)$ 调度器会奖励 I/O密集型任务并惩罚 CPU 密集型任务，它会通过改变任务的静态优先级来完成优先级的动态调整，因为与用户交互的进程时 I/O 密集型的进程，这些进程由于调度器的动态策略会提高自身的优先级，从而提升用户体验。</p>
+<h6>#完全公平调度器</h6>
+<p>完全公平调度器（Completely Fair Scheduler，CFS）是 v2.6.23版本被合入内核的调度器，也是内核的默认进程调度器，它的目的是最大化 CPU 利用率和交互的性能10。Linux 内核版本 v2.6.23 中的 CFS由以下的多个文件组成：</p>
+<ul>
+<li><a href="https://github.com/draveness/linux-archive/blob/master/2.6.23/include/linux/sched.h">include/linux/sched.h</a></li>
+<li><a href="https://github.com/draveness/linux-archive/blob/master/2.6.23/kernel/sched_stats.h">kernel/sched_stats.h</a></li>
+<li><a href="https://github.com/draveness/linux-archive/blob/master/2.6.23/kernel/sched.c">kernel/sched.c</a></li>
+<li><a href="https://github.com/draveness/linux-archive/blob/master/2.6.23/kernel/sched_fair.c">kernel/sched_fair.c</a></li>
+<li><a href="https://github.com/draveness/linux-archive/blob/master/2.6.23/kernel/sched_idletask.c">kernel/sched_idletask.c</a></li>
+<li><a href="https://github.com/draveness/linux-archive/blob/master/2.6.23/kernel/sched_rt.c">kernel/sched_rt.c</a></li>
+</ul>
+<p>通过 CFS 的名字我们就能发现，该调度器的能为不同的进程提供完全公平性。一旦某些进程受到了不公平的待遇，调度器就会运行这些进程，从而维持所有进程运行时间的公平性。这种保证公平性的方式与『水多了加面，面多了加水』有一些相似：</p>
+<ol>
+<li>调度器会查找运行队列中受到最不公平待遇的进程，并为进程分配计算资源，分配的计算资源是与其他资源运行时间的差值加上最小能够运行的时间单位；</li>
+<li>进程运行结束之后发现运行队列中又有了其他的进程受到了最不公平的待遇，调度器又会运行新的进程；</li>
+<li>…</li>
+</ol>
+<p>调度器算法不断计算各个进程的运行时间并依次调度队列中的受到最不公平对待的进程，保证各个进程的运行时间差不会大于最小运行的时间单位。</p>
+<h6>##数据结构</h6>
+<p>虽然我们还是会延用运行队列这一术语，但是 CFS 的内部已经不再使用队列来存储进程了，<code>[cfs_rq</code>](<a href="https://github.com/draveness/linux-archive/blob/master/2.6.23/kernel/sched.c#L180">https://github.com/draveness/linux-archive/blob/master/2.6.23/kernel/sched.c#L180</a>) 是用来管理待运行进程的新结构体，该结构体会使用红黑树（Red-black tree）替代链表：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">cfs_rq</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">load_weight</span><span class="w"> </span><span class="n">load</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">nr_running</span><span class="p">;</span>
+<span class="w">    </span><span class="n">s64</span><span class="w"> </span><span class="n">fair_clock</span><span class="p">;</span>
+<span class="w">    </span><span class="n">u64</span><span class="w"> </span><span class="n">exec_clock</span><span class="p">;</span>
+<span class="w">    </span><span class="n">s64</span><span class="w"> </span><span class="n">wait_runtime</span><span class="p">;</span>
+<span class="w">    </span><span class="n">u64</span><span class="w"> </span><span class="n">sleeper_bonus</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">wait_runtime_overruns</span><span class="p">,</span><span class="w"> </span><span class="n">wait_runtime_underruns</span><span class="p">;</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">rb_root</span><span class="w"> </span><span class="n">tasks_timeline</span><span class="p">;</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">rb_node</span><span class="w"> </span><span class="o">*</span><span class="n">rb_leftmost</span><span class="p">;</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">rb_node</span><span class="w"> </span><span class="o">*</span><span class="n">rb_load_balance_curr</span><span class="p">;</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">sched_entity</span><span class="w"> </span><span class="o">*</span><span class="n">curr</span><span class="p">;</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">rq</span><span class="w"> </span><span class="o">*</span><span class="n">rq</span><span class="p">;</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">list_head</span><span class="w"> </span><span class="n">leaf_cfs_rq_list</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>红黑树（Red-black tree）是平衡的二叉搜索树11，红黑树的增删改查操作的最坏时间复杂度为 $O(\logn)$，也就是树的高度，树中最左侧的节点 <code>rb_leftmost</code> 运行的时间最短，也是下一个待运行的进程。</p>
+<blockquote><p>注：在最新版本的 CFS 实现中，内核使用虚拟运行时间 vruntime 替代了等待时间，但是基本的调度原理和排序方式没有太多变化。</p>
+</blockquote>
+<h6>##调度过程</h6>
+<p>CFS 的调度过程还是由 <a href="https://github.com/draveness/linux-archive/blob/master/2.6.23/kernel/sched.c#L3470">schedule</a> 函数完成的，该函数的执行过程可以分成以下几个步骤：</p>
+<ol>
+<li>关闭当前 CPU 的抢占功能；</li>
+<li>如果当前 CPU 的运行队列中不存在任务，调用 <code>[idle_balance</code>](<a href="https://github.com/draveness/linux-archive/blob/master/2.6.23/kernel/sched.c#L2870">https://github.com/draveness/linux-archive/blob/master/2.6.23/kernel/sched.c#L2870</a>) 从其他 CPU 的运行队列中取一部分执行；</li>
+<li>调用 <code>[pick_next_task</code>](<a href="https://github.com/draveness/linux-archive/blob/master/2.6.23/kernel/sched.c#L3439">https://github.com/draveness/linux-archive/blob/master/2.6.23/kernel/sched.c#L3439</a>) 选择红黑树中优先级最高的任务；</li>
+<li>调用 <code>[context_switch</code>](<a href="https://github.com/draveness/linux-archive/blob/master/2.6.23/kernel/sched.c#L1860">https://github.com/draveness/linux-archive/blob/master/2.6.23/kernel/sched.c#L1860</a>) 切换运行的上下文，包括寄存器的状态和堆栈；</li>
+<li>重新开启当前 CPU 的抢占功能；</li>
+</ol>
+<p>CFS 的调度过程与 $O(1)$ 调度器十分类似，当前调度器与前者的区别只是增加了可选的工作窃取机制并改变了底层的数据结构。</p>
+<h6>##调度类</h6>
+<p>CFS 中的调度类是比较有趣的概念，调度类可以决定进程的调度策略。每个调度类都包含一组负责调度的函数，调度类由如下所示的<code>[sched_class</code>](<a href="https://github.com/draveness/linux-archive/blob/master/2.6.23/include/linux/sched.h#L855">https://github.com/draveness/linux-archive/blob/master/2.6.23/include/linux/sched.h#L855</a>) 结构体表示：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">sched_class</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">sched_class</span><span class="w"> </span><span class="o">*</span><span class="n">next</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">enqueue_task</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">rq</span><span class="w"> </span><span class="o">*</span><span class="n">rq</span><span class="p">,</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">task_struct</span><span class="w"> </span><span class="o">*</span><span class="n">p</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">wakeup</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">dequeue_task</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">rq</span><span class="w"> </span><span class="o">*</span><span class="n">rq</span><span class="p">,</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">task_struct</span><span class="w"> </span><span class="o">*</span><span class="n">p</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">sleep</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">yield_task</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">rq</span><span class="w"> </span><span class="o">*</span><span class="n">rq</span><span class="p">,</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">task_struct</span><span class="w"> </span><span class="o">*</span><span class="n">p</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">check_preempt_curr</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">rq</span><span class="w"> </span><span class="o">*</span><span class="n">rq</span><span class="p">,</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">task_struct</span><span class="w"> </span><span class="o">*</span><span class="n">p</span><span class="p">);</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">task_struct</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">pick_next_task</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">rq</span><span class="w"> </span><span class="o">*</span><span class="n">rq</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">put_prev_task</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">rq</span><span class="w"> </span><span class="o">*</span><span class="n">rq</span><span class="p">,</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">task_struct</span><span class="w"> </span><span class="o">*</span><span class="n">p</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="nf">long</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">load_balance</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">rq</span><span class="w"> </span><span class="o">*</span><span class="n">this_rq</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">this_cpu</span><span class="p">,</span>
+<span class="w">        </span><span class="k">struct</span><span class="w"> </span><span class="nc">rq</span><span class="w"> </span><span class="o">*</span><span class="n">busiest</span><span class="p">,</span>
+<span class="w">        </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">max_nr_move</span><span class="p">,</span><span class="w"> </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">max_load_move</span><span class="p">,</span>
+<span class="w">        </span><span class="k">struct</span><span class="w"> </span><span class="nc">sched_domain</span><span class="w"> </span><span class="o">*</span><span class="n">sd</span><span class="p">,</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="n">cpu_idle_type</span><span class="w"> </span><span class="n">idle</span><span class="p">,</span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="o">*</span><span class="n">all_pinned</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="o">*</span><span class="n">this_best_prio</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">set_curr_task</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">rq</span><span class="w"> </span><span class="o">*</span><span class="n">rq</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">task_tick</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">rq</span><span class="w"> </span><span class="o">*</span><span class="n">rq</span><span class="p">,</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">task_struct</span><span class="w"> </span><span class="o">*</span><span class="n">p</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">task_new</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">rq</span><span class="w"> </span><span class="o">*</span><span class="n">rq</span><span class="p">,</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">task_struct</span><span class="w"> </span><span class="o">*</span><span class="n">p</span><span class="p">);</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>调度类中包含任务的初始化、入队和出队等函数，这里的设计与面向对象中的设计稍微有些相似。内核中包含<code>SCHED_NORMAL</code>、<code>SCHED_BATCH</code>、<code>SCHED_IDLE</code>、<code>SCHED_FIFO</code> 和 <code>SCHED_RR</code>调度类，这些不同的调度类分别实现了 <code>[sched_class</code>](<a href="https://github.com/draveness/linux-archive/blob/master/2.6.23/include/linux/sched.h#L855">https://github.com/draveness/linux-archive/blob/master/2.6.23/include/linux/sched.h#L855</a>) 中的函数以提供不同的调度行为。</p>
+<h6>小结</h6>
+<p>本节介绍了操作系统调度器的设计原理以及演进的历史，从 2007 年合入 CFS 到现在已经过去了很长时间，<a href="https://github.com/torvalds/linux/tree/master/kernel/sched">目前的调度器</a>12也变得更加复杂，社区也在不断改进进程调度器。</p>
+<p>我们可以从 Linux调度器的演进的过程看到主流系统架构的变化，最初几十行代码的调度器就能完成基本的调度功能，而现在要使用几万行代码来完成复杂的调度，保证系统的低延时和高吞吐量。</p>
+<p>由于篇幅有限，我们很难对操作系统的调度器进行面面俱到的分析，你可以在 <a href="https://github.com/draveness/linux-archive">这里</a> 找到作者使用的 Linux 源代码，亲自动手分析不同版本的进程调度器。</p>
+<h6>延伸阅读</h6>
+<ul>
+<li><a href="https://www.quora.com/What-is-long-term-scheduler-short-term-scheduler-and-mid-term-term-scheduler-in-OS">What is long term scheduler, short term scheduler and mid term term scheduler in OS?</a></li>
+<li><a href="https://dev.to/satorutakeuchi/a-brief-history-of-the-linux-kernel-s-process-scheduler-the-very-first-scheduler-v0-01-9e4">A brief history of the Linux Kernel’s process scheduler: The very first scheduler, v0.01</a></li>
+<li><a href="https://github.com/bdaehlie/linux-cpu-scheduler-docs/blob/master/linux_cpu_scheduler.pdf">Understanding the Linux 2.6.8.1 CPU Scheduler</a></li>
+<li><a href="https://www.kernel.org/doc/html/latest/scheduler/sched-design-CFS.html">CFS Scheduler</a></li>
+<li><a href="https://developer.ibm.com/tutorials/l-completely-fair-scheduler/">Inside the Linux 2.6 Completely Fair Scheduler</a></li>
+<li><a href="https://web.archive.org/web/20110223082612/http://blogs.computerworld.com/17371/the_linux_desktop_may_soon_be_a_lot_faster">The Linux desktop may soon be a lot faster</a></li>
+<li><a href="https://lwn.net/Articles/230501/">Modular Scheduler Core and Completely Fair Scheduler</a></li>
+<li><a href="https://www.ece.ubc.ca/~sasha/papers/eurosys16-final29.pdf">The Linux Scheduler: A Decade of Wasted Cores</a></li>
+</ul>
+<h5>Go 语言</h5>
+<p>Go 语言是诞生自 2009 年的编程语言，相信很多人对 Go 语言的印象都是语法简单，能够支撑高并发的服务。语法简单是编程语言的顶层设计哲学，而语言的高并发支持依靠的是运行时的调度器（Runtime Scheduler），这也是本节将要研究的内容。</p>
+<p>对 Go 语言稍微有了解的人都知道，通信顺序进程（Communicating sequential processes，CSP）13影响着 Go 语言的并发模型，其中的 Goroutine 和 Channel 分别表示实体和用于通信的媒介。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141955-19.png" alt="go-and-erlang"></p>
+<p><strong>图 20 - Go 和 Erlang 的并发模型</strong></p>
+<p>『不要通过共享内存来通信，我们应该使用通信来共享内存』不只是 Go 语言鼓励的设计哲学，更为古老的 Erlang 语言其实也遵循了同样的设计，但是Erlang 选择使用了 Actor 模型14，我们在这里就不介绍 CSP 和 Actor的区别和联系的，感兴趣的读者可以在推荐阅读和应引用中找到相关资源。</p>
+<h6>设计与演进</h6>
+<p>今天的 Go 语言调度器有着优异的性能，但是如果我们回头看 Go 语言的 0.x 版本的调度器就会发现最初的调度器不仅实现非常简陋，也无法支撑高并发的服务。调度器经过几个大版本的迭代才有今天的优异性能，几个不同版本的调度器引入了不同的改进，也存在不同的缺陷:</p>
+<ul>
+<li>单线程调度器 · <a href="https://github.com/golang/go/blob/96824000ed89d13665f6f24ddc10b3bf812e7f47/src/runtime/proc.c">0.x</a><ul>
+<li>只包含 40 多行代码；</li>
+<li>程序中只能存在一个活跃线程，由 G-M 模型组成；</li>
+</ul>
+</li>
+<li>多线程调度器 · <a href="https://github.com/golang/go/blob/go1.0.1/src/pkg/runtime/proc.c">1.0</a><ul>
+<li>允许运行多线程的程序；</li>
+<li>全局锁导致竞争严重；</li>
+</ul>
+</li>
+<li>任务窃取调度器 · <a href="https://github.com/golang/go/blob/779c45a50700bda0f6ec98429720802e6c1624e8/src/pkg/runtime/proc.c">1.1</a><ul>
+<li>引入了处理器 P，构成了目前的 <strong>G-M-P</strong> 模型；</li>
+<li>在处理器 P 的基础上实现了基于<strong>工作窃取</strong>的调度器；</li>
+<li>在某些情况下，Goroutine 不会让出线程，进而造成饥饿问题；</li>
+<li>时间过长的垃圾回收（Stop-the-world，STW）会导致程序长时间无法工作；</li>
+</ul>
+</li>
+<li>抢占式调度器 · <a href="https://github.com/golang/go/blob/go1.2/src/pkg/runtime/proc.c">1.2</a> ~ 至今 <ul>
+<li>基于协作的抢占式调度器 - 1.2 ~ 1.13 <ul>
+<li>通过编译器在函数调用时插入<strong>抢占检查</strong>指令，在函数调用时检查当前 Goroutine 是否发起了抢占请求，实现基于协作的抢占式调度；</li>
+<li>Goroutine 可能会因为垃圾回收和循环长时间占用资源导致程序暂停；</li>
+</ul>
+</li>
+<li>基于信号的抢占式调度器 - 1.14 ~ 至今 <ul>
+<li>实现<strong>基于信号的真抢占式调度</strong>；</li>
+<li>垃圾回收在扫描栈时会触发抢占调度；</li>
+<li>抢占的时间点不够多，还不能覆盖全部的边缘情况；</li>
+</ul>
+</li>
+</ul>
+</li>
+<li>非均匀存储访问调度器 · 提案 <ul>
+<li>对运行时的各种资源进行分区；</li>
+<li>实现非常复杂，到今天还没有提上日程；</li>
+</ul>
+</li>
+</ul>
+<p>除了多线程、任务窃取和抢占式调度器之外，Go 语言社区目前还有一个非均匀存储访问（Non-uniform memory access，NUMA）调度器的提案，Go语言在未来也有实现该提案的可能。在这一节中，我们将依次介绍不同版本调度器的实现原理以及未来可能会实现的调度器提案。</p>
+<h6>#单线程调度器</h6>
+<p>0.x 版本调度器只包含表示 Goroutine 的 G 和表示线程的 M 两种结构，全局也只有一个线程。我们可以在 <a href="https://github.com/golang/go/commit/96824000ed89d13665f6f24ddc10b3bf812e7f47">clean up scheduler</a> 提交中找到单线程调度器的源代码，在这时 Go 语言的<a href="https://github.com/golang/go/blob/96824000ed89d13665f6f24ddc10b3bf812e7f47/src/runtime/proc.c">调度器</a>还是由 C 语言实现的，调度函数 <code>[runtime.schedule</code>](<a href="https://github.com/golang/go/blob/96824000ed89d13665f6f24ddc10b3bf812e7f47/src/runtime/proc.c#L340">https://github.com/golang/go/blob/96824000ed89d13665f6f24ddc10b3bf812e7f47/src/runtime/proc.c#L340</a>) 也只包含 40 多行代码 ：</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">scheduler</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">G</span><span class="o">*</span><span class="w"> </span><span class="n">gp</span><span class="p">;</span>
+<span class="w">    </span><span class="n">lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">sched</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="p">(</span><span class="n">gosave</span><span class="p">(</span><span class="o">&amp;</span><span class="n">m</span><span class="o">-&gt;</span><span class="n">sched</span><span class="p">)){</span>
+<span class="w">      </span><span class="n">lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">sched</span><span class="p">);</span>
+<span class="w">      </span><span class="n">gp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">m</span><span class="o">-&gt;</span><span class="n">curg</span><span class="p">;</span>
+<span class="w">      </span><span class="k">switch</span><span class="p">(</span><span class="n">gp</span><span class="o">-&gt;</span><span class="n">status</span><span class="p">){</span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="no">Grunnable</span><span class="p">:</span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="no">Grunning</span><span class="p">:</span>
+<span class="w">        </span><span class="n">gp</span><span class="o">-&gt;</span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Grunnable</span><span class="p">;</span>
+<span class="w">        </span><span class="n">gput</span><span class="p">(</span><span class="n">gp</span><span class="p">);</span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span>
+<span class="w">      </span><span class="p">...</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="n">notewakeup</span><span class="p">(</span><span class="o">&amp;</span><span class="n">gp</span><span class="o">-&gt;</span><span class="n">stopped</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">gp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nextgandunlock</span><span class="p">();</span>
+<span class="w">    </span><span class="n">noteclear</span><span class="p">(</span><span class="o">&amp;</span><span class="n">gp</span><span class="o">-&gt;</span><span class="n">stopped</span><span class="p">);</span>
+<span class="w">    </span><span class="n">gp</span><span class="o">-&gt;</span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Grunning</span><span class="p">;</span>
+<span class="w">    </span><span class="n">m</span><span class="o">-&gt;</span><span class="n">curg</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">gp</span><span class="p">;</span>
+<span class="w">    </span><span class="n">g</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">gp</span><span class="p">;</span>
+<span class="w">    </span><span class="n">gogo</span><span class="p">(</span><span class="o">&amp;</span><span class="n">gp</span><span class="o">-&gt;</span><span class="n">sched</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>该函数会遵循如下的过程调度 Goroutine：</p>
+<ol>
+<li>获取调度器的全局锁；</li>
+<li>调用 <code>[runtime.gosave</code>](<a href="https://github.com/golang/go/blob/96824000ed89d13665f6f24ddc10b3bf812e7f47/src/runtime/rt0_amd64.s#L69">https://github.com/golang/go/blob/96824000ed89d13665f6f24ddc10b3bf812e7f47/src/runtime/rt0_amd64.s#L69</a>) 保存栈寄存器和程序计数器；</li>
+<li>调用 <code>[runtime.nextgandunlock</code>](<a href="https://github.com/golang/go/blob/96824000ed89d13665f6f24ddc10b3bf812e7f47/src/runtime/proc.c#L315">https://github.com/golang/go/blob/96824000ed89d13665f6f24ddc10b3bf812e7f47/src/runtime/proc.c#L315</a>) 获取下一个需要运行的 Goroutine 并解锁调度器；</li>
+<li>修改全局线程 <code>m</code> 上要执行的 Goroutine；</li>
+<li>调用 <code>[runtime.gogo</code>](<a href="https://github.com/golang/go/blob/96824000ed89d13665f6f24ddc10b3bf812e7f47/src/runtime/rt0_amd64.s#L69">https://github.com/golang/go/blob/96824000ed89d13665f6f24ddc10b3bf812e7f47/src/runtime/rt0_amd64.s#L69</a>) 函数运行最新的 Goroutine；</li>
+</ol>
+<p>虽然这个单线程调度器的唯一优点就是<strong>能运行</strong>，但是这次提交已经包含了 G 和 M 两个重要的数据结构，也建立了 Go 语言调度器的框架。</p>
+<h6>#多线程调度器</h6>
+<p>Go 语言在 1.0 版本正式发布时就支持了多线程的调度器，与上一个版本几乎不可用的调度器相比，Go语言团队在这一阶段实现了从不可用到可用的跨越。我们可以在 <code>[pkg/runtime/proc.c</code>](<a href="https://github.com/golang/go/blob/go1.0.1/src/pkg/runtime/proc.c">https://github.com/golang/go/blob/go1.0.1/src/pkg/runtime/proc.c</a>) 文件中找到 1.0.1 版本的调度器，多线程版本的调度函数 <code>[runtime.schedule</code>](<a href="https://github.com/golang/go/blob/go1.0.1/src/pkg/runtime/proc.c#L838">https://github.com/golang/go/blob/go1.0.1/src/pkg/runtime/proc.c#L838</a>) 包含 70 多行代码，我们在这里保留了该函数的核心逻辑：</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">schedule</span><span class="p">(</span><span class="n">G</span><span class="w"> </span><span class="o">*</span><span class="n">gp</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">schedlock</span><span class="p">();</span>
+<span class="w">    </span><span class="k">if</span><span class="p">(</span><span class="n">gp</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">nil</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">gp</span><span class="o">-&gt;</span><span class="n">m</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nil</span><span class="p">;</span>
+<span class="w">      </span><span class="n">uint32</span><span class="w"> </span><span class="n">v</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">runtime</span><span class="err">·</span><span class="n">xadd</span><span class="p">(</span><span class="o">&amp;</span><span class="n">runtime</span><span class="err">·</span><span class="n">sched</span><span class="p">.</span><span class="n">atomic</span><span class="p">,</span><span class="w"> </span><span class="mi">-1</span><span class="o">&lt;&lt;</span><span class="n">mcpuShift</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="p">(</span><span class="n">atomic_mcpu</span><span class="p">(</span><span class="n">v</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">maxgomaxprocs</span><span class="p">)</span>
+<span class="w">        </span><span class="n">runtime</span><span class="err">·</span><span class="n">throw</span><span class="p">(</span><span class="s">&quot;negative mcpu in scheduler&quot;</span><span class="p">);</span>
+<span class="w">      </span><span class="k">switch</span><span class="p">(</span><span class="n">gp</span><span class="o">-&gt;</span><span class="n">status</span><span class="p">){</span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="no">Grunning</span><span class="p">:</span>
+<span class="w">        </span><span class="n">gp</span><span class="o">-&gt;</span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Grunnable</span><span class="p">;</span>
+<span class="w">        </span><span class="n">gput</span><span class="p">(</span><span class="n">gp</span><span class="p">);</span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="p">...:</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="p">...</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">gp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nextgandunlock</span><span class="p">();</span>
+<span class="w">    </span><span class="n">gp</span><span class="o">-&gt;</span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Grunning</span><span class="p">;</span>
+<span class="w">    </span><span class="n">m</span><span class="o">-&gt;</span><span class="n">curg</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">gp</span><span class="p">;</span>
+<span class="w">    </span><span class="n">gp</span><span class="o">-&gt;</span><span class="n">m</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">m</span><span class="p">;</span>
+<span class="w">    </span><span class="n">runtime</span><span class="err">·</span><span class="n">gogo</span><span class="p">(</span><span class="o">&amp;</span><span class="n">gp</span><span class="o">-&gt;</span><span class="n">sched</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>整体的逻辑与单线程调度器没有太多区别，因为我们的程序中可能同时存在多个活跃线程，所以多线程调度器引入了 <code>GOMAXPROCS</code>变量帮助我们灵活控制程序中的最大处理器数，即活跃线程数。</p>
+<p>多线程调度器的主要问题是调度时的锁竞争会严重浪费资源，<a href="http://golang.org/s/go11sched">Scalable Go Scheduler Design Doc</a> 中对调度器做的性能测试发现 14% 的时间都花费在 <code>[runtime.futex</code>](<a href="https://github.com/golang/go/blob/2fffba7fe19690e038314d17a117d6b87979c89f/src/pkg/runtime/os_linux.h#L9">https://github.com/golang/go/blob/2fffba7fe19690e038314d17a117d6b87979c89f/src/pkg/runtime/os_linux.h#L9</a>) 上15，该调度器有以下问题需要解决：</p>
+<ol>
+<li>调度器和锁是全局资源，所有的调度状态都是中心化存储的，锁竞争问严重；</li>
+<li>线程需要经常互相传递可运行的 Goroutine，引入了大量的延迟；</li>
+<li>每个线程都需要处理内存缓存，导致大量的内存占用并影响数据局部性（Data locality）；</li>
+<li>系统调用频繁阻塞和解除阻塞正在运行的线程，增加了额外开销；</li>
+</ol>
+<p>这里的全局锁问题和 Linux 操作系统调度器在早期遇到的问题比较相似，解决的方案也都大同小异。</p>
+<h6>#任务窃取调度器</h6>
+<p>2012 年 Google 的工程师 Dmitry Vyukov 在 <a href="http://golang.org/s/go11sched">Scalable Go Scheduler Design Doc</a> 中指出了现有多线程调度器的问题并在多线程调度器上提出了两个改进的手段：</p>
+<ol>
+<li>在当前的 G-M 模型中引入了处理器 P，增加中间层；</li>
+<li>在处理器 P 的基础上实现基于工作窃取的调度器；</li>
+</ol>
+<p>基于任务窃取的 Go 语言调度器使用了沿用至今的 G-M-P 模型，我们能在 <a href="https://github.com/golang/go/commit/779c45a50700bda0f6ec98429720802e6c1624e8">runtime: improved scheduler</a> 提交中找到任务窃取调度器刚被实现时的<a href="https://github.com/golang/go/blob/779c45a50700bda0f6ec98429720802e6c1624e8/src/pkg/runtime/proc.c">源代码</a>，调度器的 <code>[runtime.schedule</code>](<a href="https://github.com/golang/go/blob/779c45a50700bda0f6ec98429720802e6c1624e8/src/pkg/runtime/proc.c#L1039">https://github.com/golang/go/blob/779c45a50700bda0f6ec98429720802e6c1624e8/src/pkg/runtime/proc.c#L1039</a>) 函数在这个版本的调度器中反而更简单了：</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">schedule</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">G</span><span class="w"> </span><span class="o">*</span><span class="n">gp</span><span class="p">;</span>
+<span class="nl">top</span><span class="p">:</span>
+<span class="w">    </span><span class="k">if</span><span class="p">(</span><span class="n">runtime</span><span class="err">·</span><span class="n">gcwaiting</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">gcstopm</span><span class="p">();</span>
+<span class="w">        </span><span class="k">goto</span><span class="w"> </span><span class="n">top</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">gp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">runqget</span><span class="p">(</span><span class="n">m</span><span class="o">-&gt;</span><span class="n">p</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="p">(</span><span class="n">gp</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">nil</span><span class="p">)</span>
+<span class="w">        </span><span class="n">gp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">findrunnable</span><span class="p">();</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="w">    </span><span class="n">execute</span><span class="p">(</span><span class="n">gp</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<ol>
+<li>如果当前运行时在等待垃圾回收，调用 <code>[runtime.gcstopm</code>](<a href="https://github.com/golang/go/blob/779c45a50700bda0f6ec98429720802e6c1624e8/src/pkg/runtime/proc.c#L907">https://github.com/golang/go/blob/779c45a50700bda0f6ec98429720802e6c1624e8/src/pkg/runtime/proc.c#L907</a>) 函数；</li>
+<li>调用 <code>[runtime.runqget</code>](<a href="https://github.com/golang/go/blob/779c45a50700bda0f6ec98429720802e6c1624e8/src/pkg/runtime/proc.c#L2075">https://github.com/golang/go/blob/779c45a50700bda0f6ec98429720802e6c1624e8/src/pkg/runtime/proc.c#L2075</a>) 和 <code>[runtime.findrunnable</code>](<a href="https://github.com/golang/go/blob/779c45a50700bda0f6ec98429720802e6c1624e8/src/pkg/runtime/proc.c#L956">https://github.com/golang/go/blob/779c45a50700bda0f6ec98429720802e6c1624e8/src/pkg/runtime/proc.c#L956</a>) 从本地或者全局的运行队列中获取待执行的 Goroutine；</li>
+<li>调用 <code>[runtime.execute</code>](<a href="https://github.com/golang/go/blob/779c45a50700bda0f6ec98429720802e6c1624e8/src/pkg/runtime/proc.c#L929">https://github.com/golang/go/blob/779c45a50700bda0f6ec98429720802e6c1624e8/src/pkg/runtime/proc.c#L929</a>) 函数在当前线程 M 上运行 Goroutine；</li>
+</ol>
+<p>当前处理器本地的运行队列中不包含 Goroutine 时，调用 <code>[findrunnable</code>](<a href="https://github.com/golang/go/blob/779c45a50700bda0f6ec98429720802e6c1624e8/src/pkg/runtime/proc.c#L956)函数会触发工作窃取，从其它的处理器的队列中随机获取一些">https://github.com/golang/go/blob/779c45a50700bda0f6ec98429720802e6c1624e8/src/pkg/runtime/proc.c#L956)函数会触发工作窃取，从其它的处理器的队列中随机获取一些</a> Goroutine。</p>
+<p>运行时 G-M-P 模型中引入的处理器 P 是线程和 Goroutine 的中间层，我们从它的结构体中就能看到处理器与 M 和 G 的关系：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">P</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">Lock</span><span class="p">;</span>
+<span class="w">    </span><span class="n">uint32</span><span class="w">    </span><span class="n">status</span><span class="p">;</span>
+<span class="w">    </span><span class="n">P</span><span class="o">*</span><span class="w">    </span><span class="n">link</span><span class="p">;</span>
+<span class="w">    </span><span class="n">uint32</span><span class="w">    </span><span class="n">tick</span><span class="p">;</span>
+<span class="w">    </span><span class="n">M</span><span class="o">*</span><span class="w">    </span><span class="n">m</span><span class="p">;</span>
+<span class="w">    </span><span class="n">MCache</span><span class="o">*</span><span class="w">    </span><span class="n">mcache</span><span class="p">;</span>
+<span class="w">    </span><span class="n">G</span><span class="o">**</span><span class="w">    </span><span class="n">runq</span><span class="p">;</span>
+<span class="w">    </span><span class="n">int32</span><span class="w">    </span><span class="n">runqhead</span><span class="p">;</span>
+<span class="w">    </span><span class="n">int32</span><span class="w">    </span><span class="n">runqtail</span><span class="p">;</span>
+<span class="w">    </span><span class="n">int32</span><span class="w">    </span><span class="n">runqsize</span><span class="p">;</span>
+<span class="w">    </span><span class="n">G</span><span class="o">*</span><span class="w">    </span><span class="n">gfree</span><span class="p">;</span>
+<span class="w">    </span><span class="n">int32</span><span class="w">    </span><span class="n">gfreecnt</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>处理器持有一个由可运行的 Goroutine 组成的运行队列 <code>runq</code>，还反向持有一个线程。调度器在调度时会从处理器的队列中选择队列头的Goroutine 放到线程 M 上执行。如下所示的图片展示了 Go 语言中的线程 M、处理器 P 和 Goroutine 的关系。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141955-20.png" alt="golang-gmp"></p>
+<p><strong>图 21 - G-M-P 模型</strong></p>
+<p>基于工作窃取的多线程调度器将每一个线程绑定到了独立的 CPU上，这些线程会被不同处理器管理，不同的处理器通过工作窃取对任务进行再分配实现任务的平衡，也能提升调度器和 Go 语言程序的整体性能，今天所有的 Go语言服务都受益于这一改动。</p>
+<h6>#抢占式调度器</h6>
+<p>对 Go 语言并发模型的修改提升了调度器的性能，但是 1.1 版本中的调度器仍然不支持抢占式调度，程序只能依靠 Goroutine 主动让出 CPU资源才能触发调度。Go 语言的调度器在 1.2 版本16中引入基于协作的抢占式调度解决下面的问题17：</p>
+<ul>
+<li>某些 Goroutine 可以长时间占用线程，造成其它 Goroutine 的饥饿；</li>
+<li>垃圾回收需要暂停整个程序（Stop-the-world，STW），最长可能需要几分钟的时间18，导致整个程序无法工作；</li>
+</ul>
+<p>1.2 版本的抢占式调度虽然能够缓解这个问题，但是它实现的抢占式调度是基于协作的，在之后很长的一段时间里 Go 语言的调度器都有一些无法被抢占的边缘情况，例如：for 循环或者垃圾回收长时间占用线程，这些问题中的一部分直到 1.14 才被基于信号的抢占式调度解决。</p>
+<h6>##基于协作的抢占式调度</h6>
+<p>我们可以在 <code>[pkg/runtime/proc.c</code>](<a href="https://github.com/golang/go/blob/go1.2/src/pkg/runtime/proc.c">https://github.com/golang/go/blob/go1.2/src/pkg/runtime/proc.c</a>) 文件中找到引入基于协作的抢占式调度后的调度器。Go 语言会在分段栈的机制上实现抢占调度，利用编译器在分段栈上插入的函数，所有Goroutine 在函数调用时都有机会进入运行时检查是否需要执行抢占。Go 团队通过以下的多个提交实现该特性：</p>
+<ul>
+<li><a href="f5becf4233bd12506cbfcb9cbc04b5968ac11ae0">runtime: add stackguard0 to G</a><ul>
+<li>为 Goroutine 引入 <code>stackguard0</code> 字段，该字段被设置成 <code>StackPreempt</code> 意味着当前 Goroutine 发出了抢占请求；</li>
+</ul>
+</li>
+<li><a href="https://github.com/golang/go/commit/354ec5166668cae9be899c82e20c38b32ae3b867">runtime: introduce preemption function (not used for now)</a><ul>
+<li>引入抢占函数 <code>[runtime.preemptone</code>](<a href="https://github.com/golang/go/blob/354ec5166668cae9be899c82e20c38b32ae3b867/src/pkg/runtime/proc.c#L2103">https://github.com/golang/go/blob/354ec5166668cae9be899c82e20c38b32ae3b867/src/pkg/runtime/proc.c#L2103</a>) 和 <code>[runtime.preemptall</code>](<a href="https://github.com/golang/go/blob/354ec5166668cae9be899c82e20c38b32ae3b867/src/pkg/runtime/proc.c#L2083)，这两个函数会改变">https://github.com/golang/go/blob/354ec5166668cae9be899c82e20c38b32ae3b867/src/pkg/runtime/proc.c#L2083)，这两个函数会改变</a> Goroutine 的 <code>stackguard0</code> 字段发出抢占请求；</li>
+<li>定义抢占请求 <code>StackPreempt</code>；</li>
+</ul>
+</li>
+<li><a href="https://github.com/golang/go/commit/1e112cd59f560129f4dca5e9af7c3cbc445850b6">runtime: preempt goroutines for GC</a><ul>
+<li>在 <code>[runtime.stoptheworld</code>](<a href="https://github.com/golang/go/blob/1e112cd59f560129f4dca5e9af7c3cbc445850b6/src/pkg/runtime/proc.c#L356">https://github.com/golang/go/blob/1e112cd59f560129f4dca5e9af7c3cbc445850b6/src/pkg/runtime/proc.c#L356</a>) 中调用 <code>[runtime.preemptall</code>](<a href="https://github.com/golang/go/blob/354ec5166668cae9be899c82e20c38b32ae3b867/src/pkg/runtime/proc.c#L2083">https://github.com/golang/go/blob/354ec5166668cae9be899c82e20c38b32ae3b867/src/pkg/runtime/proc.c#L2083</a>) 设置所有处理器上正在运行的 Goroutine 的 <code>stackguard0</code> 为 <code>StackPreempt</code>；</li>
+<li>在 <code>[runtime.newstack</code>](<a href="https://github.com/golang/go/blob/1e112cd59f560129f4dca5e9af7c3cbc445850b6/src/pkg/runtime/stack.c#L192">https://github.com/golang/go/blob/1e112cd59f560129f4dca5e9af7c3cbc445850b6/src/pkg/runtime/stack.c#L192</a>) 函数中增加抢占的代码，当 <code>stackguard0</code> 等于 <code>StackPreempt</code> 时触发调度器抢占让出线程；</li>
+</ul>
+</li>
+<li><a href="https://github.com/golang/go/commit/bc31bcccd3b94ec8dd324e523c4c7ae9180b937f">runtime: preempt long-running goroutines</a><ul>
+<li>在系统监控中，如果一个 Goroutine 的运行时间超过 10ms，就会调用 <code>[runtime.retake</code>](<a href="https://github.com/golang/go/blob/bc31bcccd3b94ec8dd324e523c4c7ae9180b937f/src/pkg/runtime/proc.c#L2122">https://github.com/golang/go/blob/bc31bcccd3b94ec8dd324e523c4c7ae9180b937f/src/pkg/runtime/proc.c#L2122</a>) 和 <code>[runtime.preemptone</code>](<a href="https://github.com/golang/go/blob/354ec5166668cae9be899c82e20c38b32ae3b867/src/pkg/runtime/proc.c#L2103)；">https://github.com/golang/go/blob/354ec5166668cae9be899c82e20c38b32ae3b867/src/pkg/runtime/proc.c#L2103)；</a></li>
+</ul>
+</li>
+<li><a href="https://github.com/golang/go/commit/f9066fe1c0a7181242f77d8534e0b6e112c982a9">runtime: more reliable preemption</a><ul>
+<li>修复 Goroutine 因为周期性执行非阻塞的 CGO 或者系统调用不会被抢占的问题；</li>
+</ul>
+</li>
+</ul>
+<p>上面的多个提交实现了抢占式调度，但是还缺少最关键的一个环节 — 编译器如何在函数调用前插入函数，我们能在非常古老的提交 <a href="https://github.com/golang/go/commit/7343e03c433ebb0c302ed97bf832ad3bd3170de6">runtime: stack growth adjustments, cleanup</a> 中找到编译器插入函数的出行，最新版本的 Go 语言会通过 <code>[cmd/internal/obj/x86.stacksplit</code>](<a href="https://github.com/golang/go/blob/b2482e481722357c6daa98ef074d8eaf8ac4baf3/src/cmd/internal/obj/x86/obj6.go#L974">https://github.com/golang/go/blob/b2482e481722357c6daa98ef074d8eaf8ac4baf3/src/cmd/internal/obj/x86/obj6.go#L974</a>) 插入 <code>[runtime.morestack</code>](<a href="https://github.com/golang/go/blob/a38a917aee626a9b9d5ce2b93964f586bf759ea0/src/runtime/asm_386.s#L432">https://github.com/golang/go/blob/a38a917aee626a9b9d5ce2b93964f586bf759ea0/src/runtime/asm_386.s#L432</a>) 函数，该函数可能会调用 <code>[runtime.newstack</code>](<a href="https://github.com/golang/go/blob/0f251028585e052a3d34dcce83b05d8aa9ba170e/src/runtime/stack.go#L918">https://github.com/golang/go/blob/0f251028585e052a3d34dcce83b05d8aa9ba170e/src/runtime/stack.go#L918</a>) 触发抢占。从上面的多个提交中，我们能归纳出基于协作的抢占式调度的工作原理：</p>
+<ol>
+<li>编译器会在调用函数前插入 <code>[runtime.morestack</code>](<a href="https://github.com/golang/go/blob/1e112cd59f560129f4dca5e9af7c3cbc445850b6/src/pkg/runtime/stack.c#L192)；">https://github.com/golang/go/blob/1e112cd59f560129f4dca5e9af7c3cbc445850b6/src/pkg/runtime/stack.c#L192)；</a></li>
+<li>Go 语言运行时会在垃圾回收暂停程序、系统监控发现 Goroutine 运行超过 10ms 时发出抢占请求 <code>StackPreempt</code>；</li>
+<li>当发生函数调用时，可能会执行编译器插入的 <code>[runtime.morestack</code>](<a href="https://github.com/golang/go/blob/1e112cd59f560129f4dca5e9af7c3cbc445850b6/src/pkg/runtime/stack.c#L192">https://github.com/golang/go/blob/1e112cd59f560129f4dca5e9af7c3cbc445850b6/src/pkg/runtime/stack.c#L192</a>) 函数，它调用的 <code>[runtime.newstack</code>](<a href="https://github.com/golang/go/blob/1e112cd59f560129f4dca5e9af7c3cbc445850b6/src/pkg/runtime/stack.c#L192">https://github.com/golang/go/blob/1e112cd59f560129f4dca5e9af7c3cbc445850b6/src/pkg/runtime/stack.c#L192</a>) 会检查 Goroutine 的 <code>stackguard0</code> 字段是否为 <code>StackPreempt</code>；</li>
+<li>如果 <code>stackguard0</code> 是 <code>StackPreempt</code>，就会触发抢占让出当前线程；</li>
+</ol>
+<p>这种实现方式虽然增加了运行时的复杂度，但是实现相对简单，也没有带来过多的额外开销，总体来看还是比较成功的实现，也在 Go 语言中使用了 10几个版本。因为这里的抢占是通过编译器插入函数实现的，还是需要函数调用作为入口才能触发抢占，所以这是一种<strong>协作式的抢占式调度</strong>。</p>
+<h6>##基于信号的抢占式调度</h6>
+<p>基于协作的抢占式调度虽然实现巧妙，但是并不完备，我们能在 <a href="https://github.com/golang/go/issues/24543">runtime: non-cooperative goroutine preemption</a> 中找到一些遗留问题：</p>
+<ul>
+<li><a href="https://github.com/golang/go/issues/10958">runtime: tight loops should be preemptible #10958</a></li>
+<li><a href="https://github.com/golang/go/issues/17174">An empty for{} will block large slice allocation in another goroutine, even with GOMAXPROCS &gt; 1 ? #17174</a></li>
+<li><a href="https://github.com/golang/go/issues/15442">runtime: tight loop hangs process completely after some time #15442</a></li>
+<li>…</li>
+</ul>
+<p>Go 语言在 1.14 版本中实现了非协作的抢占式调度，在实现的过程中我们重构已有的逻辑并为 Goroutine 增加新的状态和字段来支持抢占。Go团队通过下面的一系列提交实现了这一功能，我们可以按时间顺序分析相关提交理解它的工作原理：</p>
+<ul>
+<li><a href="https://github.com/golang/go/commit/3f834114ab617eb7b414cb12e7ca8085b5fe3a5c">runtime: add general suspendG/resumeG</a><ul>
+<li>挂起 Goroutine 的过程是在垃圾回收的栈扫描时完成的，我们通过 <code>[runtime.suspendG</code>](<a href="https://github.com/golang/go/blob/dcdee153cd61de47d0cabd6729a17673536b0418/src/runtime/preempt.go#L105">https://github.com/golang/go/blob/dcdee153cd61de47d0cabd6729a17673536b0418/src/runtime/preempt.go#L105</a>) 和 <code>[runtime.resumeG</code>](<a href="https://github.com/golang/go/blob/dcdee153cd61de47d0cabd6729a17673536b0418/src/runtime/preempt.go#L258">https://github.com/golang/go/blob/dcdee153cd61de47d0cabd6729a17673536b0418/src/runtime/preempt.go#L258</a>) 两个函数重构栈扫描这一过程；</li>
+<li>调用 <code>[runtime.suspendG</code>](<a href="https://github.com/golang/go/blob/dcdee153cd61de47d0cabd6729a17673536b0418/src/runtime/preempt.go#L105">https://github.com/golang/go/blob/dcdee153cd61de47d0cabd6729a17673536b0418/src/runtime/preempt.go#L105</a>) 函数时会将处于运行状态的 Goroutine 的 <code>preemptStop</code> 标记成 <code>true</code>；</li>
+<li>调用 <code>[runtime.preemptPark</code>](<a href="https://github.com/golang/go/blob/64c22b70bf00e15615bb17c29f808b55bc339682/src/runtime/proc.go#L2739">https://github.com/golang/go/blob/64c22b70bf00e15615bb17c29f808b55bc339682/src/runtime/proc.go#L2739</a>) 函数可以挂起当前 Goroutine、将其状态更新成 <code>_Gpreempted</code> 并触发调度器的重新调度，该函数能够交出线程控制权；</li>
+</ul>
+</li>
+<li><a href="https://github.com/golang/go/commit/a3ffb0d9eb948409c0898c6b1803401c9bc68ed4">runtime: asynchronous preemption function for x86</a><ul>
+<li>在 x86 架构上增加异步抢占的函数 <code>[runtime.asyncPreempt</code>](<a href="https://github.com/golang/go/blob/cdb7fd6b06937aa38a7a4921f567697144448073/src/runtime/preempt_386.s#L6">https://github.com/golang/go/blob/cdb7fd6b06937aa38a7a4921f567697144448073/src/runtime/preempt_386.s#L6</a>) 和 <code>[runtime.asyncPreempt2</code>](<a href="https://github.com/golang/go/blob/dcdee153cd61de47d0cabd6729a17673536b0418/src/runtime/preempt.go#L302)；">https://github.com/golang/go/blob/dcdee153cd61de47d0cabd6729a17673536b0418/src/runtime/preempt.go#L302)；</a></li>
+</ul>
+</li>
+<li><a href="https://github.com/golang/go/commit/62e53b79227dafc6afcd92240c89acb8c0e1dd56">runtime: use signals to preempt Gs for suspendG</a><ul>
+<li>支持通过向线程发送信号的方式暂停运行的 Goroutine；</li>
+<li>在 <code>[runtime.sighandler</code>](<a href="https://github.com/golang/go/blob/67f0f83216930e053441500e2b28c3fa2b667581/src/runtime/signal_unix.go#L507">https://github.com/golang/go/blob/67f0f83216930e053441500e2b28c3fa2b667581/src/runtime/signal_unix.go#L507</a>) 函数中注册 <code>SIGURG</code> 信号的处理函数 <code>[runtime.doSigPreempt</code>](<a href="https://github.com/golang/go/blob/67f0f83216930e053441500e2b28c3fa2b667581/src/runtime/signal_unix.go#L326)；">https://github.com/golang/go/blob/67f0f83216930e053441500e2b28c3fa2b667581/src/runtime/signal_unix.go#L326)；</a></li>
+<li>实现 <code>[runtime.preemptM</code>](<a href="https://github.com/golang/go/blob/67f0f83216930e053441500e2b28c3fa2b667581/src/runtime/signal_unix.go#L346">https://github.com/golang/go/blob/67f0f83216930e053441500e2b28c3fa2b667581/src/runtime/signal_unix.go#L346</a>) 函数，它可以通过 <code>SIGURG</code> 信号向线程发送抢占请求；</li>
+</ul>
+</li>
+<li><a href="https://github.com/golang/go/commit/177a36a5dc29854489825e8113ecb2cbb7070690">runtime: implement async scheduler preemption</a><ul>
+<li>修改 <code>[runtime.preemptone</code>](<a href="https://github.com/golang/go/blob/64c22b70bf00e15615bb17c29f808b55bc339682/src/runtime/proc.go#L4666">https://github.com/golang/go/blob/64c22b70bf00e15615bb17c29f808b55bc339682/src/runtime/proc.go#L4666</a>) 函数的实现，加入异步抢占的逻辑；</li>
+</ul>
+</li>
+</ul>
+<p>目前的抢占式调度也只会在垃圾回收扫描任务时触发，我们可以梳理一下上述代码实现的抢占式调度过程：</p>
+<ol>
+<li>程序启动时，在 <code>[runtime.sighandler</code>](<a href="https://github.com/golang/go/blob/62e53b79227dafc6afcd92240c89acb8c0e1dd56/src/runtime/signal_unix.go#L494">https://github.com/golang/go/blob/62e53b79227dafc6afcd92240c89acb8c0e1dd56/src/runtime/signal_unix.go#L494</a>) 函数中注册 <code>SIGURG</code> 信号的处理函数 <code>[runtime.doSigPreempt</code>](<a href="https://github.com/golang/go/blob/62e53b79227dafc6afcd92240c89acb8c0e1dd56/src/runtime/signal_unix.go#L326)；">https://github.com/golang/go/blob/62e53b79227dafc6afcd92240c89acb8c0e1dd56/src/runtime/signal_unix.go#L326)；</a></li>
+<li>在触发垃圾回收的栈扫描时会调用 <code>[runtime.suspendG</code>](<a href="https://github.com/golang/go/blob/dcdee153cd61de47d0cabd6729a17673536b0418/src/runtime/preempt.go#L105">https://github.com/golang/go/blob/dcdee153cd61de47d0cabd6729a17673536b0418/src/runtime/preempt.go#L105</a>) 挂起 Goroutine，该函数会执行下面的逻辑： <ol>
+<li>将 <code>_Grunning</code> 状态的 Goroutine 标记成可以被抢占，即将 <code>preemptStop</code> 设置成 <code>true</code>；</li>
+<li>调用 <code>[runtime.preemptM</code>](<a href="https://github.com/golang/go/blob/67f0f83216930e053441500e2b28c3fa2b667581/src/runtime/signal_unix.go#L346">https://github.com/golang/go/blob/67f0f83216930e053441500e2b28c3fa2b667581/src/runtime/signal_unix.go#L346</a>) 触发抢占；</li>
+</ol>
+</li>
+<li><code>[runtime.preemptM</code>](<a href="https://github.com/golang/go/blob/67f0f83216930e053441500e2b28c3fa2b667581/src/runtime/signal_unix.go#L346">https://github.com/golang/go/blob/67f0f83216930e053441500e2b28c3fa2b667581/src/runtime/signal_unix.go#L346</a>) 会调用 <code>[runtime.signalM</code>](<a href="https://github.com/golang/go/blob/8e0be05ec7c369387c0ed3c9cf37968c6d3afbbd/src/runtime/os_linux.go#L483">https://github.com/golang/go/blob/8e0be05ec7c369387c0ed3c9cf37968c6d3afbbd/src/runtime/os_linux.go#L483</a>) 向线程发送信号 <code>SIGURG</code>；</li>
+<li>操作系统会中断正在运行的线程并执行预先注册的信号处理函数 <code>[runtime.doSigPreempt</code>](<a href="https://github.com/golang/go/blob/62e53b79227dafc6afcd92240c89acb8c0e1dd56/src/runtime/signal_unix.go#L326)；">https://github.com/golang/go/blob/62e53b79227dafc6afcd92240c89acb8c0e1dd56/src/runtime/signal_unix.go#L326)；</a></li>
+<li><code>[runtime.doSigPreempt</code>](<a href="https://github.com/golang/go/blob/62e53b79227dafc6afcd92240c89acb8c0e1dd56/src/runtime/signal_unix.go#L326">https://github.com/golang/go/blob/62e53b79227dafc6afcd92240c89acb8c0e1dd56/src/runtime/signal_unix.go#L326</a>) 函数会处理抢占信号，获取当前的 SP 和 PC 寄存器并调用 <code>[runtime.sigctxt.pushCall</code>](<a href="https://github.com/golang/go/blob/7955ecebfc85851d43913f9358fa5f6a7bbb7c59/src/runtime/signal_386.go#L69)；">https://github.com/golang/go/blob/7955ecebfc85851d43913f9358fa5f6a7bbb7c59/src/runtime/signal_386.go#L69)；</a></li>
+<li><code>[runtime.sigctxt.pushCall</code>](<a href="https://github.com/golang/go/blob/7955ecebfc85851d43913f9358fa5f6a7bbb7c59/src/runtime/signal_386.go#L69">https://github.com/golang/go/blob/7955ecebfc85851d43913f9358fa5f6a7bbb7c59/src/runtime/signal_386.go#L69</a>) 会修改寄存器并在程序回到用户态时执行 <code>[runtime.asyncPreempt</code>](<a href="https://github.com/golang/go/blob/cdb7fd6b06937aa38a7a4921f567697144448073/src/runtime/preempt_386.s#L6)；">https://github.com/golang/go/blob/cdb7fd6b06937aa38a7a4921f567697144448073/src/runtime/preempt_386.s#L6)；</a></li>
+<li>汇编指令 <code>[runtime.asyncPreempt</code>](<a href="https://github.com/golang/go/blob/cdb7fd6b06937aa38a7a4921f567697144448073/src/runtime/preempt_386.s#L6">https://github.com/golang/go/blob/cdb7fd6b06937aa38a7a4921f567697144448073/src/runtime/preempt_386.s#L6</a>) 会调用运行时函数 <code>[runtime.asyncPreempt2</code>](<a href="https://github.com/golang/go/blob/dcdee153cd61de47d0cabd6729a17673536b0418/src/runtime/preempt.go#L302)；">https://github.com/golang/go/blob/dcdee153cd61de47d0cabd6729a17673536b0418/src/runtime/preempt.go#L302)；</a></li>
+<li><code>[runtime.asyncPreempt2</code>](<a href="https://github.com/golang/go/blob/dcdee153cd61de47d0cabd6729a17673536b0418/src/runtime/preempt.go#L302">https://github.com/golang/go/blob/dcdee153cd61de47d0cabd6729a17673536b0418/src/runtime/preempt.go#L302</a>) 会调用 <code>[runtime.preemptPark</code>](<a href="https://github.com/golang/go/blob/64c22b70bf00e15615bb17c29f808b55bc339682/src/runtime/proc.go#L2739)；">https://github.com/golang/go/blob/64c22b70bf00e15615bb17c29f808b55bc339682/src/runtime/proc.go#L2739)；</a></li>
+<li><code>[runtime.preemptPark</code>](<a href="https://github.com/golang/go/blob/64c22b70bf00e15615bb17c29f808b55bc339682/src/runtime/proc.go#L2739">https://github.com/golang/go/blob/64c22b70bf00e15615bb17c29f808b55bc339682/src/runtime/proc.go#L2739</a>) 会修改当前 Goroutine 的状态到 <code>_Gpreempted</code> 并调用 <code>[runtime.schedule</code>](<a href="https://github.com/golang/go/blob/8d7be1e3c9a98191f8c900087025c5e78b73d962/src/runtime/proc.go#L2482">https://github.com/golang/go/blob/8d7be1e3c9a98191f8c900087025c5e78b73d962/src/runtime/proc.go#L2482</a>) 让当前函数陷入休眠并让出线程，调度器会选择其它的 Goroutine 继续执行；</li>
+</ol>
+<p>上述 9 个步骤展示了基于信号的抢占式调度的执行过程。除了分析抢占的过程之外，我们还需要讨论一下抢占信号的选择，提案根据以下的四个原因选择
+<code>SIGURG</code> 作为触发异步抢占的信号19；</p>
+<ol>
+<li>该信号需要被调试器透传；</li>
+<li>该信号不会被内部的 libc 库使用并拦截；</li>
+<li>该信号可以随意出现并且不触发任何后果；</li>
+<li>我们需要处理多个平台上的不同信号；</li>
+</ol>
+<p>STW 和栈扫描是一个可以抢占的安全点（Safe-points），所以 Go 语言会在这里先加入抢占功能20。基于信号的抢占式调度只解决了垃圾回收和栈扫描时存在的问题，它到目前为止没有解决全部问题，但是这种真抢占式调度时调度器走向完备的开始，相信在未来我们可以会更多的地方触发抢占。</p>
+<h6>#非均匀内存访问调度器</h6>
+<p>非均匀内存访问（Non-uniform memory access，NUMA）调度器现在只是 Go 语言的提案21，因为该提案过于复杂，而目前的调度器的性能已经足够优异，所以我们暂时没有实现该提案。该提案的原理就是通过拆分全局资源，让各个处理器能够就近获取，减少锁竞争并增加数据的局部性。</p>
+<p>在目前的运行时中，线程、处理器、网络轮询器、运行队列、全局内存分配器状态、内存分配缓存和垃圾收集器都是全局资源。运行时没有保证本地化，也不清楚系统的拓扑结构，部分结构可以提供一定的局部性，但是从全局来看没有这种保证。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141955-21.png" alt="go-numa-scheduler-architecture"></p>
+<p><strong>图 22 - Go 语言 NUMA 调度器</strong></p>
+<p>如上图所示，堆栈、全局运行队列和线程池会按照 NUMA节点进行分区，网络轮询器和计时器会由单独的处理器持有。这种方式虽然能够利用局部性提高调度器的性能，但是本身的实现过于复杂，所以 Go 语言团队还没有着手实现这一提案。</p>
+<h6>小结</h6>
+<p>Go 语言的调度器在最初的几个版本中迅速迭代，但是从 1.2 版本之后调度器就没有太多的变化，直到 1.14 版本引入了真正的抢占式调度才解决了自 1.2 以来一直存在的问题。在可预见的未来，Go 语言的调度器还会进一步演进，增加触发抢占式调度的时间点以减少存在的边缘情况。</p>
+<blockquote><p>本节内容选择<a href="https://draveness.me/golang/">《Go 语言设计与实现》</a>一书中的 <a href="https://draveness.me/golang/docs/part3-runtime/ch06-concurrency/golang-goroutine/">Go语言调度器实现原理</a>，你可以点击链接了解更多与 Go 语言设计与实现原理相关的内容。</p>
+</blockquote>
+<h6>延伸阅读</h6>
+<ul>
+<li><a href="http://jlouisramblings.blogspot.com/2013/01/how-erlang-does-scheduling.html">How Erlang does scheduling</a></li>
+<li><a href="http://www.cs.columbia.edu/~aho/cs6998/reports/12-12-11_DeshpandeSponslerWeiss_GO.pdf">Analysis of the Go runtime scheduler</a></li>
+<li><a href="https://rakyll.org/scheduler/">Go’s work-stealing scheduler</a></li>
+<li><a href="https://github.com/golang/go/commit/7f1ff65c3947b916cc4d0827fd8c1307d7efd7bf">cmd/compile: insert scheduling checks on loop backedges</a></li>
+<li><a href="https://github.com/golang/go/issues/36365">runtime: clean up async preemption loose ends</a></li>
+<li><a href="https://github.com/golang/proposal/blob/master/design/24543-non-cooperative-preemption.md">Proposal: Non-cooperative goroutine preemption</a></li>
+<li><a href="https://github.com/golang/proposal/blob/master/design/24543/conservative-inner-frame.md">Proposal: Conservative inner-frame scanning for non-cooperative goroutine preemption</a></li>
+<li><a href="https://docs.google.com/document/u/0/d/1d3iI2QWURgDIsSR6G2275vMeQ_X7w-qxM2Vp7iGwwuM/pub">NUMA-aware scheduler for Go</a></li>
+<li><a href="http://morsmachine.dk/go-scheduler">The Go scheduler</a></li>
+<li><a href="https://codeburst.io/why-goroutines-are-not-lightweight-threads-7c460c1f155f">Why goroutines are not lightweight threads?</a></li>
+<li><a href="https://www.ardanlabs.com/blog/2018/08/scheduling-in-go-part1.html">Scheduling In Go : Part I - OS Scheduler</a></li>
+<li><a href="https://www.ardanlabs.com/blog/2018/08/scheduling-in-go-part2.html">Scheduling In Go : Part II - Go Scheduler</a></li>
+<li><a href="https://www.ardanlabs.com/blog/2018/12/scheduling-in-go-part3.html">Scheduling In Go : Part III - Concurrency</a></li>
+<li><a href="https://morsmachine.dk/netpoller">The Go netpoller</a></li>
+<li><a href="https://manybutfinite.com/post/system-calls/">System Calls Make the World Go Round</a></li>
+<li><a href="https://syscalls.kernelgrok.com">Linux Syscall Reference</a></li>
+</ul>
+<h5>Kubernetes</h5>
+<p>Kubernetes 是生产级别的容器调度和管理系统，在过去的一段时间中，Kubernetes 迅速占领市场，成为容器编排领域的事实标准。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141955-22.png" alt="container-orchestration"></p>
+<p><strong>图 23 - 容器编排系统演进</strong></p>
+<p>Kubernetes 是希腊语『舵手』的意思，它最开始由 Google 的几位软件工程师创立，深受公司内部 Borg 和 Omega项目22的影响，很多设计都是从 Borg 中借鉴的，同时也对 Borg 的缺陷进行了改进，Kubernetes 目前是 Cloud Native Computing Foundation (CNCF) 的项目，也是很多公司管理分布式系统的解决方案23。</p>
+<p>调度器（Scheduler）是 Kubernetes 的核心组件，它的主要功能是为待运行的工作负载 Pod 绑定运行的节点Node。与其他调度场景不同，虽然资源利用率在 Kubernetes 中也非常重要，但是这只是 Kubernetes关注的一个因素，它需要在容器编排这个场景中支持非常多并且复杂的业务需求，除了考虑 CPU和内存是否充足，还需要考虑其他的领域特定场景，例如：两个服务不能占用同一台机器的相同端口、几个服务要运行在同一台机器上，根据节点的类型调度资源等。</p>
+<p>这些复杂的业务场景和调度需求使 Kubernetes调度器的内部设计与其他调度器完全不同，但是作为用户应用层的调度器，我们却能从中学到很多有用的模式和设计。接下来，本节将介绍 Kubernetes中调度器的设计以及演变。</p>
+<h6>设计与演进</h6>
+<p>Kubernetes 调度器的演变过程比较简单，我们可以将它的演进过程分成以下的两个阶段：</p>
+<ul>
+<li>基于谓词和优先级的调度器（Predicates and Priorities） · <a href="https://github.com/kubernetes/kubernetes/blob/v1.0.0/plugin/pkg/scheduler">v1.0.0</a> ~ <a href="https://github.com/kubernetes/kubernetes/tree/v1.14.0/pkg/scheduler">v1.14.0</a></li>
+<li>基于调度框架的调度器（Scheduling Framework） · <a href="https://github.com/kubernetes/kubernetes/tree/v1.15.0/pkg/scheduler">v1.15.0</a> ~ <a href="https://github.com/kubernetes/kubernetes/blob/master/pkg/scheduler">至今</a></li>
+</ul>
+<p>Kubernetes 从 v1.0.0 版本发布到 v1.14.0，总共 15 个版本一直都在使用谓词和优先级来管理不同的调度算法，知道 v1.15.0开始引入调度框架（Alpha 功能）来重构现有的调度器。我们在这里将以<a href="https://github.com/kubernetes/kubernetes/tree/v1.14.0/pkg/scheduler">v1.14.0</a>版本的谓词和优先级和<a href="https://github.com/kubernetes/kubernetes/tree/v1.17.0/pkg/scheduler">v1.17.0</a>版本的调度框架分析调度器的演进过程。</p>
+<h6>#谓词和优先级算法</h6>
+<p>谓词（Predicates）和优先级（Priorities）调度器是从 Kubernetes v1.0.0 发布时就存在的模式，<a href="https://github.com/kubernetes/kubernetes/tree/v1.14.0/pkg/scheduler">v1.14.0</a>的最后实现与最开始的设计也没有太多区别。然而从 v1.0.0 到 v1.14.0 期间也引入了很多改进：</p>
+<ul>
+<li>调度器扩展（Scheduler Extender） · v1.2.0 - <a href="https://github.com/kubernetes/kubernetes/commit/cadc24e9fd7f2bccc972df4d67985aa33a4cd823">Scheduler extension</a><ul>
+<li>通过调用外部调度器扩展的方式改变调度器的决策；</li>
+</ul>
+</li>
+<li>Map-Reduce 优先级算法 · v1.5.0 - <a href="https://github.com/kubernetes/kubernetes/commit/33c710adf06ec844ed65127aaab14fc2bc2bf79c">MapReduce-like scheduler priority functions</a><ul>
+<li>为调度器的优先级算法支持 Map-Reduce 的计算方式，通过引入可并行的 Map 阶段优化调度器的计算性能；</li>
+</ul>
+</li>
+<li>调度器迁移 · v1.10.0 - <a href="https://github.com/kubernetes/kubernetes/commit/30b89d830b7fd0827576853d6a0db44b66a90d3d">Move scheduler code out of plugin directory</a><ul>
+<li>从 <code>plugin/pkg/scheduler</code> 移到 <code>pkg/scheduler</code>；</li>
+<li><code>kube-scheduler</code> 成为对外直接提供的可执行文件；</li>
+</ul>
+</li>
+</ul>
+<p>谓词和优先级都是 Kubernetes 在调度系统中提供的两个抽象，谓词算法使用 <code>[FitPredicate</code>](<a href="https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/scheduler/algorithm/predicates/predicates.go#L154">https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/scheduler/algorithm/predicates/predicates.go#L154</a>) 类型，而优先级算法使用 <code>[PriorityMapFunction</code>](<a href="https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/scheduler/algorithm/priorities/types.go#L28">https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/scheduler/algorithm/priorities/types.go#L28</a>) 和 <code>[PriorityReduceFunction</code>](<a href="https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/scheduler/algorithm/priorities/types.go#L34">https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/scheduler/algorithm/priorities/types.go#L34</a>) 两个类型：</p>
+<div class="highlight"><pre><code><span></span><span class="n">type</span><span class="w"> </span><span class="n">FitPredicate</span><span class="w"> </span><span class="n">func</span><span class="p">(</span><span class="n">pod</span><span class="w"> </span><span class="o">*</span><span class="n">v1</span><span class="p">.</span><span class="n">Pod</span><span class="p">,</span><span class="w"> </span><span class="n">meta</span><span class="w"> </span><span class="n">PredicateMetadata</span><span class="p">,</span><span class="w"> </span><span class="n">nodeInfo</span><span class="w"> </span><span class="o">*</span><span class="n">schedulernodeinfo</span><span class="p">.</span><span class="n">NodeInfo</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="kt">bool</span><span class="p">,</span><span class="w"> </span><span class="p">[]</span><span class="n">PredicateFailureReason</span><span class="p">,</span><span class="w"> </span><span class="n">error</span><span class="p">)</span>
+<span class="n">type</span><span class="w"> </span><span class="n">PriorityMapFunction</span><span class="w"> </span><span class="n">func</span><span class="p">(</span><span class="n">pod</span><span class="w"> </span><span class="o">*</span><span class="n">v1</span><span class="p">.</span><span class="n">Pod</span><span class="p">,</span><span class="w"> </span><span class="n">meta</span><span class="w"> </span><span class="n">interface</span><span class="p">{},</span><span class="w"> </span><span class="n">nodeInfo</span><span class="w"> </span><span class="o">*</span><span class="n">schedulernodeinfo</span><span class="p">.</span><span class="n">NodeInfo</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="n">schedulerapi</span><span class="p">.</span><span class="n">HostPriority</span><span class="p">,</span><span class="w"> </span><span class="n">error</span><span class="p">)</span>
+<span class="n">type</span><span class="w"> </span><span class="n">PriorityReduceFunction</span><span class="w"> </span><span class="n">func</span><span class="p">(</span><span class="n">pod</span><span class="w"> </span><span class="o">*</span><span class="n">v1</span><span class="p">.</span><span class="n">Pod</span><span class="p">,</span><span class="w"> </span><span class="n">meta</span><span class="w"> </span><span class="n">interface</span><span class="p">{},</span><span class="w"> </span><span class="n">nodeNameToInfo</span><span class="w"> </span><span class="n">map</span><span class="p">[</span><span class="n">string</span><span class="p">]</span><span class="o">*</span><span class="n">schedulernodeinfo</span><span class="p">.</span><span class="n">NodeInfo</span><span class="p">,</span><span class="w"> </span><span class="n">result</span><span class="w"> </span><span class="n">schedulerapi</span><span class="p">.</span><span class="n">HostPriorityList</span><span class="p">)</span><span class="w"> </span><span class="n">error</span>
+</code></pre></div>
+<p>因为 v1.14.0 也是作者刚开始参与 Kubernetes 开发的第一个版本，所以对当时的设计印象也非常深刻，v1.14.0 的 Kubernetes调度器会使用 <code>[PriorityMapFunction</code>](<a href="https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/scheduler/algorithm/priorities/types.go#L28">https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/scheduler/algorithm/priorities/types.go#L28</a>) 和 <code>[PriorityReduceFunction</code>](<a href="https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/scheduler/algorithm/priorities/types.go#L34">https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/scheduler/algorithm/priorities/types.go#L34</a>) 这种 Map-Reduce的方式计算所有节点的分数并从其中选择分数最高的节点。下图展示了，v1.14.0 版本中调度器的执行过程：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141955-23.png" alt="predicates-and-priorities-scheduling"></p>
+<p><strong>图 24 - 谓词和优先级算法</strong></p>
+<p>如上图所示，我们假设调度器中存在一个谓词算法和一个 Map-Reduce 优先级算法，当我们为一个 Pod 在 6 个节点中选择最合适的一个时，6个节点会先经过谓词的筛选，图中的谓词算法会过滤掉一半的节点，剩余的 3 个节点经过 Map 和 Reduce 两个过程分别得到了 5、10 和 5分，最终调度器就会选择分数最高的 4 号节点。</p>
+<p><code>[genericScheduler.Schedule</code>](<a href="https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/scheduler/core/generic_scheduler.go#L162">https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/scheduler/core/generic_scheduler.go#L162</a>) 是 Kubernetes 为 Pod选择节点的方法，我们省略了该方法中用于检查边界条件以及打点的代码：</p>
+<div class="highlight"><pre><code><span></span><span class="n">func</span><span class="w"> </span><span class="p">(</span><span class="n">g</span><span class="w"> </span><span class="o">*</span><span class="n">genericScheduler</span><span class="p">)</span><span class="w"> </span><span class="n">Schedule</span><span class="p">(</span><span class="n">pod</span><span class="w"> </span><span class="o">*</span><span class="n">v1</span><span class="p">.</span><span class="n">Pod</span><span class="p">,</span><span class="w"> </span><span class="n">nodeLister</span><span class="w"> </span><span class="n">algorithm</span><span class="p">.</span><span class="n">NodeLister</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="n">result</span><span class="w"> </span><span class="n">ScheduleResult</span><span class="p">,</span><span class="w"> </span><span class="n">err</span><span class="w"> </span><span class="n">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">nodes</span><span class="p">,</span><span class="w"> </span><span class="n">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="n">nodeLister</span><span class="p">.</span><span class="n">List</span><span class="p">()</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">nil</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">result</span><span class="p">,</span><span class="w"> </span><span class="n">err</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">len</span><span class="p">(</span><span class="n">nodes</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">result</span><span class="p">,</span><span class="w"> </span><span class="n">ErrNoNodesAvailable</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">filteredNodes</span><span class="p">,</span><span class="w"> </span><span class="n">failedPredicateMap</span><span class="p">,</span><span class="w"> </span><span class="n">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="n">g</span><span class="p">.</span><span class="n">findNodesThatFit</span><span class="p">(</span><span class="n">pod</span><span class="p">,</span><span class="w"> </span><span class="n">nodes</span><span class="p">)</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">nil</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">result</span><span class="p">,</span><span class="w"> </span><span class="n">err</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="w">    </span><span class="n">priorityList</span><span class="p">,</span><span class="w"> </span><span class="n">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="n">PrioritizeNodes</span><span class="p">(</span><span class="n">pod</span><span class="p">,</span><span class="w"> </span><span class="n">g</span><span class="p">.</span><span class="n">nodeInfoSnapshot</span><span class="p">.</span><span class="n">NodeInfoMap</span><span class="p">,</span><span class="w"> </span><span class="p">...,</span><span class="w"> </span><span class="n">g</span><span class="p">.</span><span class="n">prioritizers</span><span class="p">,</span><span class="w"> </span><span class="n">filteredNodes</span><span class="p">,</span><span class="w"> </span><span class="n">g</span><span class="p">.</span><span class="n">extenders</span><span class="p">)</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">nil</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">result</span><span class="p">,</span><span class="w"> </span><span class="n">err</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">host</span><span class="p">,</span><span class="w"> </span><span class="n">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="n">g</span><span class="p">.</span><span class="n">selectHost</span><span class="p">(</span><span class="n">priorityList</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">ScheduleResult</span><span class="p">{</span>
+<span class="w">      </span><span class="nl">SuggestedHost</span><span class="p">:</span><span class="w">  </span><span class="n">host</span><span class="p">,</span>
+<span class="w">      </span><span class="nl">EvaluatedNodes</span><span class="p">:</span><span class="w"> </span><span class="n">len</span><span class="p">(</span><span class="n">filteredNodes</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">len</span><span class="p">(</span><span class="n">failedPredicateMap</span><span class="p">),</span>
+<span class="w">      </span><span class="nl">FeasibleNodes</span><span class="p">:</span><span class="w">  </span><span class="n">len</span><span class="p">(</span><span class="n">filteredNodes</span><span class="p">),</span>
+<span class="w">    </span><span class="p">},</span><span class="w"> </span><span class="n">err</span>
+<span class="p">}</span>
+</code></pre></div>
+<ol>
+<li>从 <code>NodeLister</code> 中获取当前系统中存在的全部节点；</li>
+<li>调用 <code>[genericScheduler.findNodesThatFit</code>](<a href="https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/scheduler/core/generic_scheduler.go#L435">https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/scheduler/core/generic_scheduler.go#L435</a>) 方法并行执行全部的谓词算法过滤节点； <ol>
+<li>谓词算法会根据传入的 Pod 和 Node 对节点进行过滤，这时会过滤掉端口号冲突、资源不足的节点；</li>
+<li>调用所有调度器扩展的 <code>Filter</code> 方法辅助过滤；</li>
+</ol>
+</li>
+<li>调用 <code>[PrioritizeNodes</code>](<a href="https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/scheduler/core/generic_scheduler.go#L645">https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/scheduler/core/generic_scheduler.go#L645</a>) 函数为所有的节点打分； <ol>
+<li>以 Pod 和 Node 作为参数并发执行同一优先级的 <code>[PriorityMapFunction</code>](<a href="https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/scheduler/algorithm/priorities/types.go#L28">https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/scheduler/algorithm/priorities/types.go#L28</a>);</li>
+<li>以 Pod 和优先级返回的 Node 到分数的映射为参数调用 <code>[PriorityReduceFunction</code>](<a href="https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/scheduler/algorithm/priorities/types.go#L34">https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/scheduler/algorithm/priorities/types.go#L34</a>) 函数；</li>
+<li>调用所有调度器扩展的 <code>Prioritize</code> 方法；</li>
+<li>将所有分数按照权重相加后返回从 Node 到分数的映射；</li>
+</ol>
+</li>
+<li>调用 <code>[genericScheduler.selectHost</code>](<a href="https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/scheduler/core/generic_scheduler.go#L264">https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/scheduler/core/generic_scheduler.go#L264</a>) 方法选择得分最高的节点；</li>
+</ol>
+<p>这就是使用谓词和优先级算法时的调度过程，我们在这里省略了调度器的优先队列中的排序，出现调度错误时的抢占以及 Pod 持久存储卷绑定到 Node 上的过程，只保留了核心的调度逻辑。</p>
+<h6>#调度框架</h6>
+<p>Kubernetes 调度框架（Scheduling Framework）是 Babak Salamat 和 Jonathan Basseri 2018年提出的最新调度器设计24，这个提案明确了 Kubernetes 中的各个调度阶段，提供了设计良好的基于插件的接口。调度框架认为 Kubernetes中目前存在调度（Scheduling）和绑定（Binding）两个循环：</p>
+<ul>
+<li>调度循环在多个 Node 中为 Pod 选择最合适的 Node；</li>
+<li>绑定循环将调度决策应用到集群中，包括绑定 Pod 和 Node、绑定持久存储等工作；</li>
+</ul>
+<p>除了两个大循环之外，调度框架中还包含 <code>QueueSort</code>、<code>PreFilter</code>、<code>Filter</code>、<code>PostFilter</code>、<code>Score</code>、<code>Reserve</code>、<code>Permit</code>、<code>PreBind</code>、<code>Bind</code>、<code>PostBind</code> 和 <code>Unreserve</code> 11 个扩展点（Extension Point），这些扩展点会在调度的过程中触发，它们的运行顺序如下：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141955-24.png" alt="kubernetes-scheduling-queue"></p>
+<p><strong>图 25 - Kubernetes 调度框架</strong></p>
+<p>我们可以将调度器中的 <code>[Scheduler.scheduleOne</code>](<a href="https://github.com/kubernetes/kubernetes/blob/b7a1d61462be9006eed62be3a08f5bb222798624/pkg/scheduler/scheduler.go#L561">https://github.com/kubernetes/kubernetes/blob/b7a1d61462be9006eed62be3a08f5bb222798624/pkg/scheduler/scheduler.go#L561</a>) 方法作为入口分析基于调度框架的调度器实现，每次调用该方法都会完成一遍为 Pod 调度节点的全部流程，我们将该函数的执行过程分成调度和绑定两个阶段，首先是调度器的调度阶段：</p>
+<div class="highlight"><pre><code><span></span><span class="n">func</span><span class="w"> </span><span class="p">(</span><span class="n">sched</span><span class="w"> </span><span class="o">*</span><span class="n">Scheduler</span><span class="p">)</span><span class="w"> </span><span class="n">scheduleOne</span><span class="p">(</span><span class="n">ctx</span><span class="w"> </span><span class="n">context</span><span class="p">.</span><span class="n">Context</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nl">fwk</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">sched</span><span class="p">.</span><span class="n">Framework</span>
+<span class="w">    </span><span class="nl">podInfo</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">sched</span><span class="p">.</span><span class="n">NextPod</span><span class="p">()</span>
+<span class="w">    </span><span class="nl">pod</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">podInfo</span><span class="p">.</span><span class="n">Pod</span>
+<span class="w">    </span><span class="nl">state</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">framework</span><span class="p">.</span><span class="n">NewCycleState</span><span class="p">()</span>
+<span class="w">    </span><span class="n">scheduleResult</span><span class="p">,</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="n">sched</span><span class="p">.</span><span class="n">Algorithm</span><span class="p">.</span><span class="n">Schedule</span><span class="p">(</span><span class="n">schedulingCycleCtx</span><span class="p">,</span><span class="w"> </span><span class="n">state</span><span class="p">,</span><span class="w"> </span><span class="n">pod</span><span class="p">)</span>
+<span class="w">    </span><span class="nl">assumedPod</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">podInfo</span><span class="p">.</span><span class="n">DeepCopy</span><span class="p">().</span><span class="n">Pod</span>
+<span class="w">    </span><span class="n">allBound</span><span class="p">,</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="n">sched</span><span class="p">.</span><span class="n">VolumeBinder</span><span class="p">.</span><span class="n">Binder</span><span class="p">.</span><span class="n">AssumePodVolumes</span><span class="p">(</span><span class="n">assumedPod</span><span class="p">,</span><span class="w"> </span><span class="n">scheduleResult</span><span class="p">.</span><span class="n">SuggestedHost</span><span class="p">)</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">nil</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">sts</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="n">fwk</span><span class="p">.</span><span class="n">RunReservePlugins</span><span class="p">(</span><span class="n">schedulingCycleCtx</span><span class="p">,</span><span class="w"> </span><span class="n">state</span><span class="p">,</span><span class="w"> </span><span class="n">assumedPod</span><span class="p">,</span><span class="w"> </span><span class="n">scheduleResult</span><span class="p">.</span><span class="n">SuggestedHost</span><span class="p">);</span><span class="w"> </span><span class="o">!</span><span class="n">sts</span><span class="p">.</span><span class="n">IsSuccess</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="n">sched</span><span class="p">.</span><span class="n">assume</span><span class="p">(</span><span class="n">assumedPod</span><span class="p">,</span><span class="w"> </span><span class="n">scheduleResult</span><span class="p">.</span><span class="n">SuggestedHost</span><span class="p">);</span><span class="w"> </span><span class="n">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">nil</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">fwk</span><span class="p">.</span><span class="n">RunUnreservePlugins</span><span class="p">(</span><span class="n">schedulingCycleCtx</span><span class="p">,</span><span class="w"> </span><span class="n">state</span><span class="p">,</span><span class="w"> </span><span class="n">assumedPod</span><span class="p">,</span><span class="w"> </span><span class="n">scheduleResult</span><span class="p">.</span><span class="n">SuggestedHost</span><span class="p">)</span>
+<span class="w">      </span><span class="k">return</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="p">}</span>
+</code></pre></div>
+<ol>
+<li>调用内部优先队列的 <code>[MakeNextPodFunc</code>](<a href="https://github.com/kubernetes/kubernetes/blob/4ee00204ae2a7ce631674ededc1745a0341bce71/pkg/scheduler/internal/queue/scheduling_queue.go#L817">https://github.com/kubernetes/kubernetes/blob/4ee00204ae2a7ce631674ededc1745a0341bce71/pkg/scheduler/internal/queue/scheduling_queue.go#L817</a>) 返回的函数从队列中获取下一个等待调度的 Pod，用于维护等待 Pod 的队列会执行 <code>QueueSort</code> 插件；</li>
+<li>调用 <code>[genericScheduler.Schedule</code>](<a href="https://github.com/kubernetes/kubernetes/blob/b7a1d61462be9006eed62be3a08f5bb222798624/pkg/scheduler/core/generic_scheduler.go#L165">https://github.com/kubernetes/kubernetes/blob/b7a1d61462be9006eed62be3a08f5bb222798624/pkg/scheduler/core/generic_scheduler.go#L165</a>) 函数选择节点，该过程会执行 <code>PreFilter</code>、<code>Filter</code>、<code>PostFilter</code>、<code>Score</code> 四个扩展点的插件；</li>
+<li>调用 <code>[framework.RunReservePlugins</code>](<a href="https://github.com/kubernetes/kubernetes/blob/b7a1d61462be9006eed62be3a08f5bb222798624/pkg/scheduler/framework/v1alpha1/framework.go#L690">https://github.com/kubernetes/kubernetes/blob/b7a1d61462be9006eed62be3a08f5bb222798624/pkg/scheduler/framework/v1alpha1/framework.go#L690</a>) 函数运行 <code>Reserve</code> 插件用于保留资源并进入绑定阶段（绑定阶段运行时间较长，避免资源被抢占）； <ul>
+<li>如果运行失败执行，调用 <code>[framework.RunUnreservePlugins</code>](<a href="https://github.com/kubernetes/kubernetes/blob/b7a1d61462be9006eed62be3a08f5bb222798624/pkg/scheduler/framework/v1alpha1/framework.go#L717">https://github.com/kubernetes/kubernetes/blob/b7a1d61462be9006eed62be3a08f5bb222798624/pkg/scheduler/framework/v1alpha1/framework.go#L717</a>) 函数运行 <code>Unreserve</code> 插件；</li>
+</ul>
+</li>
+</ol>
+<p>因为每一次调度决策都会改变上下文，所以该阶段 Kubernetes 需要串行执行。而绑定阶段就是实现调度的过程了，我们会创建一个新的 Goroutine并行执行绑定循环：</p>
+<div class="highlight"><pre><code><span></span><span class="n">func</span><span class="w"> </span><span class="p">(</span><span class="n">sched</span><span class="w"> </span><span class="o">*</span><span class="n">Scheduler</span><span class="p">)</span><span class="w"> </span><span class="n">scheduleOne</span><span class="p">(</span><span class="n">ctx</span><span class="w"> </span><span class="n">context</span><span class="p">.</span><span class="n">Context</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="w">    </span><span class="n">go</span><span class="w"> </span><span class="n">func</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">bindingCycleCtx</span><span class="p">,</span><span class="w"> </span><span class="n">cancel</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="n">context</span><span class="p">.</span><span class="n">WithCancel</span><span class="p">(</span><span class="n">ctx</span><span class="p">)</span>
+<span class="w">      </span><span class="n">defer</span><span class="w"> </span><span class="n">cancel</span><span class="p">()</span>
+<span class="w">      </span><span class="n">fwk</span><span class="p">.</span><span class="n">RunPermitPlugins</span><span class="p">(</span><span class="n">bindingCycleCtx</span><span class="p">,</span><span class="w"> </span><span class="n">state</span><span class="p">,</span><span class="w"> </span><span class="n">assumedPod</span><span class="p">,</span><span class="w"> </span><span class="n">scheduleResult</span><span class="p">.</span><span class="n">SuggestedHost</span><span class="p">)</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="o">!</span><span class="n">allBound</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="n">sched</span><span class="p">.</span><span class="n">bindVolumes</span><span class="p">(</span><span class="n">assumedPod</span><span class="p">)</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">      </span><span class="n">fwk</span><span class="p">.</span><span class="n">RunPreBindPlugins</span><span class="p">(</span><span class="n">bindingCycleCtx</span><span class="p">,</span><span class="w"> </span><span class="n">state</span><span class="p">,</span><span class="w"> </span><span class="n">assumedPod</span><span class="p">,</span><span class="w"> </span><span class="n">scheduleResult</span><span class="p">.</span><span class="n">SuggestedHost</span><span class="p">)</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="n">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="n">sched</span><span class="p">.</span><span class="n">bind</span><span class="p">(</span><span class="n">bindingCycleCtx</span><span class="p">,</span><span class="w"> </span><span class="n">assumedPod</span><span class="p">,</span><span class="w"> </span><span class="n">scheduleResult</span><span class="p">.</span><span class="n">SuggestedHost</span><span class="p">,</span><span class="w"> </span><span class="n">state</span><span class="p">);</span><span class="w"> </span><span class="n">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">nil</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">fwk</span><span class="p">.</span><span class="n">RunUnreservePlugins</span><span class="p">(</span><span class="n">bindingCycleCtx</span><span class="p">,</span><span class="w"> </span><span class="n">state</span><span class="p">,</span><span class="w"> </span><span class="n">assumedPod</span><span class="p">,</span><span class="w"> </span><span class="n">scheduleResult</span><span class="p">.</span><span class="n">SuggestedHost</span><span class="p">)</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">fwk</span><span class="p">.</span><span class="n">RunPostBindPlugins</span><span class="p">(</span><span class="n">bindingCycleCtx</span><span class="p">,</span><span class="w"> </span><span class="n">state</span><span class="p">,</span><span class="w"> </span><span class="n">assumedPod</span><span class="p">,</span><span class="w"> </span><span class="n">scheduleResult</span><span class="p">.</span><span class="n">SuggestedHost</span><span class="p">)</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}()</span>
+<span class="p">}</span>
+</code></pre></div>
+<ol>
+<li>启动一个 Goroutine 并调用 <code>[framework.RunPermitPlugin</code>](<a href="https://github.com/kubernetes/kubernetes/blob/b7a1d61462be9006eed62be3a08f5bb222798624/pkg/scheduler/framework/v1alpha1/framework.go#L744">https://github.com/kubernetes/kubernetes/blob/b7a1d61462be9006eed62be3a08f5bb222798624/pkg/scheduler/framework/v1alpha1/framework.go#L744</a>) 异步运行 <code>Permit</code> 插件，这个阶段可以用来实现批调度器；</li>
+<li>调用 <code>[Scheduler.bindVolumes</code>](<a href="https://github.com/kubernetes/kubernetes/blob/b7a1d61462be9006eed62be3a08f5bb222798624/pkg/scheduler/scheduler.go#L467">https://github.com/kubernetes/kubernetes/blob/b7a1d61462be9006eed62be3a08f5bb222798624/pkg/scheduler/scheduler.go#L467</a>) 将卷先绑定到 Node 上；</li>
+<li>调用 <code>[Scheduler.bind</code>](<a href="https://github.com/kubernetes/kubernetes/blob/b7a1d61462be9006eed62be3a08f5bb222798624/pkg/scheduler/scheduler.go#L509">https://github.com/kubernetes/kubernetes/blob/b7a1d61462be9006eed62be3a08f5bb222798624/pkg/scheduler/scheduler.go#L509</a>) 函数将 Pod 绑定到 Node 上完成调度，绑定的过程会执行 <code>PreBind</code>、<code>Bind</code> 和 <code>PostBind</code> 三个扩展点的插件；</li>
+</ol>
+<p>目前的调度框架在 Kubernetes v1.17.0 版本中还是 Alpha 阶段，很多功能还不明确，为了支持更多、更丰富的场景，在接下来的几个版本还可能会做出很多改进，不过调度框架在很长的一段时间中都会是调度器的核心。</p>
+<h6>小结</h6>
+<p>本节介绍了 Kubernetes 调度器从 v1.0.0 到最新版本中的不同设计，Kubernetes 调度器中总共存在两种不同的设计，一种是基于谓词和优先级算法的调度器，另一种是基于调度框架的调度器。</p>
+<p>很多的业务调度器也需要从多个选项中选出最优的选择，无论是成本最低还是质量最优，我们可以考虑将调度的过程分成过滤和打分两个阶段为调度器建立合适的抽象，过滤阶段会按照需求过滤掉不满足需求的选项，打分阶段可能会按照质量、成本和权重对多个选项进行排序，遵循这种设计思路可以解决很多类似问题。</p>
+<p>目前的 Kubernetes 已经通过调度框架详细地支持了多个阶段的扩展方法，几乎是调度器内部实现的最终形态了。不过随着调度器功能的逐渐复杂，未来可能还会遇到更复杂的调度场景，例如：多租户的调度资源隔离、多调度器等功能，而 Kubernetes 社区也一直都在为构建高性能的调度器而努力。</p>
+<h6>延伸阅读</h6>
+<ul>
+<li><a href="https://queue.acm.org/detail.cfm?id=2898444">Borg, Omega, and Kubernetes</a></li>
+<li><a href="https://github.com/kubernetes/enhancements/blob/master/keps/sig-scheduling/20180409-scheduling-framework.md">Scheduling Framework</a></li>
+<li><a href="https://github.com/kubernetes/enhancements/issues/624">Scheduling Framework #624</a></li>
+<li><a href="https://developer.ibm.com/technologies/containers/articles/creating-a-custom-kube-scheduler/">Create a custom Kubernetes scheduler</a></li>
+<li><a href="https://github.com/kubernetes/kubernetes/blob/cadc24e9fd7f2bccc972df4d67985aa33a4cd823/docs/design/scheduler_extender.md">Scheduler extender Document</a></li>
+</ul>
+<h5>总结</h5>
+<p>从操作系统、编程语言到应用程序，我们在这篇文章中分析了 Linux、Go 语言和 Kubernetes调度器的设计与实现原理，这三个不同的调度器其实有相互依赖的关系：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20200321-141955-25.png" alt="schedulers"></p>
+<p><strong>图 26 - 三层调度器</strong></p>
+<p>如上图所示，Kubernetes 的调度器依赖于 Go 语言的运行时调度器，而 Go 语言的运行时调度器也依赖于 Linux的进程调度器，从上到下离用户越来越远，从下到上越来越关注具体业务。我们在最后通过两个比较分析一下这几个调度器的异同：</p>
+<ol>
+<li>Linux 进程调度器与 Go 语言运行时调度器；</li>
+<li>系统级调度器（Linux 和 Go）与业务调度器（Kubernetes）；</li>
+</ol>
+<p>这是两种不同层面的比较，相信通过不同角度的比较能够让我们对调度器的设计有更深入的认识。</p>
+<h6>Linux 和 Go</h6>
+<p>首先是 Linux 和 Go 语言调度器，这两个调度器的场景都非常相似，它们最终都是要充分利用机器上的 CPU 资源，所以在实现和演进上有很多相似之处：</p>
+<ul>
+<li>调度器的初始版本都非常简单，甚至很简陋，只能支持协作式的调度；</li>
+<li>按照运行队列进行分区，通过工作窃取的方式平衡不同 CPU 或者线程上的运行队列；</li>
+<li>最终都通过某些方式实现了基于信号的抢占式调度，不过 Go 语言的实现并不完善；</li>
+</ul>
+<p>因为场景非常相似，所以它们的目的也非常相似，只是它们调度的任务粒度会有不同，Linux 进程调度器的最小调度单位是线程，而 Go 语言是 Goroutine，与 Linux 进程调度器相比，Go 语言在用户层建立新的模型，实现了另一个调度器，为使用者提供轻量级的调度单位来增强程序的性能，但是它也引入了很多组件来处理系统调用、网络轮询等线程相关的操作，同时组合多个不同粒度的任务导致实现相对复杂。</p>
+<p>Linux 调度器的最终设计引入了调度类的概念，让不同任务的类型分别享受不同的调度策略以此来调和低延时和实时性这个在调度上两难的问题。</p>
+<p>Go 语言的调度器目前刚刚引入了基于信号的抢占式调度，还有很多功能都不完善。除了抢占式调度之外，复杂的 NUMA 调度器提案也可能是未来 Go语言的发展方向。</p>
+<h6>系统和业务</h6>
+<p>如果我们将系统调度器和业务调度器进行对比的话，你会发现两者在设计差别非常大，毕竟它们处于系统的不同层级。系统调度器考虑的是极致的性能，所以它通过分区的方式将运行队列等资源分离，通过降低锁的粒度来降低系统的延迟；而业务调度器关注的是完善的调度功能，调度的性能虽然十分重要，但是一定要建立在满足特定调度需求之上，而因为业务上的调度需求往往都是比较复杂，所以只能做出权衡和取舍。</p>
+<p>正是因为需求的不同，我们会发现不同调度器的演进过程也完全不同。系统调度器都会先充分利用资源，降低系统延时，随后在性能无法优化时才考虑加入调度类等功能满足不同场景下的调度，而 Kubernetes调度器更关注内部不同调度算法的组织，如何同时维护多个复杂的调度算法，当设计了良好的抽象之后，它才会考虑更加复杂的多调度器、多租户等场景。</p>
+<h6>总结的总结</h6>
+<p>这种研究历史变化带来的快乐是很不同的，当我们发现代码发生变化的原因时也会感到欣喜，这让我们站在今天重新见证了历史上的决策，本文中的相应章节已经包含了对应源代码的链接，各位读者可以自行阅读相应内容，也衷心希望各位读者能够有所收获。</p>
+<blockquote><p>系统设计精要是一系列深入研究系统设计方法的系列文章，文中不仅会分析系统设计的理论，还会分析多个实际场景下的具体实现。这是一个季更或者半年更的系列，如果你有想要了解的问题，可以在文章下面留言。</p>
+</blockquote>
+<h5>延伸阅读</h5>
+<ul>
+<li><a href="https://medium.com/traveloka-engineering/cooperative-vs-preemptive-a-quest-to-maximize-concurrency-power-3b10c5a920fe">Cooperative vs. Preemptive: a quest to maximize concurrency power</a></li>
+<li><a href="https://arxiv.org/abs/1810.13186">Randomized Work Stealing versus Sharing in Large-scale Systems with Non-exponential Job Sizes</a></li>
+<li><a href="http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.151.2178&rep=rep1&type=pdf">Scalable work stealing</a></li>
+</ul>
+<ol>
+<li><a href="https://en.wikipedia.org/wiki/Scheduling_\(computing\">Wikipedia: Scheduling (computing)</a>) ↩</li>
+<li><a href="https://book.douban.com/subject/3058593/">Scheduling: Theory, Algorithms, and Systems</a> ↩</li>
+<li><a href="http://supertech.csail.mit.edu/papers/steal.pdf">Scheduling multithreaded computations by work stealing</a> ↩</li>
+<li><a href="https://github.com/kubernetes-sigs/descheduler">descheduler · GitHub</a> ↩</li>
+<li><a href="https://stackoverflow.com/questions/8463741/how-linux-handles-threads-and-process-scheduling">How Linux handles threads and process scheduling</a> ↩</li>
+<li><a href="https://github.com/draveness/linux-archive/blob/master/0.01/kernel/sched.c#L68">schedule · Linux 0.01</a> ↩</li>
+<li><a href="https://github.com/draveness/linux-archive/blob/master/2.4.0/kernel/sched.c#L569">O(n) 调度器遍历就绪队列</a> ↩</li>
+<li><a href="https://www.amazon.com/Understanding-Linux-Kernel-Third-Daniel/dp/0596005652">Understanding the Linux Kernel, Third Edition.</a> ↩</li>
+<li><a href="https://www.linuxjournal.com/article/6530">Introducing the 2.6 Kernel</a> ↩</li>
+<li><a href="https://en.wikipedia.org/wiki/Completely_Fair_Scheduler">Wikipedia: Completely Fair Scheduler</a> ↩</li>
+<li><a href="https://en.wikipedia.org/wiki/Red%E2%80%93black_tree">Wikipedia: Red-black tree</a> ↩</li>
+<li><a href="https://github.com/torvalds/linux/tree/master/kernel/sched">Linux Scheduler</a> ↩</li>
+<li><a href="https://dl.acm.org/doi/10.1145/359576.359585">Communicating sequential processes</a> ↩</li>
+<li><a href="https://draveness.me/whys-the-design-communication-shared-memory">为什么使用通信来共享内存 · Why’s THE Design?</a> ↩</li>
+<li><a href="http://golang.org/s/go11sched">Scalable Go Scheduler Design Doc</a> ↩</li>
+<li><a href="https://golang.org/doc/go1.2#preemption">Pre-emption in the scheduler</a> ↩</li>
+<li><a href="https://docs.google.com/document/d/1ETuA2IOmnaQ4j81AtTGT40Y4_Jr6_IDASEKg0t0dBR8/edit#heading=h.3pilqarbrc9h">Go Preemptive Scheduler Design Doc</a> ↩</li>
+<li><a href="https://github.com/golang/go/issues/4711#issuecomment-66073943">runtime: goroutines do not get scheduled for a long time for no obvious reason</a> ↩</li>
+<li><a href="https://github.com/golang/proposal/blob/master/design/24543-non-cooperative-preemption.md#other-considerations">Proposal: Non-cooperative goroutine preemption</a> ↩</li>
+<li><a href="https://github.com/golang/proposal/blob/master/design/24543/conservative-inner-frame.md">Proposal: Conservative inner-frame scanning for non-cooperative goroutine preemption</a> ↩</li>
+<li><a href="https://docs.google.com/document/u/0/d/1d3iI2QWURgDIsSR6G2275vMeQ_X7w-qxM2Vp7iGwwuM/pub">NUMA-aware scheduler for Go</a> ↩</li>
+<li><a href="https://queue.acm.org/detail.cfm?id=2898444">Borg, Omega, and Kubernetes</a> ↩</li>
+<li><a href="https://draveness.me/understanding-kubernetes">谈 Kubernetes 的架构设计与实现原理</a> ↩</li>
+<li><a href="https://github.com/kubernetes/enhancements/blob/master/keps/sig-scheduling/20180409-scheduling-framework.md">Scheduling Framework</a> ↩</li>
+</ol>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "调度系统设计精要.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

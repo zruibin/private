@@ -1,0 +1,1031 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>深入理解libuv事件循环 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="深入理解libuv事件循环,算法,系统,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="深入理解libuv事件循环" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>深入理解libuv事件循环</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2023-04-14 10:59
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_suan_fa.html' class='article_tag'>算法</a>
+
+<a href='../article/tag_xi_tong.html' class='article_tag'>系统</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h3><p>原文出处：<a href='https://km.woa.com/articles/show/575333' target='blank'>深入理解libuv事件循环</a></p></h3>
+<blockquote><p>libuv是一款跨平台的异步I/O库，已经被广泛应用于各个领域。作为跨平台底层库，libuv实现的功能非常齐全，本文详细介绍libuv事件循环机制，并从其中七个常规的用法深入分析libuv实现原理。（源码基于v1.44.2版本，commit id为0c1fa69，平台为MacOS）</p>
+</blockquote>
+<p>libuv提供了快速实现异步IO的能力，但是在使用过程中常常会感到纠结。比如定时器如何保证时间间隔，异步回调如何知道调用时机、比如<code>uv_run</code>为什么在<code>UV_RUN_ONCE</code>模式下也会阻塞，在<code>UV_RUN_DEFAULT</code>模式下却会马上返回、比如udp、tcp同步接口和异步接口同时调用会不会有冲突，tcp能不能确保整包收发、比如多线程调用libuv函数会不会有异常等等。本文尝试剖析libuv事件循环机制，了解其实现原理，放心写下每一行libuv调用。</p>
+<h2>1、事件循环</h2>
+<h3>1.1、uv_loop_t和双端队列</h3>
+<p>libuv离不开事件循环，事件循环离不开<code>uv_loop_t</code>，它几乎包含libuv提供能力所需要的完整上下文。在真正使用libuv之前，都需要初始化<code>uv_loop_t</code>，一个简单的样例是</p>
+<div class="highlight"><pre><code><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w"> </span><span class="n">uv_loop_t</span><span class="o">*</span><span class="w"> </span><span class="n">loop</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_loop_new</span><span class="p">();</span>
+<span class="w">  </span><span class="c1">// libuv也提供一个静态全局的默认loop</span>
+<span class="w">  </span><span class="c1">// uv_loop_t* loop = uv_default_loop();</span>
+
+<span class="w">  </span><span class="c1">// 基于loop添加事件</span>
+
+<span class="w">  </span><span class="c1">// 运行事件循环</span>
+<span class="w">  </span><span class="n">uv_run</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">UV_RUN_DEFAULT</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">uv_loop_close</span><span class="p">(</span><span class="n">loop</span><span class="p">);</span>
+<span class="w">  </span><span class="n">uv_loop_delete</span><span class="p">(</span><span class="n">loop</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>其中<code>uv_loop_t</code>定义为</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">uv_loop_s</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="cm">/* User data - use this for whatever. */</span>
+<span class="w">  </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">data</span><span class="p">;</span>
+<span class="w">  </span><span class="cm">/* Loop reference counting. */</span>
+<span class="w">  </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">active_handles</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">handle_queue</span><span class="p">[</span><span class="mi">2</span><span class="p">];</span>
+<span class="w">  </span><span class="k">union</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">unused</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">count</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="n">active_reqs</span><span class="p">;</span>
+<span class="w">  </span><span class="cm">/* Internal storage for future extensions. */</span>
+<span class="w">  </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">internal_fields</span><span class="p">;</span>
+<span class="w">  </span><span class="cm">/* Internal flag to signal loop stop. */</span>
+<span class="w">  </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">stop_flag</span><span class="p">;</span>
+<span class="w">  </span><span class="n">UV_LOOP_PRIVATE_FIELDS</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>可以看到<code>uv_loop_t</code>包含了这种队列类型的成员变量</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">handle_queue</span><span class="p">[</span><span class="mi">2</span><span class="p">];</span>
+</code></pre></div>
+<p>如果把<code>UV_LOOP_PRIVATE_FIELDS</code>展开的话会发现里面还有很多类似的变量，这是双端循环队列结构，一个指针指向队头，一个指针指向队尾。同时libuv还定义了操作双端循环队列的一系列宏定义</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#define QUEUE_DATA(ptr, type, field)</span>
+<span class="cp">#define QUEUE_FOREACH(q, h)</span>
+<span class="cp">#define QUEUE_EMPTY(q)</span>
+<span class="cp">#define QUEUE_HEAD(q)</span>
+<span class="cp">#define QUEUE_INIT(q)</span>
+<span class="cp">#define QUEUE_ADD(h, n)</span>
+<span class="cp">#define QUEUE_SPLIT(h, q, n)</span>
+<span class="cp">#define QUEUE_MOVE(h, n)</span>
+<span class="cp">#define QUEUE_INSERT_HEAD(h, q)</span>
+<span class="cp">#define QUEUE_INSERT_TAIL(h, q)</span>
+<span class="cp">#define QUEUE_REMOVE(q)</span>
+</code></pre></div>
+<p>当我们知道<code>void* queue[2]</code>是双端循环队列结构，上面的宏对着源码简单推导下不难看出，都是对队列的基础操作，比如获取队头队尾元素，队头队尾插入元素，删除队列中某元素等等。既然是事件循环，自然会有队列这种数据结构，搞清楚相关的常用宏对理解会很有帮助。简单讲，<strong><code>uv_loop_t</code>是一个包含多个事件队列和事件循环需要记录的全局信息的结构体</strong>。</p>
+<h3>1.2、 uv_run和异步事件</h3>
+<p>先来看看<code>uv_run</code>的代码</p>
+<div class="highlight"><pre><code><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">uv_run</span><span class="p">(</span><span class="n">uv_loop_t</span><span class="o">*</span><span class="w"> </span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">uv_run_mode</span><span class="w"> </span><span class="n">mode</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">timeout</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">r</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">can_sleep</span><span class="p">;</span>
+
+<span class="w">  </span><span class="n">r</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv__loop_alive</span><span class="p">(</span><span class="n">loop</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">r</span><span class="p">)</span>
+<span class="w">    </span><span class="n">uv__update_time</span><span class="p">(</span><span class="n">loop</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">r</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">loop</span><span class="o">-&gt;</span><span class="n">stop_flag</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">uv__update_time</span><span class="p">(</span><span class="n">loop</span><span class="p">);</span>
+<span class="w">    </span><span class="n">uv__run_timers</span><span class="p">(</span><span class="n">loop</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">can_sleep</span><span class="w"> </span><span class="o">=</span>
+<span class="w">        </span><span class="n">QUEUE_EMPTY</span><span class="p">(</span><span class="o">&amp;</span><span class="n">loop</span><span class="o">-&gt;</span><span class="n">pending_queue</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">QUEUE_EMPTY</span><span class="p">(</span><span class="o">&amp;</span><span class="n">loop</span><span class="o">-&gt;</span><span class="n">idle_handles</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">uv__run_pending</span><span class="p">(</span><span class="n">loop</span><span class="p">);</span>
+<span class="w">    </span><span class="n">uv__run_idle</span><span class="p">(</span><span class="n">loop</span><span class="p">);</span>
+<span class="w">    </span><span class="n">uv__run_prepare</span><span class="p">(</span><span class="n">loop</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">mode</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">UV_RUN_ONCE</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">can_sleep</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">mode</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">UV_RUN_DEFAULT</span><span class="p">)</span>
+<span class="w">      </span><span class="n">timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv__backend_timeout</span><span class="p">(</span><span class="n">loop</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">uv__io_poll</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">timeout</span><span class="p">);</span>
+
+<span class="w">    </span><span class="cm">/* Process immediate callbacks (e.g. write_cb) a small fixed number of</span>
+<span class="cm">     * times to avoid loop starvation.*/</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">r</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">r</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="n">QUEUE_EMPTY</span><span class="p">(</span><span class="o">&amp;</span><span class="n">loop</span><span class="o">-&gt;</span><span class="n">pending_queue</span><span class="p">);</span><span class="w"> </span><span class="n">r</span><span class="o">++</span><span class="p">)</span>
+<span class="w">      </span><span class="n">uv__run_pending</span><span class="p">(</span><span class="n">loop</span><span class="p">);</span>
+
+<span class="w">    </span><span class="cm">/* Run one final update on the provider_idle_time in case uv__io_poll</span>
+<span class="cm">     * returned because the timeout expired, but no events were received. This</span>
+<span class="cm">     * call will be ignored if the provider_entry_time was either never set (if</span>
+<span class="cm">     * the timeout == 0) or was already updated b/c an event was received.</span>
+<span class="cm">     */</span>
+<span class="w">    </span><span class="n">uv__metrics_update_idle_time</span><span class="p">(</span><span class="n">loop</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">uv__run_check</span><span class="p">(</span><span class="n">loop</span><span class="p">);</span>
+<span class="w">    </span><span class="n">uv__run_closing_handles</span><span class="p">(</span><span class="n">loop</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">mode</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">UV_RUN_ONCE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="cm">/* UV_RUN_ONCE implies forward progress: at least one callback must have</span>
+<span class="cm">       * been invoked when it returns. uv__io_poll() can return without doing</span>
+<span class="cm">       * I/O (meaning: no callbacks) when its timeout expires - which means we</span>
+<span class="cm">       * have pending timers that satisfy the forward progress constraint.</span>
+<span class="cm">       *</span>
+<span class="cm">       * UV_RUN_NOWAIT makes no guarantees about progress so it&#39;s omitted from</span>
+<span class="cm">       * the check.</span>
+<span class="cm">       */</span>
+<span class="w">      </span><span class="n">uv__update_time</span><span class="p">(</span><span class="n">loop</span><span class="p">);</span>
+<span class="w">      </span><span class="n">uv__run_timers</span><span class="p">(</span><span class="n">loop</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="n">r</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv__loop_alive</span><span class="p">(</span><span class="n">loop</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">mode</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">UV_RUN_ONCE</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">mode</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">UV_RUN_NOWAIT</span><span class="p">)</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="cm">/* The if statement lets gcc compile it to a conditional store. Avoids</span>
+<span class="cm">   * dirtying a cache line.</span>
+<span class="cm">   */</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">loop</span><span class="o">-&gt;</span><span class="n">stop_flag</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">    </span><span class="n">loop</span><span class="o">-&gt;</span><span class="n">stop_flag</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">r</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>网上对<code>uv_run</code>有较好的总结图</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20230414-1059-1.png" alt=""></p>
+<p>理解<code>uv_loop_t</code>结构后，不难猜到<code>uv_run</code>是去执行<code>uv_loop_t</code>内部事件队列里的事件。事实也是如此，可以看到在<code>uv_run</code>函数内部，去取事件队列里的<code>handle</code>，并调用对应的<code>callback</code>，看到事件循环和事件队列，第一反应的理解是，每次循环从队头取出一个事件处理。然而并不是这样，这里一个小细节是，每次的循环是处理整个队列的事件，而不是只处理队头的事件。例如调用<code>uv__run_check</code>，会去处理整个check队列的所有元素。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="n">uv__run_</span><span class="err">##</span><span class="n">name</span><span class="p">(</span><span class="n">uv_loop_t</span><span class="o">*</span><span class="w"> </span><span class="n">loop</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">                                      </span>\
+<span class="w">  </span><span class="n">uv_</span><span class="err">##</span><span class="n">name</span><span class="err">##</span><span class="n">_t</span><span class="o">*</span><span class="w"> </span><span class="n">h</span><span class="p">;</span><span class="w">                                                         </span>\
+<span class="w">  </span><span class="n">QUEUE</span><span class="w"> </span><span class="n">queue</span><span class="p">;</span><span class="w">                                                              </span>\
+<span class="w">  </span><span class="n">QUEUE</span><span class="o">*</span><span class="w"> </span><span class="n">q</span><span class="p">;</span><span class="w">                                                                 </span>\
+<span class="w">  </span><span class="n">QUEUE_MOVE</span><span class="p">(</span><span class="o">&amp;</span><span class="n">loop</span><span class="o">-&gt;</span><span class="n">name</span><span class="err">##</span><span class="n">_handles</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">queue</span><span class="p">);</span><span class="w">                                </span>\
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">QUEUE_EMPTY</span><span class="p">(</span><span class="o">&amp;</span><span class="n">queue</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w">                                            </span>\
+<span class="w">    </span><span class="n">q</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">QUEUE_HEAD</span><span class="p">(</span><span class="o">&amp;</span><span class="n">queue</span><span class="p">);</span><span class="w">                                                 </span>\
+<span class="w">    </span><span class="n">h</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">QUEUE_DATA</span><span class="p">(</span><span class="n">q</span><span class="p">,</span><span class="w"> </span><span class="n">uv_</span><span class="err">##</span><span class="n">name</span><span class="err">##</span><span class="n">_t</span><span class="p">,</span><span class="w"> </span><span class="n">queue</span><span class="p">);</span><span class="w">                                </span>\
+<span class="w">    </span><span class="n">QUEUE_REMOVE</span><span class="p">(</span><span class="n">q</span><span class="p">);</span><span class="w">                                                        </span>\
+<span class="w">    </span><span class="n">QUEUE_INSERT_TAIL</span><span class="p">(</span><span class="o">&amp;</span><span class="n">loop</span><span class="o">-&gt;</span><span class="n">name</span><span class="err">##</span><span class="n">_handles</span><span class="p">,</span><span class="w"> </span><span class="n">q</span><span class="p">);</span><span class="w">                            </span>\
+<span class="w">    </span><span class="n">h</span><span class="o">-&gt;</span><span class="n">name</span><span class="err">##</span><span class="n">_cb</span><span class="p">(</span><span class="n">h</span><span class="p">);</span><span class="w">                                                        </span>\
+<span class="w">  </span><span class="p">}</span><span class="w">                                                                         </span>\
+<span class="p">}</span><span class="w">                                                                           </span>\
+</code></pre></div>
+<p>从宏的这部分定义就可以看出，<code>uv__run_##name</code>的调用都会处理整个队列。这时候就会有疑惑，既然每次调用都把整个队列都处理完了，为什么还要去循环调用，第二次调用的时候队列不是已经空了吗？其实队列没有置空，取走整个队列后，取出元素调用<code>callback</code>，然后会<code>QUEUE_INSERT_TAIL(&amp;loop-&gt;name##_handles, q);</code>重新插入队列，下一次的循环会再次处理整个队列。比如下面这个例子会调用3次<code>check_callback</code>。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;uv.h&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span>
+
+<span class="n">uv_loop_t</span><span class="o">*</span><span class="w"> </span><span class="n">loop</span><span class="p">;</span>
+<span class="n">uv_check_t</span><span class="w"> </span><span class="n">check_handle</span><span class="p">;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">check_callback</span><span class="p">(</span><span class="n">uv_check_t</span><span class="o">*</span><span class="w"> </span><span class="n">handle</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Check callback called&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">loop</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_default_loop</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// 初始化check handle</span>
+<span class="w">  </span><span class="n">uv_check_init</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">check_handle</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 设置check handle的回调函数</span>
+<span class="w">  </span><span class="n">uv_check_start</span><span class="p">(</span><span class="o">&amp;</span><span class="n">check_handle</span><span class="p">,</span><span class="w"> </span><span class="n">check_callback</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 运行事件循环</span>
+<span class="w">  </span><span class="n">uv_run</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">UV_RUN_NOWAIT</span><span class="p">);</span>
+<span class="w">  </span><span class="n">uv_run</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">UV_RUN_NOWAIT</span><span class="p">);</span>
+<span class="w">  </span><span class="n">uv_run</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">UV_RUN_NOWAIT</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 清理check handle</span>
+<span class="w">  </span><span class="n">uv_check_stop</span><span class="p">(</span><span class="o">&amp;</span><span class="n">check_handle</span><span class="p">);</span>
+<span class="w">  </span><span class="n">uv_loop_close</span><span class="p">(</span><span class="n">loop</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这时候可能又会疑惑，这不就是遍历整个队列，然后对每个元素调用<code>callback</code>吗，为什么要整个<code>QUEUE_MOVE</code>出来再一个个<code>QUEUE_INSERT_TAIL</code>回去？原因很简单，如果没有<code>QUEUE_MOVE</code>出来，如果<code>callback</code>调用会往队列里插入元素的话，会有死循环的风险了。<code>QUEUE_MOVE</code>出来，<code>callback</code>往队列里插入的元素，会在下个事件循环周期才生效。其实，也并非所有的事件队列会一直保留队列元素，比如<code>timer_heap</code>定时器堆</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">uv__run_timers</span><span class="p">(</span><span class="n">uv_loop_t</span><span class="o">*</span><span class="w"> </span><span class="n">loop</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">struct</span><span class="w"> </span><span class="nc">heap_node</span><span class="o">*</span><span class="w"> </span><span class="n">heap_node</span><span class="p">;</span>
+<span class="w">  </span><span class="n">uv_timer_t</span><span class="o">*</span><span class="w"> </span><span class="n">handle</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(;;)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">heap_node</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">heap_min</span><span class="p">(</span><span class="n">timer_heap</span><span class="p">(</span><span class="n">loop</span><span class="p">));</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">heap_node</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nb">NULL</span><span class="p">)</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+
+<span class="w">    </span><span class="n">handle</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">container_of</span><span class="p">(</span><span class="n">heap_node</span><span class="p">,</span><span class="w"> </span><span class="n">uv_timer_t</span><span class="p">,</span><span class="w"> </span><span class="n">heap_node</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">handle</span><span class="o">-&gt;</span><span class="n">timeout</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">loop</span><span class="o">-&gt;</span><span class="n">time</span><span class="p">)</span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span>
+
+<span class="w">    </span><span class="n">uv_timer_stop</span><span class="p">(</span><span class="n">handle</span><span class="p">);</span>
+<span class="w">    </span><span class="n">uv_timer_again</span><span class="p">(</span><span class="n">handle</span><span class="p">);</span>
+<span class="w">    </span><span class="n">handle</span><span class="o">-&gt;</span><span class="n">timer_cb</span><span class="p">(</span><span class="n">handle</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>定时器会默认只生效一次，实现方式就是在事件循环处理<code>timer_heap</code>的时候，内部会调用<code>uv_timer_stop</code>停掉这个timer。同样的，前面提到的事件队列<code>handle</code>，如果也只想生效一次的话，在对应<code>callback</code>里调用<code>uv_##name##_stop</code>停掉就可以。比如这个例子，<code>check_callback</code>只会调用1次。</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;uv.h&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span>
+
+<span class="n">uv_loop_t</span><span class="o">*</span><span class="w"> </span><span class="n">loop</span><span class="p">;</span>
+<span class="n">uv_check_t</span><span class="w"> </span><span class="n">check_handle</span><span class="p">;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">check_callback</span><span class="p">(</span><span class="n">uv_check_t</span><span class="o">*</span><span class="w"> </span><span class="n">handle</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Check callback called&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// 清理check handle</span>
+<span class="w">  </span><span class="n">uv_check_stop</span><span class="p">(</span><span class="o">&amp;</span><span class="n">check_handle</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">loop</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_default_loop</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// 初始化check handle</span>
+<span class="w">  </span><span class="n">uv_check_init</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">check_handle</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 设置check handle的回调函数</span>
+<span class="w">  </span><span class="n">uv_check_start</span><span class="p">(</span><span class="o">&amp;</span><span class="n">check_handle</span><span class="p">,</span><span class="w"> </span><span class="n">check_callback</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 运行事件循环</span>
+<span class="w">  </span><span class="n">uv_run</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">UV_RUN_NOWAIT</span><span class="p">);</span>
+<span class="w">  </span><span class="n">uv_run</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">UV_RUN_NOWAIT</span><span class="p">);</span>
+<span class="w">  </span><span class="n">uv_run</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">UV_RUN_NOWAIT</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">uv_loop_close</span><span class="p">(</span><span class="n">loop</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>1.3、uv_run_mode和异步IO</h3>
+<p>前面提到的异步事件一般情况下都可以在事件循环下运转，原则上我们的异步事件执行不能过于耗时 卡住<code>uv_loop_t</code>，但是即使是耗时任务，只要异步事件没有bug，多花点时间还是可以执行完的。除非遇到IO事件，IO事件可能会导致阻塞。libuv对IO事件有一套完整的处理方法，<strong>异步IO是libuv的重要组成部分</strong>。</p>
+<p>展开<code>uv_loop_t</code>结构内的<code>UV_LOOP_PRIVATE_FIELDS</code>宏，除了有异步事件队列外，还维护着异步IO列表。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">int</span><span class="w"> </span><span class="n">backend_fd</span><span class="p">;</span>
+<span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">watcher_queue</span><span class="p">[</span><span class="mi">2</span><span class="p">];</span>
+<span class="n">uv__io_t</span><span class="o">**</span><span class="w"> </span><span class="n">watchers</span><span class="p">;</span>
+<span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">nwatchers</span><span class="p">;</span>
+<span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">nfds</span><span class="p">;</span>
+</code></pre></div>
+<p>基于<code>uv_loop_t</code>开启一个IO事件，会将IO事件加入IO队列<code>watcher_queue</code>并且添加到<code>watchers</code>监听IO列表，在<code>uv__io_poll</code>调用中，会取出<code>watcher_queue</code>的IO事件，加入epoll监听列表。然后调用<code>epoll_wait</code>去监听IO事件，并在<code>epoll_wait</code>返回后去真正执行IO事件。所以<code>uv_run</code>不光要通过双端队列处理异步任务，还要通过IO监听列表和epoll机制处理异步IO。这里<code>backend_fd</code>是<code>epoll_create</code>创建的fd，<code>nwatchers</code>是数组长度，<code>nfds</code>是当前监听的fd数量。因为<code>watchers</code>数组是以fd为下标去寻址<code>watchers[fd]</code>，所以<code>nwatchers</code>和<code>nfds</code>是不相等的。</p>
+<p>特别的，<code>uv_loop_t</code>内部会一直去监听两个IO事件</p>
+<div class="highlight"><pre><code><span></span><span class="n">uv__io_t</span><span class="w"> </span><span class="n">async_io_watcher</span><span class="p">;</span>
+<span class="n">uv__io_t</span><span class="w"> </span><span class="n">signal_io_watcher</span><span class="p">;</span>
+</code></pre></div>
+<p>他们被用于处理异步信号和系统信号，在<code>uv_loop_t</code>初始化的时候，<code>async_io_watcher</code>和<code>signal_io_watcher</code>就会被开启，然后在第一次<code>uv_run</code>的时候就加入epoll监听列表。也就是说，即使没有基于<code>uv_loop_t</code>开启新的IO事件，IO事件也会一直存在于<code>uv_loop_t</code>的整个生命周期。</p>
+<p>回到开篇的问题，<code>uv_run</code>为什么在<code>UV_RUN_ONCE</code>模式下也会阻塞，在<code>UV_RUN_DEFAULT</code>模式下却也可能会马上返回。理解异步任务和异步IO的关系后，uv_run_mode的三种模式就比较好理解了。</p>
+<div class="highlight"><pre><code><span></span><span class="k">typedef</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">UV_RUN_DEFAULT</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">UV_RUN_ONCE</span><span class="p">,</span>
+<span class="w">  </span><span class="n">UV_RUN_NOWAIT</span>
+<span class="p">}</span><span class="w"> </span><span class="n">uv_run_mode</span><span class="p">;</span>
+</code></pre></div>
+<p><code>UV_RUN_DEFAULT</code>模式：在这种模式下，只要基于<code>uv_loop_t</code>开启了异步任务或者异步IO（即<code>uv__loop_alive</code>为true），这种模式会一直去执行事件循环，并且在每次循环里都会调用<code>epoll_wait</code>去阻塞监听IO事件。那<code>UV_RUN_DEFAULT</code>模式执行<code>uv_run</code>便一直无法返回了吗？也不是，当<code>uv_loop_t</code>没有开启事件，此时<code>uv__loop_alive</code>为false，会退出循环，比如文章第一个样例初始化<code>uv_loop_t</code>后马上以<code>UV_RUN_DEFAULT</code>执行<code>uv_run</code>就会马上返回。另外调用<code>uv_stop</code>也会退出，比如</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;uv.h&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span>
+
+<span class="n">uv_async_t</span><span class="w"> </span><span class="n">async</span><span class="p">;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">async_callback</span><span class="p">(</span><span class="n">uv_async_t</span><span class="o">*</span><span class="w"> </span><span class="n">handle</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;async_callback&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+<span class="w">  </span><span class="n">uv_stop</span><span class="p">(</span><span class="n">handle</span><span class="o">-&gt;</span><span class="n">loop</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">uv_loop_t</span><span class="o">*</span><span class="w"> </span><span class="n">loop</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_default_loop</span><span class="p">();</span>
+
+<span class="w">  </span><span class="n">uv_async_init</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">async</span><span class="p">,</span><span class="w"> </span><span class="n">async_callback</span><span class="p">);</span>
+<span class="w">  </span><span class="n">uv_async_send</span><span class="p">(</span><span class="o">&amp;</span><span class="n">async</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">uv_run</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">UV_RUN_DEFAULT</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>UV_RUN_ONCE</code>模式：在这种模式下，事件循环只会跑一轮就退出，但是单次循环仍然会去执行所有异步事件和调用<code>epoll_wait</code>阻塞监听IO。所以即使在这种模式下，如果<code>epoll_wait</code>一直阻塞，<code>uv_run</code>就会一直阻塞。比如</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;uv.h&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span>
+
+<span class="n">uv_loop_t</span><span class="o">*</span><span class="w"> </span><span class="n">loop</span><span class="p">;</span>
+<span class="n">uv_check_t</span><span class="w"> </span><span class="n">check_handle</span><span class="p">;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">check_callback</span><span class="p">(</span><span class="n">uv_check_t</span><span class="o">*</span><span class="w"> </span><span class="n">handle</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Check callback called&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">loop</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_default_loop</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// 初始化check handle</span>
+<span class="w">  </span><span class="n">uv_check_init</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">check_handle</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 设置check handle的回调函数</span>
+<span class="w">  </span><span class="n">uv_check_start</span><span class="p">(</span><span class="o">&amp;</span><span class="n">check_handle</span><span class="p">,</span><span class="w"> </span><span class="n">check_callback</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 运行事件循环</span>
+<span class="w">  </span><span class="n">uv_run</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">UV_RUN_ONCE</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">uv_loop_close</span><span class="p">(</span><span class="n">loop</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>UV_RUN_NOWAIT</code>模式：在这种模式下，事件循环同样只会跑一轮，该次循环也会处理异步事件和IO，但是调用<code>epoll_wait</code>的时候<code>timeout</code>为0不会阻塞。所以这个模式不保证等待IO事件，尽可能的跑一轮事件循环便返回。</p>
+<p><strong>总之，三种模式都会去处理所有事件和IO，区别是<code>UV_RUN_DEFAULT</code>会一直循环，而<code>UV_RUN_ONCE</code>和<code>UV_RUN_NOWAIT</code>只会跑一轮。而基于IO事件<code>UV_RUN_DEFAULT</code>和<code>UV_RUN_ONCE</code>都是阻塞等待，<code>UV_RUN_NOWAIT</code>是非阻塞</strong>。</p>
+<h2>2、异步IO</h2>
+<p>使用libuv主要是看中其异步IO的能力，下面从几个常规使用场景来看看libuv如何提供异步IO能力，在不同场景下各有什么特点。</p>
+<h3>2.1、网络</h3>
+<p>libuv提供了tcp、udp的socket调用，包括创建socket，收发包等等。使用原生socket的小伙伴知道，socket调用可能会有错误，可能会阻塞，也可能会有收发包数据不全等问题，libuv帮我们处理了这些问题，对外统一同步和异步调用接口，让我们能快速的实现高性能网络IO。</p>
+<p>一个简单tcp server socket样例是</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;cstdlib&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;uv.h&gt;</span>
+
+<span class="cp">#define DEFAULT_IP &quot;127.0.0.1&quot;</span>
+<span class="cp">#define DEFAULT_PORT 8080</span>
+<span class="cp">#define DEFAULT_BACKLOG 128</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">on_listen</span><span class="p">(</span><span class="n">uv_stream_t</span><span class="o">*</span><span class="w"> </span><span class="n">server</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">status</span><span class="p">);</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">on_read</span><span class="p">(</span><span class="n">uv_stream_t</span><span class="o">*</span><span class="w"> </span><span class="n">client</span><span class="p">,</span><span class="w"> </span><span class="kt">ssize_t</span><span class="w"> </span><span class="n">nread</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">uv_buf_t</span><span class="o">*</span><span class="w"> </span><span class="n">buf</span><span class="p">);</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">on_close</span><span class="p">(</span><span class="n">uv_handle_t</span><span class="o">*</span><span class="w"> </span><span class="n">handle</span><span class="p">);</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">alloc_buffer</span><span class="p">(</span><span class="n">uv_handle_t</span><span class="o">*</span><span class="w"> </span><span class="n">handle</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">suggested_size</span><span class="p">,</span><span class="w"> </span><span class="n">uv_buf_t</span><span class="o">*</span><span class="w"> </span><span class="n">buf</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">buf</span><span class="o">-&gt;</span><span class="n">base</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="p">)</span><span class="n">malloc</span><span class="p">(</span><span class="n">suggested_size</span><span class="p">);</span>
+<span class="w">  </span><span class="n">buf</span><span class="o">-&gt;</span><span class="n">len</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">suggested_size</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">on_listen</span><span class="p">(</span><span class="n">uv_stream_t</span><span class="o">*</span><span class="w"> </span><span class="n">server</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">status</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">status</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">fprintf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Connection error: %s</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">status</span><span class="p">));</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">uv_tcp_t</span><span class="o">*</span><span class="w"> </span><span class="n">client</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">uv_tcp_t</span><span class="o">*</span><span class="p">)</span><span class="n">malloc</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="n">uv_tcp_t</span><span class="p">));</span>
+<span class="w">  </span><span class="n">uv_tcp_init</span><span class="p">(</span><span class="n">server</span><span class="o">-&gt;</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">client</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">uv_accept</span><span class="p">(</span><span class="n">server</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="n">uv_stream_t</span><span class="o">*</span><span class="p">)</span><span class="n">client</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Client connected.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">uv_read_start</span><span class="p">((</span><span class="n">uv_stream_t</span><span class="o">*</span><span class="p">)</span><span class="n">client</span><span class="p">,</span><span class="w"> </span><span class="n">alloc_buffer</span><span class="p">,</span><span class="w"> </span><span class="n">on_read</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">uv_close</span><span class="p">((</span><span class="n">uv_handle_t</span><span class="o">*</span><span class="p">)</span><span class="n">client</span><span class="p">,</span><span class="w"> </span><span class="n">on_close</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">on_read</span><span class="p">(</span><span class="n">uv_stream_t</span><span class="o">*</span><span class="w"> </span><span class="n">client</span><span class="p">,</span><span class="w"> </span><span class="kt">ssize_t</span><span class="w"> </span><span class="n">nread</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">uv_buf_t</span><span class="o">*</span><span class="w"> </span><span class="n">buf</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">nread</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">nread</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">UV_EOF</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">fprintf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Read error: %s</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">nread</span><span class="p">));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">uv_close</span><span class="p">((</span><span class="n">uv_handle_t</span><span class="o">*</span><span class="p">)</span><span class="n">client</span><span class="p">,</span><span class="w"> </span><span class="n">on_close</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">nread</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Read %ld bytes: %.*s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">nread</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="p">)</span><span class="n">nread</span><span class="p">,</span><span class="w"> </span><span class="n">buf</span><span class="o">-&gt;</span><span class="n">base</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">buf</span><span class="o">-&gt;</span><span class="n">base</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">free</span><span class="p">(</span><span class="n">buf</span><span class="o">-&gt;</span><span class="n">base</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">on_close</span><span class="p">(</span><span class="n">uv_handle_t</span><span class="o">*</span><span class="w"> </span><span class="n">handle</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Client disconnected.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+<span class="w">  </span><span class="n">free</span><span class="p">(</span><span class="n">handle</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">uv_loop_t</span><span class="o">*</span><span class="w"> </span><span class="n">loop</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_default_loop</span><span class="p">();</span>
+
+<span class="w">  </span><span class="n">uv_tcp_t</span><span class="w"> </span><span class="n">server</span><span class="p">;</span>
+<span class="w">  </span><span class="n">uv_tcp_init</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">server</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr_in</span><span class="w"> </span><span class="n">bind_addr</span><span class="p">;</span>
+<span class="w">  </span><span class="n">uv_ip4_addr</span><span class="p">(</span><span class="n">DEFAULT_IP</span><span class="p">,</span><span class="w"> </span><span class="n">DEFAULT_PORT</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">bind_addr</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">uv_tcp_bind</span><span class="p">(</span><span class="o">&amp;</span><span class="n">server</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">bind_addr</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">r</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_listen</span><span class="p">((</span><span class="n">uv_stream_t</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">server</span><span class="p">,</span><span class="w"> </span><span class="n">DEFAULT_BACKLOG</span><span class="p">,</span><span class="w"> </span><span class="n">on_listen</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">r</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">fprintf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Listen error: %s</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">r</span><span class="p">));</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Server listening on port %d...</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">DEFAULT_PORT</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">uv_run</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">UV_RUN_DEFAULT</span><span class="p">);</span>
+<span class="w">  </span><span class="n">uv_close</span><span class="p">((</span><span class="n">uv_handle_t</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">server</span><span class="p">,</span><span class="w"> </span><span class="k">nullptr</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这个样例里，起了一个tcp socket并监听"127.0.0.1"的8080端口，连接建立后，监听这个socket的可读事件，当socket有可读数据后结果通过<code>on_read</code>回调通知。这里实际上屏蔽了很多细节，比如我们知道tcp的read操作不一定一次就能读一个整包（先不讨论粘包问题，这个需要应用层依据协议去保证，我们这里假设每个包长度是固定的），那这里每一次read调用的指定长度是多少，read的实际返回长度是多少，<code>on_read</code>会确保我们当实际读取的数据长度达到我们期望读取的长度后才回调，还是每次read调用就回调？</p>
+<p>笔者尝试来分析下这些问题，在我们开始调用start开始监听可读事件时，需要传入<code>alloc_buffer</code>和<code>on_read</code>函数，触发可读事件后，会先调用<code>alloc_buffer</code>分配buffer，这里包含了read调用的指定长度，<code>on_read</code>返回的是实际读取长度。如果没有读全数据，下一次事件循环会再去读，同样再次调用<code>alloc_buffer</code>然后<code>on_read</code>，此时返回的数据会接上前一次，但是这里实际的返回长度也不会有什么保证，需要自己拼接。</p>
+<p>这里提供的能力似乎使用起来还是有一定的负担，实际生产中，我们希望明确知道的是什么时候读完整包，而不太愿意去知道其他零碎的信息，一个可能的解决方法是（这里假设协议里头4个字节是表示这个包的长度，考虑粘包问题）</p>
+<div class="highlight"><pre><code><span></span><span class="n">uv_read_start</span><span class="err">（</span><span class="n">alloc_buffer</span><span class="w"> </span><span class="n">尝试读4个字节</span><span class="err">）</span><span class="w"> </span><span class="c1">// 这里会马上返回，然后等待on_read回调</span>
+<span class="o">--</span><span class="w"> </span><span class="n">on_read</span>
+<span class="o">----</span><span class="w"> </span><span class="n">uv_read_stop</span><span class="w"> </span><span class="c1">// 这里要stop一下，因为后续要重新指定期望读取的字节数</span>
+<span class="o">----</span><span class="w"> </span><span class="mi">1</span><span class="err">、</span><span class="n">如果4个字节读取成功</span><span class="err">，</span><span class="n">得到包长n</span><span class="err">。</span><span class="n">uv_read_start</span><span class="err">（</span><span class="n">alloc_buffer</span><span class="w"> </span><span class="n">尝试读剩下的n</span><span class="mi">-4</span><span class="n">个字节</span><span class="err">）</span>
+<span class="o">------</span><span class="w"> </span><span class="mf">1.1</span><span class="err">、</span><span class="w"> </span><span class="n">如果剩下的所有字节读取成功</span><span class="err">，</span><span class="n">这个包读完</span><span class="err">，</span><span class="n">回到原点继续读下一个包</span>
+<span class="o">------</span><span class="w"> </span><span class="mf">1.2</span><span class="err">、</span><span class="w"> </span><span class="n">如果剩下n</span><span class="mi">-4</span><span class="n">个字节没有读取成功</span><span class="err">，</span><span class="n">继续uv_read_start读剩下的字节直到去到1</span><span class="mf">.1</span><span class="n">步骤</span>
+<span class="o">----</span><span class="w"> </span><span class="mi">2</span><span class="err">、</span><span class="n">如果4个字节没有读取成功</span><span class="err">。</span><span class="n">uv_read_start</span><span class="err">（</span><span class="n">alloc_buffer</span><span class="w"> </span><span class="n">尝试读剩下的所有字节</span><span class="err">）</span>
+<span class="o">------</span><span class="w"> </span><span class="mf">2.1</span><span class="err">、</span><span class="w"> </span><span class="n">如果剩下的字节读取成功</span><span class="err">，</span><span class="n">包头长度读完</span><span class="err">，</span><span class="n">去读整包去到步骤1</span>
+<span class="o">------</span><span class="w"> </span><span class="mf">2.2</span><span class="err">、</span><span class="w"> </span><span class="n">如果剩下的字节没有读取成功</span><span class="err">，</span><span class="n">继续uv_read_start读剩下的字节直到去到2</span><span class="mf">.1</span><span class="n">步骤</span>
+</code></pre></div>
+<p>按照这个方式，可以形成调用循环，实现整包读取的功能。同时合理的使用<code>uv_run</code>的话，监听可读事件是非阻塞或者有超时的阻塞的，在网络没有收包的时候，事件循环可以去处理别的事件。</p>
+<p>除了可读事件，还有可写事件，一个简单的tcp client样例是</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;cstdlib&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;uv.h&gt;</span>
+
+<span class="cp">#define DEFAULT_IP &quot;127.0.0.1&quot;</span>
+<span class="cp">#define DEFAULT_PORT 8080</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">on_connect</span><span class="p">(</span><span class="n">uv_connect_t</span><span class="o">*</span><span class="w"> </span><span class="n">req</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">status</span><span class="p">);</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">on_write</span><span class="p">(</span><span class="n">uv_write_t</span><span class="o">*</span><span class="w"> </span><span class="n">req</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">status</span><span class="p">);</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">on_close</span><span class="p">(</span><span class="n">uv_handle_t</span><span class="o">*</span><span class="w"> </span><span class="n">handle</span><span class="p">);</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">on_connect</span><span class="p">(</span><span class="n">uv_connect_t</span><span class="o">*</span><span class="w"> </span><span class="n">req</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">status</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">status</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">fprintf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Connect error: %s</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">status</span><span class="p">));</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Connected to server.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">uv_stream_t</span><span class="o">*</span><span class="w"> </span><span class="n">client</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">req</span><span class="o">-&gt;</span><span class="n">handle</span><span class="p">;</span>
+
+<span class="w">  </span><span class="n">uv_write_t</span><span class="o">*</span><span class="w"> </span><span class="n">wrreq</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">uv_write_t</span><span class="o">*</span><span class="p">)</span><span class="n">malloc</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="n">uv_write_t</span><span class="p">));</span>
+<span class="w">  </span><span class="n">uv_buf_t</span><span class="w"> </span><span class="n">wrbuf</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_buf_init</span><span class="p">(</span><span class="s">&quot;Hello, server!</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="mi">15</span><span class="p">);</span>
+<span class="w">  </span><span class="n">uv_write</span><span class="p">(</span><span class="n">wrreq</span><span class="p">,</span><span class="w"> </span><span class="n">client</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">wrbuf</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">on_write</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">on_write</span><span class="p">(</span><span class="n">uv_write_t</span><span class="o">*</span><span class="w"> </span><span class="n">req</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">status</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">status</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">fprintf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Write error: %s</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">status</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">free</span><span class="p">(</span><span class="n">req</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">on_close</span><span class="p">(</span><span class="n">uv_handle_t</span><span class="o">*</span><span class="w"> </span><span class="n">handle</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Disconnected from server.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span>
+<span class="w">  </span><span class="n">free</span><span class="p">(</span><span class="n">handle</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">uv_loop_t</span><span class="o">*</span><span class="w"> </span><span class="n">loop</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_default_loop</span><span class="p">();</span>
+
+<span class="w">  </span><span class="n">uv_tcp_t</span><span class="w"> </span><span class="n">client</span><span class="p">;</span>
+<span class="w">  </span><span class="n">uv_tcp_init</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">client</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr_in</span><span class="w"> </span><span class="n">dest_addr</span><span class="p">;</span>
+<span class="w">  </span><span class="n">uv_ip4_addr</span><span class="p">(</span><span class="n">DEFAULT_IP</span><span class="p">,</span><span class="w"> </span><span class="n">DEFAULT_PORT</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">dest_addr</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">uv_connect_t</span><span class="w"> </span><span class="n">connect_req</span><span class="p">;</span>
+<span class="w">  </span><span class="n">uv_tcp_connect</span><span class="p">(</span><span class="o">&amp;</span><span class="n">connect_req</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">client</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">dest_addr</span><span class="p">,</span><span class="w"> </span><span class="n">on_connect</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">uv_run</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">UV_RUN_DEFAULT</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这个样例是建立一个tcp socket去连"127.0.0.1"的8080端口，连接成功后，发一个包，然后退出。同样的，read操作存在的问题，write操作也会存在，但是解决方式是很不一样的，libuv同样屏蔽了这些细节，比如每一次write调用的指定长度是多少，write的实际返回长度是多少，<code>on_write</code>会确保我们当实际写入的数据长度达到我们期望写入的长度后才回调，还是每次write调用就回调，如果接力写，是不是后面的每次write调用都要在<code>on_write</code>后接起来，这样发包速率是不是被限制了，能不能同步write等等。</p>
+<p>笔者尝试来分析下这些问题，首先调用<code>uv_write</code>需要带上发包buffer，这里会有期望写入的长度，那实际写入的长度呢，这里跟读操作不同，<code>uv_write</code>不会再告知实际写入长度，或者说屏蔽了多次写入的操作，在<code>on_write</code>的时候，会确保是在<strong>整包写完之后再回调</strong>，这里让我们在单包发送来说省心很多，内部是怎么实现的呢？截取部分源码</p>
+<div class="highlight"><pre><code><span></span><span class="n">n</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv__try_write</span><span class="p">(</span><span class="n">stream</span><span class="p">,</span>
+<span class="w">                  </span><span class="o">&amp;</span><span class="p">(</span><span class="n">req</span><span class="o">-&gt;</span><span class="n">bufs</span><span class="p">[</span><span class="n">req</span><span class="o">-&gt;</span><span class="n">write_index</span><span class="p">]),</span>
+<span class="w">                  </span><span class="n">req</span><span class="o">-&gt;</span><span class="n">nbufs</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">req</span><span class="o">-&gt;</span><span class="n">write_index</span><span class="p">,</span>
+<span class="w">                  </span><span class="n">req</span><span class="o">-&gt;</span><span class="n">send_handle</span><span class="p">);</span>
+
+<span class="cm">/* Ensure the handle isn&#39;t sent again in case this is a partial write. */</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">n</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">req</span><span class="o">-&gt;</span><span class="n">send_handle</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">uv__write_req_update</span><span class="p">(</span><span class="n">stream</span><span class="p">,</span><span class="w"> </span><span class="n">req</span><span class="p">,</span><span class="w"> </span><span class="n">n</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">uv__write_req_finish</span><span class="p">(</span><span class="n">req</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span><span class="w">  </span><span class="cm">/* TODO(bnoordhuis) Start trying to write the next request. */</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">n</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">UV_EAGAIN</span><span class="p">)</span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span>
+
+<span class="cm">/* If this is a blocking stream, try again. */</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">flags</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">UV_HANDLE_BLOCKING_WRITES</span><span class="p">)</span>
+<span class="w">  </span><span class="k">continue</span><span class="p">;</span>
+
+<span class="cm">/* We&#39;re not done. */</span>
+<span class="n">uv__io_start</span><span class="p">(</span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">io_watcher</span><span class="p">,</span><span class="w"> </span><span class="n">POLLOUT</span><span class="p">);</span>
+</code></pre></div>
+<p>可以看到，对于<strong>整包</strong>角度而言，如果没有写全，记录当前的索引，然后加入IO监听，监听到fd的可写事件后，再回来从索引处继续写入。直到全部写完后，再回调<code>on_write</code>。所有<code>on_write</code>调用的时候，是会确保当前包已经全部写完的。另外，再来对比下<strong>多包</strong>发送，基于读操作，来对比下下面两种写操作的区别。</p>
+<p>第一种是</p>
+<div class="highlight"><pre><code><span></span><span class="n">uv_write</span>
+<span class="o">--</span><span class="w"> </span><span class="n">on_write</span>
+<span class="o">----</span><span class="w"> </span><span class="n">uv_write</span>
+<span class="o">------</span><span class="w"> </span><span class="n">on_write</span>
+<span class="p">...</span>
+</code></pre></div>
+<p>跟读操作类似，这里每一次的<code>uv_write</code>操作都在<code>on_write</code>之后，首先逻辑上是没有问题的，但是这里没有高效利用网络IO，因为从一个<code>uv_write</code>到另一个<code>uv_write</code>，需要事件循环驱动，但是事件循环中可能会其他别的任务要处理，这里可能的问题就是，空闲的IO在等待忙碌的CPU，导致发包速率小。那为什么读操作和写操作会有这种区别呢，事实上，这里的读操作完全由IO监听来驱动，只能由IO监听事件去接力读，而写操作是由我们的逻辑代码去调用驱动的，这时操作空间更多，可以在IO真正忙碌的时候，再去监听IO事件去接力写。</p>
+<p>由此，第二种方式是</p>
+<div class="highlight"><pre><code><span></span><span class="n">uv_write</span>
+<span class="n">uv_write</span>
+<span class="n">uv_write</span>
+<span class="n">uv_write</span>
+<span class="n">uv_write</span><span class="w">  </span><span class="c1">// 假设在这个时候起IO忙碌，后面的uv_write无法直接写，加入libuv发送队列，并监听IO可写事件</span>
+<span class="n">uv_write</span>
+<span class="p">...</span>
+</code></pre></div>
+<p>这里每个<code>uv_write</code>和<code>on_write</code>是完全独立的，这样在IO空闲的时候，write调用会“马上”执行，快速占满IO，当IO忙碌后，发包数据进入libuv发送队列，然后加入IO监听可写事件，触发可写事件后再继续write发送队列里的数据，截取<code>uv_write</code>的部分核心代码</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/* If the queue was empty when this function began, we should attempt to</span>
+<span class="cm"> * do the write immediately. Otherwise start the write_watcher and wait</span>
+<span class="cm"> * for the fd to become writable.</span>
+<span class="cm"> */</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">connect_req</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="cm">/* Still connecting, do nothing. */</span>
+<span class="p">}</span>
+<span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">empty_queue</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">uv__write</span><span class="p">(</span><span class="n">stream</span><span class="p">);</span>
+<span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="cm">/*</span>
+<span class="cm">   * blocking streams should never have anything in the queue.</span>
+<span class="cm">   * if this assert fires then somehow the blocking stream isn&#39;t being</span>
+<span class="cm">   * sufficiently flushed in uv__write.</span>
+<span class="cm">   */</span>
+<span class="w">  </span><span class="n">assert</span><span class="p">(</span><span class="o">!</span><span class="p">(</span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">flags</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">UV_HANDLE_BLOCKING_WRITES</span><span class="p">));</span>
+<span class="w">  </span><span class="n">uv__io_start</span><span class="p">(</span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">stream</span><span class="o">-&gt;</span><span class="n">io_watcher</span><span class="p">,</span><span class="w"> </span><span class="n">POLLOUT</span><span class="p">);</span>
+<span class="w">  </span><span class="n">uv__stream_osx_interrupt_select</span><span class="p">(</span><span class="n">stream</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>如果当前没有正在进行的写操作，那么这次的写操作将立即触发，否则就加入IO监听，等待可写事件触发，总之libuv的tcp接口<strong>读操作默认异步，不支持整包，写操作默认优先同步，同步失败后转异步，支持整包</strong>。</p>
+<p>libuv同时也提供udp接口，除了udp的读写只能是整包的，其余原理是一样的，<strong>读操作默认异步，整包读取，写操作默认优先同步，同步失败后转异步，整包发送</strong>。但是这里提到udp会有额外的考量，在发包的时候发包接口无法直接得到结果，而是需要通过回调得知，如果对网络延时要求很高，不希望发送队列堆积太多的包，像<code>uv_write</code>和<code>uv_udp_send</code>这种异步接口是无法保证libuv的网络发送队列不会过度堆积的。此时libuv同时提供了同步调用的接口，以udp的<code>uv_udp_try_send</code>为例</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;uv.h&gt;</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">uv_loop_t</span><span class="o">*</span><span class="w"> </span><span class="n">loop</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_default_loop</span><span class="p">();</span>
+
+<span class="w">  </span><span class="n">uv_udp_t</span><span class="w"> </span><span class="n">send_socket</span><span class="p">;</span>
+<span class="w">  </span><span class="n">uv_udp_init</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">send_socket</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">uv_buf_t</span><span class="w"> </span><span class="n">buffer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_buf_init</span><span class="p">(</span><span class="s">&quot;Hello, server!&quot;</span><span class="p">,</span><span class="w"> </span><span class="mi">14</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr_in</span><span class="w"> </span><span class="n">send_addr</span><span class="p">;</span>
+<span class="w">  </span><span class="n">uv_ip4_addr</span><span class="p">(</span><span class="s">&quot;127.0.0.1&quot;</span><span class="p">,</span><span class="w"> </span><span class="mi">8080</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">send_addr</span><span class="p">);</span>
+
+<span class="w">  </span><span class="kt">ssize_t</span><span class="w"> </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_udp_try_send</span><span class="p">(</span><span class="o">&amp;</span><span class="n">send_socket</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">buffer</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">send_addr</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">result</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Data sent successfully! Sent %zd bytes.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">result</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">fprintf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Error sending data: %s</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">result</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">uv_run</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">UV_RUN_DEFAULT</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这个接口不会使用libuv的发送队列，直接返回结果。在对延时有严格要求的时候，在上层自定义延时保证策略。同时这两个接口混用也不会产生异常，libuv内部会处理相关冲突，以udp为例</p>
+<div class="highlight"><pre><code><span></span><span class="n">uv_udp_send</span>
+<span class="n">uv_udp_send</span>
+<span class="n">uv_udp_send</span>
+<span class="n">uv_udp_try_send</span><span class="w">  </span><span class="c1">// 若前面几次uv_udp_send调用没有遇到IO忙碌，很顺利的write成功，没有IO监听，那么此次uv_udp_try_send会正常调用write</span>
+</code></pre></div>
+<p>也会有另一种情况</p>
+<div class="highlight"><pre><code><span></span><span class="n">uv_udp_send</span>
+<span class="n">uv_udp_send</span>
+<span class="n">uv_udp_send</span>
+<span class="p">...</span>
+<span class="n">uv_udp_send</span><span class="w"> </span><span class="c1">// 在此刻已经IO繁忙，后续的调用都加入发送队列，监听IO可写事件</span>
+<span class="p">...</span>
+<span class="n">uv_udp_try_send</span><span class="w">  </span><span class="c1">// 此时调用会马上返回失败，因为发送队列里仍有数据</span>
+</code></pre></div>
+<p>相反的，<code>uv_udp_try_send</code>不会对后续的调用有什么影响，结果立即生效</p>
+<div class="highlight"><pre><code><span></span><span class="n">uv_udp_try_send</span>
+<span class="n">uv_udp_try_send</span>
+<span class="n">uv_udp_send</span><span class="w">  </span><span class="c1">// 此次调用不会受到uv_udp_try_send的影响</span>
+</code></pre></div>
+<p>截取部分代码分析，对于<code>uv_udp_send</code></p>
+<div class="highlight"><pre><code><span></span><span class="cm">/* It&#39;s legal for send_queue_count &gt; 0 even when the write_queue is empty;</span>
+<span class="cm"> * it means there are error-state requests in the write_completed_queue that</span>
+<span class="cm"> * will touch up send_queue_size/count later.</span>
+<span class="cm"> */</span>
+<span class="n">empty_queue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">handle</span><span class="o">-&gt;</span><span class="n">send_queue_count</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="p">...</span>
+<span class="p">...</span>
+<span class="p">...</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">empty_queue</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="p">(</span><span class="n">handle</span><span class="o">-&gt;</span><span class="n">flags</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">UV_HANDLE_UDP_PROCESSING</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">uv__udp_sendmsg</span><span class="p">(</span><span class="n">handle</span><span class="p">);</span>
+<span class="w">  </span><span class="cm">/* `uv__udp_sendmsg` may not be able to do non-blocking write straight</span>
+<span class="cm">   * away. In such cases the `io_watcher` has to be queued for asynchronous</span>
+<span class="cm">   * write.</span>
+<span class="cm">   */</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">QUEUE_EMPTY</span><span class="p">(</span><span class="o">&amp;</span><span class="n">handle</span><span class="o">-&gt;</span><span class="n">write_queue</span><span class="p">))</span>
+<span class="w">    </span><span class="n">uv__io_start</span><span class="p">(</span><span class="n">handle</span><span class="o">-&gt;</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">handle</span><span class="o">-&gt;</span><span class="n">io_watcher</span><span class="p">,</span><span class="w"> </span><span class="n">POLLOUT</span><span class="p">);</span>
+<span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">uv__io_start</span><span class="p">(</span><span class="n">handle</span><span class="o">-&gt;</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">handle</span><span class="o">-&gt;</span><span class="n">io_watcher</span><span class="p">,</span><span class="w"> </span><span class="n">POLLOUT</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>当发送队列有数据时，不会马上去发数据，而是监听IO可写事件。而对于<code>uv_udp_try_send</code></p>
+<div class="highlight"><pre><code><span></span><span class="cm">/* already sending a message */</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">handle</span><span class="o">-&gt;</span><span class="n">send_queue_count</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">UV_EAGAIN</span><span class="p">;</span>
+</code></pre></div>
+<p>如果发送队列有数据，本次调用会马上返回错误。</p>
+<p>由此可见，接口混用也不会有什么异常，但是如果没有正确理解，就可能没有达到我们预期想要的效果。同时tcp同样也提供同步写接口<code>uv_try_write</code>，原理一致，不再赘述。</p>
+<h3>2.2、文件</h3>
+<p>libuv提供了一系列的文件操作，包括打开文件或目录，读写文件，移动、拷贝文件等等。跟网络IO一样，文件IO也有类似的问题，读写IO阻塞如何解决，单次write调用写不全数据，read调用读不全数据等等。但是文件IO场景相对好一些，文件有多少数据都是“确定”的，基于这点，libuv不会去默认监听文件IO事件，一个简单的例子是</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;uv.h&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;cstdio&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;cstdlib&gt;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">on_read</span><span class="p">(</span><span class="n">uv_fs_t</span><span class="o">*</span><span class="w"> </span><span class="n">req</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">req</span><span class="o">-&gt;</span><span class="n">result</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">fprintf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Read error: %s</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">req</span><span class="o">-&gt;</span><span class="n">result</span><span class="p">));</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Read completed: %.*s</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">req</span><span class="o">-&gt;</span><span class="n">result</span><span class="p">,</span><span class="w"> </span><span class="n">req</span><span class="o">-&gt;</span><span class="n">bufsml</span><span class="p">[</span><span class="mi">0</span><span class="p">].</span><span class="n">base</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 释放资源</span>
+<span class="w">  </span><span class="n">uv_fs_req_cleanup</span><span class="p">(</span><span class="n">req</span><span class="p">);</span>
+<span class="w">  </span><span class="n">free</span><span class="p">(</span><span class="n">req</span><span class="o">-&gt;</span><span class="n">bufsml</span><span class="p">[</span><span class="mi">0</span><span class="p">].</span><span class="n">base</span><span class="p">);</span>
+<span class="w">  </span><span class="n">free</span><span class="p">(</span><span class="n">req</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">uv_loop_t</span><span class="o">*</span><span class="w"> </span><span class="n">loop</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_default_loop</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">// 打开文件</span>
+<span class="w">  </span><span class="n">uv_fs_t</span><span class="w"> </span><span class="n">open_req</span><span class="p">;</span>
+<span class="w">  </span><span class="n">uv_fs_open</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">open_req</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;file.txt&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">O_RDONLY</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="k">nullptr</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 读取数据</span>
+<span class="w">  </span><span class="n">uv_buf_t</span><span class="w"> </span><span class="n">buf</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_buf_init</span><span class="p">((</span><span class="kt">char</span><span class="o">*</span><span class="p">)</span><span class="n">malloc</span><span class="p">(</span><span class="mi">1024</span><span class="p">),</span><span class="w"> </span><span class="mi">1024</span><span class="p">);</span>
+<span class="w">  </span><span class="n">uv_fs_t</span><span class="o">*</span><span class="w"> </span><span class="n">read_req</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">uv_fs_t</span><span class="o">*</span><span class="p">)</span><span class="n">malloc</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="n">uv_fs_t</span><span class="p">));</span>
+<span class="w">  </span><span class="n">uv_fs_read</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">read_req</span><span class="p">,</span><span class="w"> </span><span class="n">open_req</span><span class="p">.</span><span class="n">result</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">-1</span><span class="p">,</span><span class="w"> </span><span class="n">on_read</span><span class="p">);</span>
+
+<span class="w">  </span><span class="c1">// 进入事件循环</span>
+<span class="w">  </span><span class="n">uv_run</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">UV_RUN_DEFAULT</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在这个样例中，用<code>uv_fs_read</code>去读文件，读取的结果在<code>on_read</code>返回，但是这次读操作只有一次，如果这次读的结果没有读取完整，不会再去监听这个fd的可读事件，想要确保读取完整在<code>on_read</code>里发现没有读取完整再继续从对应的offset继续读。同样的，写操作也是类似，不会确保一次写调用<code>uv_fs_write</code>会全部写完的时候再回调。</p>
+<p>这里看的话，文件的读写调用都是一次性的，不会再继续监听这个文件fd的读写事件，读写事件触发后再去接力读写。那这里的异步IO体现在哪里呢？这里的异步其实是指，在<code>uv_fs_read</code>和<code>uv_fs_write</code>调用的时候，如果传入了回调函数，那么这次读写操作会推到libuv内部的线程池去完成，读写的结果再通过异步信号通知<code>uv_run</code>去执行回调。看一下<code>uv_fs_read</code>便知晓</p>
+<div class="highlight"><pre><code><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">uv_fs_read</span><span class="p">(</span><span class="n">uv_loop_t</span><span class="o">*</span><span class="w"> </span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">uv_fs_t</span><span class="o">*</span><span class="w"> </span><span class="n">req</span><span class="p">,</span>
+<span class="w">               </span><span class="n">uv_file</span><span class="w"> </span><span class="n">file</span><span class="p">,</span>
+<span class="w">               </span><span class="k">const</span><span class="w"> </span><span class="n">uv_buf_t</span><span class="w"> </span><span class="n">bufs</span><span class="p">[],</span>
+<span class="w">               </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">nbufs</span><span class="p">,</span>
+<span class="w">               </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">off</span><span class="p">,</span>
+<span class="w">               </span><span class="n">uv_fs_cb</span><span class="w"> </span><span class="n">cb</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">INIT</span><span class="p">(</span><span class="n">READ</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">bufs</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nb">NULL</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">nbufs</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">UV_EINVAL</span><span class="p">;</span>
+
+<span class="w">  </span><span class="n">req</span><span class="o">-&gt;</span><span class="n">file</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">file</span><span class="p">;</span>
+
+<span class="w">  </span><span class="n">req</span><span class="o">-&gt;</span><span class="n">nbufs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nbufs</span><span class="p">;</span>
+<span class="w">  </span><span class="n">req</span><span class="o">-&gt;</span><span class="n">bufs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">req</span><span class="o">-&gt;</span><span class="n">bufsml</span><span class="p">;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">nbufs</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">ARRAY_SIZE</span><span class="p">(</span><span class="n">req</span><span class="o">-&gt;</span><span class="n">bufsml</span><span class="p">))</span>
+<span class="w">    </span><span class="n">req</span><span class="o">-&gt;</span><span class="n">bufs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv__malloc</span><span class="p">(</span><span class="n">nbufs</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">bufs</span><span class="p">));</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">req</span><span class="o">-&gt;</span><span class="n">bufs</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nb">NULL</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">UV_ENOMEM</span><span class="p">;</span>
+
+<span class="w">  </span><span class="n">memcpy</span><span class="p">(</span><span class="n">req</span><span class="o">-&gt;</span><span class="n">bufs</span><span class="p">,</span><span class="w"> </span><span class="n">bufs</span><span class="p">,</span><span class="w"> </span><span class="n">nbufs</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">bufs</span><span class="p">));</span>
+
+<span class="w">  </span><span class="n">req</span><span class="o">-&gt;</span><span class="n">off</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">off</span><span class="p">;</span>
+<span class="w">  </span><span class="n">POST</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>前面都是在初始化<code>req</code>，关键看<code>POST</code>这个宏，这个宏是libuv所有文件操作的核心</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#define POST                                                                  \</span>
+<span class="cp">  do {                                                                        \</span>
+<span class="cp">    if (cb != NULL) {                                                         \</span>
+<span class="cp">      uv__req_register(loop, req);                                            \</span>
+<span class="cp">      uv__work_submit(loop,                                                   \</span>
+<span class="cp">                      req-&gt;work_req,                                         \</span>
+<span class="cp">                      UV__WORK_FAST_IO,                                       \</span>
+<span class="cp">                      uv__fs_work,                                            \</span>
+<span class="cp">                      uv__fs_done);                                           \</span>
+<span class="cp">      return 0;                                                               \</span>
+<span class="cp">    }                                                                         \</span>
+<span class="cp">    else {                                                                    \</span>
+<span class="cp">      uv__fs_work(req-&gt;work_req);                                            \</span>
+<span class="cp">      return req-&gt;result;                                                     \</span>
+<span class="cp">    }                                                                         \</span>
+<span class="cp">  }                                                                           \</span>
+<span class="cp">  while (0)</span>
+</code></pre></div>
+<p>这里可以看到文件相关的调用，如果带了回调函数，都是通过<code>uv__work_submit</code>推到libuv内部的线程池里执行，执行结束后再通知<code>uv_run</code>去接收结果。那么如果不带回调呢，这里就变成单纯的同步IO调用了，在文件IO的样例里，调用<code>uv_fs_open</code>打开文件就没有带上回调，这个调用就是单纯的同步调用。</p>
+<p>如果真的也想去监听文件IO的话，libuv提供了<code>uv_poll_start</code>，支持监听外部传入的裸fd。比如</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;uv.h&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;unistd.h&gt;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">on_poll</span><span class="p">(</span><span class="n">uv_poll_t</span><span class="o">*</span><span class="w"> </span><span class="n">handle</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">status</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">events</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">status</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">fprintf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Poll error: %s</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">status</span><span class="p">));</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">events</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">UV_READABLE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="n">buf</span><span class="p">[</span><span class="mi">1024</span><span class="p">];</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">nread</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">read</span><span class="p">(</span><span class="n">STDIN_FILENO</span><span class="p">,</span><span class="w"> </span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">buf</span><span class="p">));</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">nread</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">fprintf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Read error: %s</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">nread</span><span class="p">));</span>
+<span class="w">      </span><span class="k">return</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">nread</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">buf</span><span class="p">[</span><span class="n">nread</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sc">&#39;\0&#39;</span><span class="p">;</span>
+<span class="w">      </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Read %d bytes: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">nread</span><span class="p">,</span><span class="w"> </span><span class="n">buf</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">uv_loop_t</span><span class="o">*</span><span class="w"> </span><span class="n">loop</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_default_loop</span><span class="p">();</span>
+
+<span class="w">  </span><span class="n">uv_poll_t</span><span class="w"> </span><span class="n">poll_handle</span><span class="p">;</span>
+<span class="w">  </span><span class="n">uv_poll_init</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">poll_handle</span><span class="p">,</span><span class="w"> </span><span class="n">STDIN_FILENO</span><span class="p">);</span>
+<span class="w">  </span><span class="n">uv_poll_start</span><span class="p">(</span><span class="o">&amp;</span><span class="n">poll_handle</span><span class="p">,</span><span class="w"> </span><span class="n">UV_READABLE</span><span class="p">,</span><span class="w"> </span><span class="n">on_poll</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">uv_run</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">UV_RUN_DEFAULT</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">uv_poll_stop</span><span class="p">(</span><span class="o">&amp;</span><span class="n">poll_handle</span><span class="p">);</span>
+<span class="w">  </span><span class="n">uv_close</span><span class="p">((</span><span class="n">uv_handle_t</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">poll_handle</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这个例子是监听标准IO输入，<code>uv_poll_init</code>只要传入你自己的fd，确认下监听事件，就可以达到要求。</p>
+<p>总之，文件IO跟网络IO在场景上有差异，它不会默认去监听IO事件，并且实际的IO操作可能是在线程池运行的。但是理解事件循环和异步IO的工作原理的话，对比下其实内部实现原理是一样的，只是不同使用场景的封装不同。</p>
+<h3>2.3、定时器</h3>
+<p>libuv提供定时器功能，一个简单的例子是</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;uv.h&gt;</span>
+
+<span class="n">uv_timer_t</span><span class="w"> </span><span class="n">timer</span><span class="p">;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">timer_callback</span><span class="p">(</span><span class="n">uv_timer_t</span><span class="o">*</span><span class="w"> </span><span class="n">handle</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">uv_loop_t</span><span class="o">*</span><span class="w"> </span><span class="n">loop</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_default_loop</span><span class="p">();</span>
+<span class="w">    </span><span class="n">uv_timer_init</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">timer</span><span class="p">);</span>
+<span class="w">    </span><span class="n">uv_timer_start</span><span class="p">(</span><span class="o">&amp;</span><span class="n">timer</span><span class="p">,</span><span class="w"> </span><span class="n">timer_callback</span><span class="p">,</span><span class="w"> </span><span class="mi">1000</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="w">    </span><span class="n">uv_run</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">UV_RUN_DEFAULT</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这个例子调用<code>uv_run</code>后，1000ms后会执行<code>timer_callback</code>，实现原理是<code>uv_loop_t</code>内部维护定时器堆，将最早要执行的定时器为基准去调整<code>epoll_wait</code>的阻塞时间，确保定时器能够按时唤醒执行。</p>
+<h3>2.4、异步信号</h3>
+<p>libuv提供异步信号唤醒功能，一个简单例子是</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;uv.h&gt;</span>
+
+<span class="n">uv_loop_t</span><span class="o">*</span><span class="w"> </span><span class="n">loop</span><span class="p">;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">async_callback</span><span class="p">(</span><span class="n">uv_async_t</span><span class="o">*</span><span class="w"> </span><span class="n">handle</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">uv_stop</span><span class="p">(</span><span class="n">handle</span><span class="o">-&gt;</span><span class="n">loop</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">thread_entry</span><span class="p">(</span><span class="n">uv_async_t</span><span class="o">*</span><span class="w"> </span><span class="n">handle</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">uv_run</span><span class="p">(</span><span class="n">handle</span><span class="o">-&gt;</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">UV_RUN_DEFAULT</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">loop</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_default_loop</span><span class="p">();</span>
+
+<span class="w">  </span><span class="n">uv_async_t</span><span class="w"> </span><span class="n">async</span><span class="p">;</span>
+<span class="w">  </span><span class="n">uv_async_init</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">async</span><span class="p">,</span><span class="w"> </span><span class="n">async_callback</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">uv_thread_t</span><span class="w"> </span><span class="kr">thread</span><span class="p">;</span>
+<span class="w">  </span><span class="n">uv_thread_create</span><span class="p">(</span><span class="o">&amp;</span><span class="kr">thread</span><span class="p">,</span><span class="w"> </span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="n">uv_thread_cb</span><span class="o">&gt;</span><span class="p">(</span><span class="n">thread_entry</span><span class="p">),</span><span class="w"> </span><span class="o">&amp;</span><span class="n">async</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">uv_async_send</span><span class="p">(</span><span class="o">&amp;</span><span class="n">async</span><span class="p">);</span>
+<span class="w">  </span><span class="n">uv_thread_join</span><span class="p">(</span><span class="o">&amp;</span><span class="kr">thread</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这里开了个uv线程并调用<code>uv_run</code>阻塞等待IO，main函数线程发了个异步信号后，会唤醒uv线程执行<code>async_callback</code>退出循环，线程执行结束。</p>
+<p>前面提到<code>uv_loop_t</code>内部会维护一个异步信号IO<code>async_io_watcher</code>，每次事件循环的<code>epoll_wait</code>都会去监听异步信号IO，<code>uv_async_send</code>会往异步信号IO写数据，唤醒<code>epoll_wait</code>并执行IO事件<code>async_callback</code>。同时<code>uv_async_send</code>会用原子操作修改<code>uv_async_t</code>的状态机，确保了<code>uv_async_send</code>是线程安全的。</p>
+<h3>2.5、系统信号</h3>
+<p>除了可以处理用户线程的异步信号，<code>uv_loop_t</code>也可以处理系统信号，一个简单的例子是</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;uv.h&gt;</span>
+
+<span class="n">uv_loop_t</span><span class="o">*</span><span class="w"> </span><span class="n">loop</span><span class="p">;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">signal_callback</span><span class="p">(</span><span class="n">uv_signal_t</span><span class="o">*</span><span class="w"> </span><span class="n">handle</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">signum</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">uv_signal_stop</span><span class="p">(</span><span class="n">handle</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">loop</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_default_loop</span><span class="p">();</span>
+<span class="w">    </span><span class="n">uv_signal_t</span><span class="w"> </span><span class="n">signal</span><span class="p">;</span>
+<span class="w">    </span><span class="n">uv_signal_init</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">signal</span><span class="p">);</span>
+<span class="w">    </span><span class="n">uv_signal_start</span><span class="p">(</span><span class="o">&amp;</span><span class="n">signal</span><span class="p">,</span><span class="w"> </span><span class="n">signal_callback</span><span class="p">,</span><span class="w"> </span><span class="n">SIGINT</span><span class="p">);</span>
+<span class="w">    </span><span class="n">uv_run</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">UV_RUN_DEFAULT</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这里当程序收到SIGINT信号时，会唤醒uv线程调用<code>signal_callback</code>函数。 跟异步信号类似，前面提到<code>uv_loop_t</code>内部会维护一个系统信号IO<code>signal_io_watcher</code>，每次事件循环的<code>epoll_wait</code>会去监听系统信号IO，<code>uv_signal_start</code>会执行系统调用<code>sigaction</code>监听系统信号，收到系统信号的时候往<code>signal_io_watcher</code>的fd写数据唤醒uv线程执行对应的IO事件。</p>
+<h2>3、线程与同步</h2>
+<p>除了异步IO框架，libuv其实还提供了线程和线程同步的封装，本意还是方便我们在执行一些耗时异步任务的时候，可以抛到别的线程去执行而不会卡住我们的事件循环<code>uv_run</code>，同时基于多线程操作，libuv也提供了线程同步封装。</p>
+<h3>3.1、线程和线程池</h3>
+<p>用libuv创建一个线程也是比较方便的，一个简单的线程样例是</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;uv.h&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">thread_func</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">arg</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kt">int</span><span class="o">*</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="o">*</span><span class="p">)</span><span class="n">arg</span><span class="p">;</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;thread_func started, data = &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="o">*</span><span class="n">data</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// do some work</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;thread_func finished, data = &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="o">*</span><span class="n">data</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">uv_thread_t</span><span class="w"> </span><span class="kr">thread</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">123</span><span class="p">;</span>
+<span class="w">  </span><span class="n">uv_thread_create</span><span class="p">(</span><span class="o">&amp;</span><span class="kr">thread</span><span class="p">,</span><span class="w"> </span><span class="n">thread_func</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">data</span><span class="p">);</span>
+<span class="w">  </span><span class="n">uv_thread_join</span><span class="p">(</span><span class="o">&amp;</span><span class="kr">thread</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>实际生产中使用线程的场景有很多，但是线程的频繁创建和销毁会影响性能，这种时候我们一般会有专门的线程池，libuv给我们提供了一个线程池，屏蔽了线程池创建和销毁的过程</p>
+<p>一个简单的线程池样例是</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;uv.h&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;iostream&gt;</span>
+
+<span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">uv_work_t</span><span class="w"> </span><span class="n">req</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">data</span><span class="p">;</span>
+<span class="p">}</span><span class="w"> </span><span class="n">work_data_t</span><span class="p">;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">work_cb</span><span class="p">(</span><span class="n">uv_work_t</span><span class="o">*</span><span class="w"> </span><span class="n">req</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">auto</span><span class="o">*</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">work_data_t</span><span class="o">*</span><span class="p">)</span><span class="n">req</span><span class="o">-&gt;</span><span class="n">data</span><span class="p">;</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;work_cb started, data = &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">data</span><span class="o">-&gt;</span><span class="n">data</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// do some work</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;work_cb finished, data = &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">data</span><span class="o">-&gt;</span><span class="n">data</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">after_work_cb</span><span class="p">(</span><span class="n">uv_work_t</span><span class="o">*</span><span class="w"> </span><span class="n">req</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">status</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">auto</span><span class="o">*</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">work_data_t</span><span class="o">*</span><span class="p">)</span><span class="n">req</span><span class="o">-&gt;</span><span class="n">data</span><span class="p">;</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;after_work_cb, data = &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">data</span><span class="o">-&gt;</span><span class="n">data</span><span class="w">  </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;, status = &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">status</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+<span class="w">  </span><span class="k">delete</span><span class="w"> </span><span class="n">data</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">uv_loop_t</span><span class="o">*</span><span class="w"> </span><span class="n">loop</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_default_loop</span><span class="p">();</span>
+
+<span class="w">  </span><span class="k">auto</span><span class="o">*</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">work_data_t</span><span class="p">();</span>
+<span class="w">  </span><span class="n">data</span><span class="o">-&gt;</span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">123</span><span class="p">;</span>
+<span class="w">  </span><span class="n">data</span><span class="o">-&gt;</span><span class="n">req</span><span class="p">.</span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">data</span><span class="p">;</span>
+
+<span class="w">  </span><span class="n">uv_queue_work</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">data</span><span class="o">-&gt;</span><span class="n">req</span><span class="p">,</span><span class="w"> </span><span class="n">work_cb</span><span class="p">,</span><span class="w"> </span><span class="n">after_work_cb</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">uv_run</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">UV_RUN_DEFAULT</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这里<code>work_cb</code>会跑在线程池的线程里，<code>after_work_cb</code>会跑在<code>uv_run</code>的线程里。创建线程然后执行任务，我们可以维护这个线程的生命周期。但是线程池这里没有提供接口去创建和销毁，创建时机是懒加载，第一次使用线程池的时候初始化一次，销毁时机是调用<code>uv_library_shutdown</code>，如果没有手动调用，这个函数有<code>__attribute__((destructor))</code>修饰，程序退出的时候编译会帮忙调用。</p>
+<h3>3.2、同步原语</h3>
+<p>既然提供了线程和线程池，顺手也帮忙封装了线程同步相关调用，帮助确保线程安全。比如<code>uv_mutex_t</code>，<code>uv_rwlock_t</code>，<code>uv_sem_t</code>，<code>uv_cond_t</code>等，实际上就是封装好的，屏蔽了平台细节的互斥锁，读写锁，信号量，条件变量，这些封装不依赖<code>uv_loop_t</code>事件循环。</p>
+<p>除此之外，还提供了<code>uv_barrier_t</code>线程屏障的功能</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">_uv_barrier</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">uv_mutex_t</span><span class="w"> </span><span class="n">mutex</span><span class="p">;</span>
+<span class="w">  </span><span class="n">uv_cond_t</span><span class="w"> </span><span class="n">cond</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">unsigned</span><span class="w"> </span><span class="n">threshold</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">unsigned</span><span class="w"> </span><span class="n">in</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">unsigned</span><span class="w"> </span><span class="n">out</span><span class="p">;</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>通俗讲就是强制让所有线程执行到同一个进度后，再继续往下执行，一个简单例子是</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;uv.h&gt;</span>
+
+<span class="cp">#define THREAD_COUNT 4</span>
+
+<span class="n">uv_barrier_t</span><span class="w"> </span><span class="n">barrier</span><span class="p">;</span>
+<span class="kt">int</span><span class="w"> </span><span class="n">shared_data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">worker</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">arg</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="p">(</span><span class="kt">int</span><span class="o">*</span><span class="p">)</span><span class="n">arg</span><span class="p">;</span>
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Worker %d started.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// do some work</span>
+<span class="w">  </span><span class="n">shared_data</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">id</span><span class="p">;</span>
+<span class="w">  </span><span class="n">uv_barrier_wait</span><span class="p">(</span><span class="o">&amp;</span><span class="n">barrier</span><span class="p">);</span>
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Worker %d finished.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">uv_thread_t</span><span class="w"> </span><span class="n">threads</span><span class="p">[</span><span class="n">THREAD_COUNT</span><span class="p">];</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">thread_ids</span><span class="p">[</span><span class="n">THREAD_COUNT</span><span class="p">];</span>
+
+<span class="w">  </span><span class="n">uv_barrier_init</span><span class="p">(</span><span class="o">&amp;</span><span class="n">barrier</span><span class="p">,</span><span class="w"> </span><span class="n">THREAD_COUNT</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">THREAD_COUNT</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">thread_ids</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">    </span><span class="n">uv_thread_create</span><span class="p">(</span><span class="o">&amp;</span><span class="n">threads</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="w"> </span><span class="n">worker</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">thread_ids</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">THREAD_COUNT</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">uv_thread_join</span><span class="p">(</span><span class="o">&amp;</span><span class="n">threads</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">uv_barrier_destroy</span><span class="p">(</span><span class="o">&amp;</span><span class="n">barrier</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Shared data: %d</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">shared_data</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这个例子中，所有线程全都执行到<code>uv_barrier_wait</code>后，才会继续往下运行。实现方式也不复杂，看<code>uv_barrier_wait</code>函数</p>
+<div class="highlight"><pre><code><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">uv_barrier_wait</span><span class="p">(</span><span class="n">uv_barrier_t</span><span class="o">*</span><span class="w"> </span><span class="n">barrier</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">struct</span><span class="w"> </span><span class="nc">_uv_barrier</span><span class="o">*</span><span class="w"> </span><span class="n">b</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">last</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">barrier</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nb">NULL</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">barrier</span><span class="o">-&gt;</span><span class="n">b</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nb">NULL</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">UV_EINVAL</span><span class="p">;</span>
+
+<span class="w">  </span><span class="n">b</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">barrier</span><span class="o">-&gt;</span><span class="n">b</span><span class="p">;</span>
+<span class="w">  </span><span class="n">uv_mutex_lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">b</span><span class="o">-&gt;</span><span class="n">mutex</span><span class="p">);</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">++</span><span class="n">b</span><span class="o">-&gt;</span><span class="n">in</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">b</span><span class="o">-&gt;</span><span class="n">threshold</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">b</span><span class="o">-&gt;</span><span class="n">in</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="n">b</span><span class="o">-&gt;</span><span class="n">out</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">b</span><span class="o">-&gt;</span><span class="n">threshold</span><span class="p">;</span>
+<span class="w">    </span><span class="n">uv_cond_signal</span><span class="p">(</span><span class="o">&amp;</span><span class="n">b</span><span class="o">-&gt;</span><span class="n">cond</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">do</span>
+<span class="w">      </span><span class="n">uv_cond_wait</span><span class="p">(</span><span class="o">&amp;</span><span class="n">b</span><span class="o">-&gt;</span><span class="n">cond</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">b</span><span class="o">-&gt;</span><span class="n">mutex</span><span class="p">);</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">b</span><span class="o">-&gt;</span><span class="n">in</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">last</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="o">--</span><span class="n">b</span><span class="o">-&gt;</span><span class="n">out</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="w">  </span><span class="n">uv_cond_signal</span><span class="p">(</span><span class="o">&amp;</span><span class="n">b</span><span class="o">-&gt;</span><span class="n">cond</span><span class="p">);</span>
+
+<span class="w">  </span><span class="n">uv_mutex_unlock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">b</span><span class="o">-&gt;</span><span class="n">mutex</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">last</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在线程执行到<code>uv_barrier_wait</code>时会去等待条件变量，当所有函数都执行到<code>uv_barrier_wait</code>，线程数达到阈值<code>threshold</code>后，一个一个的通知其他条件变量继续放下执行。</p>
+<h2>4、总结</h2>
+<p>除了上面所述，libuv还提供了其他的功能，因为使用场景较少，没有全部罗列,只要清楚了事件循环的原理，其他功能的实现方式大差不差。实际生产中，可能大多数时候不会直接使用libuv，libuv更多的作为更底层的基座去提供服务，但如果知道其背后的运转机制，让写下的代码没有“心理负担”，也没什么坏处。最后，协程的流行某种程度让libuv的异步IO的方式变得似乎没有那么“先进”和“高效”，笔者对协程使用不多，了解不深，后面有时间和机会再尝试去分析学习。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "深入理解libuv事件循环.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

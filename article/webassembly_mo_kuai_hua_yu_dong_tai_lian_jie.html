@@ -1,0 +1,550 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>WebAssembly模块化与动态链接 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="WebAssembly模块化与动态链接,Web,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="WebAssembly模块化与动态链接" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>WebAssembly模块化与动态链接</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2023-06-02 18:16
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_web.html' class='article_tag'>Web</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://mp.weixin.qq.com/s/MPBwFuL2CYFVXIowoB542A' target='blank'>WebAssembly模块化与动态链接</a></p></h4>
+<h2>1. 前言</h2>
+<p>模块化编程（modular programming）是一种软件设计模式，它将软件分解为若干独立的、可替换的、具有预定功能的模块，每个模块实现一个功能，各模块通过接口（输入输出部分）组合在一起形成最终程序。当下流行的JavaScript、Python、Rust、Java 等语言都有具有模块(包)管理，甚至 C++20 开始都引入了模块化系统。</p>
+<p>模块化编程从 1980 年代开始广泛传播，是 SoC (Separation of concerns)[1] 原则的理想目标，主要有如下特点:</p>
+<ul>
+<li><p>易设计：较大的复杂问题分解为若干较小的简单问题，使我们可以从抽象的模块功能角度而非具体的实现角度去理解软件系统，从而整个系统的结构非常清晰、容易理解，设计人员在设计之初可以更加关注系统的顶层逻辑而非底层细节。</p>
+</li>
+<li><p>易实现：模块化设计适合团队开发，因为每个团队成员不需要了解系统全貌，只需关注所分配的小任务。另外团队可以灵活地增加人手，新人只需直接接手某个模块，不会影响系统其他模块的开发。</p>
+</li>
+<li><p>易测试：每个模块不但可以独立开发，也可以独立测试，最后组装时再进行联合测试。</p>
+</li>
+<li><p>易维护：如果需要修改系统或者扩展系统功能，只需针对特定模块进行修改或者添加新模块。</p>
+</li>
+<li><p>可重用：模块的代码通过模块的导出、引入的方式可以不加修改地用于其他程序的开发，避免代码的拷贝及重复开发和维护多套代码</p>
+</li>
+<li><p>低耦合、高隔离性: 每个模块都有各自的作用域空间，从而避免变量污染、命名冲突；将各模块中变量和函数的依赖问题提升到了模块间的依赖，大大简化了依赖管理。</p>
+</li>
+</ul>
+<p>模块可以理解为是一个实现特定功能的独立且通用的代码单元，意在解决代码拆分、作用域隔离、功能依赖耦合等问题，提升代码的可维护性。然而，由于模块化往往基于代码的分离而构建独立出代码单元，单一的模块往往无法作为一个单独运行单元，因此在运行过程中不可避免的需要引入动态链接的机制。</p>
+<p>WebAssembly 作为可移植且兼容 Web 的全新格式，基于模块化的 WebAssembly 动态链接机制，可以将WebAssembly 应用程序的核心逻辑分离出来，可以更容易地共享，从而消除重复逻辑；功能独立的小模块具有更高的分发、下载、加载效率，并且可以做到按需加载，从未使用的模块永远不会被下载；此外，WebAssembly 可链接模块还可以进行并行流式编译、进行模块缓存、运行期动态链接，从而进一步提升加载和启动效率。</p>
+<p>接下来，本文会从 WebAssembly 的模块化演进入手，介绍其模块化和动态链接的关键设计和实现，以及当前面临的挑战和未来的发展趋势。</p>
+<h2>2. JS 和 asm.js 模块化和动态链接</h2>
+<p>课程的第 1 章已经对 WebAssembly 的演进历史做了介绍，从其历史发展路径我们可以看出，WebAssembly 很多关键技术与 JavaScript 发展趋势和方向有很强的关联性，因此，本文先从 JavaScript 模块及其动态链接入手，进而分析 WebAssembly 多模块及动态链接相关设计和关键实现。</p>
+<h3>2.1 JavaScript 模块与动态链接</h3>
+<p>众所周知，JavaScript 有 CMJ(CommonJS)[2]，AMD(Asynchronous Module Definition)[3]，UMD(Universal Module Definition)[4]，ESM(ECMAScript modules)[5]等多种主要的模块化规范。由于CommonJS 接受度较高并且与 WebAssembly 设计比较接近，本文中的示例将基于 CommonJS 模块化规范进行定义。</p>
+<p>在 CommonJS 模块化规范中，单个独立的 JavaScript 文件可以被作为一个模块，模块中默认的定义仅在模块内部可见，文件对外接口和对象需通过module.exports 对外暴露；此外，JavaScript 文件可以通过 <code>require()</code> 接口来获取对应模块导出的对象，从而完成所需接口和对象的链接过程。在下图 1 的示例中，square.js 中定义了 Square 类用于计算矩形区域面积方法area()；为了计算 square 的面积大小，calculator.js 可以通过调用<code>require(square.js)</code> 来加载 squre.js 模块并导入 Square 类，而不需要重新实现计算 square 面积的方法，从而实现代码复用和共享。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20230602-1816-1.png" alt=""></p>
+<p>图 1. JavaScript 模块链接示意图</p>
+<p>从上图 1 的示例中，我们可以发现，JavaScript 通过 require 方法来进行 JavaScript 模块的加载和符号的动态链接，那最终符号的动态链接过程又是如何实现的呢？接下来，我们将对 NodeJS CommonJS 模块的加载和动态链接过程进行分析，从而展示 JavaScript 模块的动态链接原理及运行机制[6]。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// eslint-disable-next-line func-style  </span>
+<span class="kd">let</span><span class="w"> </span><span class="nx">wrap</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kd">function</span><span class="p">(</span><span class="nx">script</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">Module</span><span class="p">.</span><span class="nx">wrapper</span><span class="p">[</span><span class="mf">0</span><span class="p">]</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">script</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">Module</span><span class="p">.</span><span class="nx">wrapper</span><span class="p">[</span><span class="mf">1</span><span class="p">];</span><span class="w">  </span>
+<span class="p">};</span><span class="w">  </span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">wrapper</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="w">  </span>
+<span class="w">  </span><span class="s1">&#39;(function (exports, require, module, __filename, __dirname) { &#39;</span><span class="p">,</span><span class="w">  </span>
+<span class="w">  </span><span class="s1">&#39;\n});&#39;</span><span class="p">,</span><span class="w">  </span>
+<span class="p">];</span>
+</code></pre></div>
+<p>在上面的源代码中，wrap 是 NodeJS 中模块的包装器函数，wrapper 是模块的包装模板。在 JavaScript (<em>.js, </em>.mjs) 的加载过程中，如果该文件作为一个独立的模块时，NodeJS Loader 会首先通过 "模块封装器"函数 wrap 将 JavaScript 源代码包装成匿名的函数表达式对象，如下面的源代码所示。匿名函数表达式将 var、const 或 let 定义的顶级变量作用域范围限制在模块中而不是全局对象中，函数表达式参数 "module" 和 "exports" 可以用于从模块中导出值，"require" 参数用于导入外部模块，外部模块除了 JavaScript 文件，还可以是 json 文件以及本地 node 文件，<code>__filename</code> 和 _<code>_dirname</code> 参数包含模块的绝对文件名和目录路径。</p>
+<div class="highlight"><pre><code><span></span><span class="p">(</span><span class="kd">function</span><span class="p">(</span><span class="nx">exports</span><span class="p">,</span><span class="w"> </span><span class="nx">require</span><span class="p">,</span><span class="w"> </span><span class="nx">module</span><span class="p">,</span><span class="w"> </span><span class="nx">__filename</span><span class="p">,</span><span class="w"> </span><span class="nx">__dirname</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">   </span><span class="c1">// 模块代码实际存在于此处  </span>
+<span class="p">});</span>
+</code></pre></div>
+<p>当 NodeJS 将模块文件包装为运行时环境中的匿名函数对象后，当 JavaScript 通过 <code>require(path)</code> 函数尝试加载模块文件时，实际执行 NodeJS 加载器 loader.js[6] 中的 <code>Module.prototype.require</code> 函数，进而调用 <code>Module._load</code> 执行模块加载和链接，如下列的源代码所示。</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/*  </span>
+<span class="cm"> * source link:  </span>
+<span class="cm"> * https://github.com/nodejs/node/blob/8822f40b2d48841c6d4fb4c04266a5703bdf33e9/lib/internal/modules/cjs/loader.js#L1095  </span>
+<span class="cm"> */</span><span class="w">  </span>
+<span class="c1">// Loads a module at the given file path. Returns that module&#39;s  </span>
+<span class="c1">// `exports` property.  </span>
+<span class="nx">Module</span><span class="p">.</span><span class="nx">prototype</span><span class="p">.</span><span class="nx">require</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kd">function</span><span class="p">(</span><span class="nx">id</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="cm">/* ... skip irrelevant code */</span><span class="w">  </span>
+<span class="w">  </span><span class="nx">requireDepth</span><span class="o">++</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">Module</span><span class="p">.</span><span class="nx">_load</span><span class="p">(</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="cm">/* isMain */</span><span class="w"> </span><span class="kc">false</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">finally</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="nx">requireDepth</span><span class="o">--</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p><code>Module._load</code> 为了提升模块加载的效率定义了 <code>Module._cache</code> 用于缓存已经加载的模块并返回 <code>module.exports</code> 对象。如果模块已经完成加载则直接返回，否则，为文件创建一个 Module 实例后放入模块缓存中，进而调用 Module 实例的 <code>load</code> 函数执行模块的加载和链接过程，如下列源代码所示。</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/*  </span>
+<span class="cm"> * source link:  </span>
+<span class="cm"> * https://github.com/nodejs/node/blob/8822f40b2d48841c6d4fb4c04266a5703bdf33e9/lib/internal/modules/cjs/loader.js#L844  </span>
+<span class="cm"> */</span><span class="w">  </span>
+<span class="c1">// Check the cache for the requested file.  </span>
+<span class="c1">// 1. If a module already exists in the cache: return its exports object.  </span>
+<span class="c1">// 2. If the module is native: call  </span>
+<span class="c1">//    `BuiltinModule.prototype.compileForPublicLoader()` and return the exports.  </span>
+<span class="c1">// 3. Otherwise, create a new module for the file and save it to the cache.  </span>
+<span class="c1">//    Then have it load  the file contents before returning its exports  </span>
+<span class="c1">//    object.  </span>
+<span class="nx">Module</span><span class="p">.</span><span class="nx">_load</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kd">function</span><span class="p">(</span><span class="nx">request</span><span class="p">,</span><span class="w"> </span><span class="nx">parent</span><span class="p">,</span><span class="w"> </span><span class="nx">isMain</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="cm">/* ... skip irrelevant code */</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// Don&#39;t call updateChildren(), Module constructor already does.  </span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">module</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">cachedModule</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">Module</span><span class="p">(</span><span class="nx">filename</span><span class="p">,</span><span class="w"> </span><span class="nx">parent</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="cm">/* ... skip irrelevant code */</span><span class="w">  </span>
+<span class="w">  </span><span class="nx">Module</span><span class="p">.</span><span class="nx">_cache</span><span class="p">[</span><span class="nx">filename</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">module</span><span class="p">;</span><span class="w"> </span>
+
+<span class="w">  </span><span class="cm">/* ... skip irrelevant code */</span><span class="w">  </span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">threw</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="nx">module</span><span class="p">.</span><span class="nx">load</span><span class="p">(</span><span class="nx">filename</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="nx">threw</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">finally</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="cm">/* ... skip irrelevant code */</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">module</span><span class="p">.</span><span class="nx">exports</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>由于 <code>require</code> 方法可以加载多种类型的文件 (<em>.json, </em>.node, *.js), <code>Module.prototype.load</code>函数首先根据不同的文件扩展类型获取对应文件的处理函数。当加载 JavaScript 模块时， <code>Module.prototype.load</code> 函数实际调用<code>Module._extensions['.js']</code> 处理函数完成 JavaScript 模块的编译和执行逻辑，如下列源代码所示。</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/*  </span>
+<span class="cm"> * source link:  </span>
+<span class="cm"> * https://github.com/nodejs/node/blob/8822f40b2d48841c6d4fb4c04266a5703bdf33e9/lib/internal/modules/cjs/loader.js#L1068  </span>
+<span class="cm"> */</span><span class="w">  </span>
+<span class="c1">// Given a file name, pass it to the proper extension handler.  </span>
+<span class="nx">Module</span><span class="p">.</span><span class="nx">prototype</span><span class="p">.</span><span class="nx">load</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kd">function</span><span class="p">(</span><span class="nx">filename</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="cm">/* ... skip irrelevant code */</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// return the filename extension  </span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">extension</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">findLongestRegisteredExtension</span><span class="p">(</span><span class="nx">filename</span><span class="p">);</span><span class="w">  </span>
+
+<span class="w">  </span><span class="cm">/* ... skip irrelevant code */</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// invoke the extension handler, where *.js will  </span>
+<span class="w">  </span><span class="c1">// invoke Module._extensions[&#39;.js&#39;] handler  </span>
+<span class="w">  </span><span class="nx">Module</span><span class="p">.</span><span class="nx">_extensions</span><span class="p">[</span><span class="nx">extension</span><span class="p">](</span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="nx">filename</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="k">this</span><span class="p">.</span><span class="nx">loaded</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">  </span><span class="cm">/* ... skip irrelevant code */</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>NodeJS 中 <code>Module._extensions['.js']</code> 处理函数首先通过 <code>fs</code> 加载文件内容，然后调用模块实例的<code>Module.prototype._compile</code> 函数完成模块文件内容的编译，如下列源代码所示。</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/*  </span>
+<span class="cm"> * source link:  </span>
+<span class="cm"> * https://github.com/nodejs/node/blob/8822f40b2d48841c6d4fb4c04266a5703bdf33e9/lib/internal/modules/cjs/loader.js#L1226  </span>
+<span class="cm"> */</span><span class="w">  </span>
+<span class="c1">// Native extension for .js  </span>
+<span class="nx">Module</span><span class="p">.</span><span class="nx">_extensions</span><span class="p">[</span><span class="s1">&#39;.js&#39;</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kd">function</span><span class="p">(</span><span class="nx">module</span><span class="p">,</span><span class="w"> </span><span class="nx">filename</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// If already analyzed the source, then it will be cached.  </span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">cached</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">cjsParseCache</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">module</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">content</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">cached</span><span class="o">?</span><span class="p">.</span><span class="nx">source</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="nx">content</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">cached</span><span class="p">.</span><span class="nx">source</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="nx">cached</span><span class="p">.</span><span class="nx">source</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">undefined</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="nx">content</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="nx">filename</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;utf8&#39;</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="cm">/* ... skip non-critical code */</span><span class="w">  </span>
+<span class="w">  </span><span class="nx">module</span><span class="p">.</span><span class="nx">_compile</span><span class="p">(</span><span class="nx">content</span><span class="p">,</span><span class="w"> </span><span class="nx">filename</span><span class="p">);</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>模块实例的 <code>Module.prototype._compile</code> 函数会在模块上下文中执行 "模块包装器" 生成的匿名函数对象，并传递正确的<code>require</code>、<code>module</code>、<code>exports</code> 参数对象，如下列源代码所示。</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/**  </span>
+<span class="cm"> * source code links  </span>
+<span class="cm"> * https://github.com/nodejs/node/blob/8822f40b2d48841c6d4fb4c04266a5703bdf33e9/lib/internal/modules/cjs/loader.js#L1169  </span>
+<span class="cm"> */</span><span class="w">  </span>
+<span class="c1">// Run the file contents in the correct scope or sandbox. Expose  </span>
+<span class="c1">// the correct helper variables (require, module, exports) to  </span>
+<span class="c1">// the file.  </span>
+<span class="c1">// Returns exception, if any.  </span>
+<span class="nx">Module</span><span class="p">.</span><span class="nx">prototype</span><span class="p">.</span><span class="nx">_compile</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kd">function</span><span class="p">(</span><span class="nx">content</span><span class="p">,</span><span class="w"> </span><span class="nx">filename</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="cm">/* ... skip non-critical code */</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// content will be wrapped as follows by the wrapper  </span>
+<span class="w">  </span><span class="c1">// (function(exports, require, module, __filename, __dirname) {  </span>
+<span class="w">  </span><span class="c1">//    content  </span>
+<span class="w">  </span><span class="c1">// });  </span>
+
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">compiledWrapper</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">wrapSafe</span><span class="p">(</span><span class="nx">filename</span><span class="p">,</span><span class="w"> </span><span class="nx">content</span><span class="p">,</span><span class="w"> </span><span class="k">this</span><span class="p">);</span><span class="w"> </span>
+
+<span class="w">  </span><span class="cm">/* ... skip non-critical code */</span><span class="w">  </span>
+
+<span class="w">  </span><span class="c1">// prepare the arguments for the wrapped function  </span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">dirname</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">path</span><span class="p">.</span><span class="nx">dirname</span><span class="p">(</span><span class="nx">filename</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">require</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">makeRequireFunction</span><span class="p">(</span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="nx">redirects</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">result</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">exports</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">.</span><span class="nx">exports</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">thisValue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">exports</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">module</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">this</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">  </span><span class="cm">/* ... skip non-critical code */</span><span class="w">  </span>
+
+<span class="w">  </span><span class="c1">// invoke the wrapped function with arguments prepared  </span>
+<span class="w">  </span><span class="c1">// (function(exports, require, module, __filename, __dirname) {  </span>
+<span class="w">  </span><span class="c1">//    content  </span>
+<span class="w">  </span><span class="c1">//    module.exports = {}  </span>
+<span class="w">  </span><span class="c1">// });  </span>
+
+<span class="w">  </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">ReflectApply</span><span class="p">(</span><span class="nx">compiledWrapper</span><span class="p">,</span><span class="w"> </span><span class="nx">thisValue</span><span class="p">,</span><span class="w">  </span>
+<span class="w">                        </span><span class="p">[</span><span class="nx">exports</span><span class="p">,</span><span class="w"> </span><span class="nx">require</span><span class="p">,</span><span class="w"> </span><span class="nx">module</span><span class="p">,</span><span class="w"> </span><span class="nx">filename</span><span class="p">,</span><span class="w"> </span><span class="nx">dirname</span><span class="p">]);</span><span class="w">  </span>
+
+<span class="w">  </span><span class="cm">/* ... skip non-critical code */</span><span class="w">  </span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="p">;</span><span class="w">  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>从以上的分析过程，可以发现 <code>require</code> 方法执行过程完成了 CommonJS 模块的动态加载和链接过程。<code>exports</code>，<code>require</code>，<code>module</code> 等函数参数是导入模块和导出模块的共享对象，基于这些共享对象，JavaScript 模块才得以在动态加载的过程中完成符号的动态链接过程。</p>
+<h3>2.2 "asm.js" 模块与动态链接</h3>
+<p>asm.js 是 WebAssembly 的前身，是一种可用于编译期的低层级的、高效的 JavaScript 的一个严格子集，它可以通过AOT (Ahead-Of-Time，静态编译)策略来编译优化代码，因此，其模块化和对外交互特性(链接)显得尤为重要。</p>
+<p>下面给出的是一个标准 asm.js 模块的基本结构，通过这种模块化的结构，asm.js 可以保证模块内部的所有代码都遵循自己独有的标准和语法规则，即所有模块内部使用到的变量都保证已经通过 Annotation 的方式进行了强制类型声明。除此之外，asm.js 模块作为一个整体也在代码层面与原始的 JavaScript 代码进行了隔离，同时其内部还可以通过暴露出的接口与标准 JavaScript 代码进行交互，如下列代码所示。</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/* MyAsmModule module definition */</span><span class="w">  </span>
+<span class="kd">function</span><span class="w"> </span><span class="nx">MyAsmModule</span><span class="p">(</span><span class="nx">stdlib</span><span class="p">,</span><span class="w"> </span><span class="nx">foreign</span><span class="p">,</span><span class="w"> </span><span class="nx">heap</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="cm">/* asm.js module declare */</span><span class="w">  </span>
+<span class="w">    </span><span class="s2">&quot;use asm&quot;</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">    </span><span class="cm">/* varaible defintion */</span><span class="w">  </span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">variable</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w">  </span>
+
+<span class="w">    </span><span class="cm">/* funtion defintion */</span><span class="w">  </span>
+<span class="w">    </span><span class="kd">function</span><span class="w"> </span><span class="nx">add</span><span class="p">(</span><span class="nx">$0</span><span class="p">,</span><span class="w"> </span><span class="nx">$1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="nx">$0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">$0</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="c1">// annotate $0 is integer  </span>
+<span class="w">      </span><span class="nx">$1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">$1</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="c1">// annotate $1 is integer  </span>
+<span class="w">      </span><span class="nx">$2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">((</span><span class="nx">$1</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="p">(</span><span class="nx">$0</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="mf">0</span><span class="p">);</span><span class="w">   </span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="nx">$2</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="mf">0</span><span class="p">);</span><span class="w"> </span><span class="c1">// annotate $2 is integer  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+
+<span class="w">    </span><span class="cm">/* module body... */</span><span class="w">  </span>
+
+<span class="w">    </span><span class="cm">/* functions exporting */</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="nx">add</span><span class="o">:</span><span class="w"> </span><span class="nx">add</span><span class="p">,</span><span class="w">  </span>
+<span class="w">      </span><span class="nx">export_func2</span><span class="o">:</span><span class="w"> </span><span class="nx">f2</span><span class="p">,</span><span class="w">  </span>
+<span class="w">      </span><span class="cm">/* other functions */</span><span class="w">  </span>
+<span class="w">    </span><span class="p">};</span><span class="w">  </span>
+<span class="p">}</span><span class="w"> </span>
+
+<span class="cm">/* MyAsmModule module user */</span><span class="w">  </span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">buffer_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mh">0x10000</span><span class="p">;</span><span class="w">  </span>
+
+<span class="cm">/* import function defitinion */</span><span class="w">  </span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">inport_funcs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="nx">import_func1</span><span class="o">:</span><span class="w"> </span><span class="nx">fa</span><span class="w">  </span>
+<span class="w">    </span><span class="cm">/* other functions */</span><span class="w">  </span>
+<span class="p">};</span><span class="w">  </span>
+
+<span class="cm">/* shared memory definition */</span><span class="w">  </span>
+<span class="kd">var</span><span class="w"> </span><span class="nx">heap</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">ArrayBuffer</span><span class="p">(</span><span class="nx">buffer_size</span><span class="p">);</span><span class="w">  </span>
+
+<span class="cm">/* create and initialize MyAsmModule */</span><span class="w">  </span>
+<span class="kd">var</span><span class="w"> </span><span class="nx">asModule</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">MyAsmModule</span><span class="p">(</span><span class="nb">window</span><span class="p">,</span><span class="w"> </span><span class="nx">inport_funcs</span><span class="p">,</span><span class="w"> </span><span class="nx">heap</span><span class="p">);</span><span class="w">  </span>
+
+<span class="cm">/* invoke asm.js exported function */</span><span class="w">  </span>
+<span class="kd">var</span><span class="w"> </span><span class="nx">sum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">asModule</span><span class="p">.</span><span class="nx">add</span><span class="p">(</span><span class="mf">2</span><span class="p">,</span><span class="mf">3</span><span class="p">);</span>
+</code></pre></div>
+<p>从整体上看，asm.js 模块是一个标准的 JavaScript 函数，函数内部的第一行使用 “use asm” 标记来对模块进行声明。一个完整的asm.js 模块其内部被分为三个部分: 变量定义、函数定义和函数导出。模块导出的函数可以被其他 asm.js 模块引用，或者直接在 JavaScript 环境下通过 JavaScript 代码来调用运行。</p>
+<p>一个 asm.js 模块最多可以接受三个可选参数，提供对外部 JavaScript 代码和数据的访问：</p>
+<ul>
+<li><p>"stdlib": 一个标准库对象，提供对 JavaScript 标准库的有限子集的访问。<br>
+asm.js 在其标准中严格规定了一些可以在模块定义中使用的 JavaScript 标准库函数，如果在定义 asm.js 模块方法时使用到这些标准库函数，JavaScript 引擎在编译代码时会自动使用这些函数所对应的静态编译的 AOT 版本代码，从而在最大程度上提高代码的执行效率。</p>
+</li>
+<li><p>"foreign": 外部函数接口 (FFI)，提供对自定义外部 JavaScript 函数的访问。<br>
+asm.js 本身无法处理的各类场景都可以放到模块外部的函数中进行统一处理，然后再通过该参数在模块内部进行引用。</p>
+</li>
+<li><p>"heap": heap 堆缓冲区，提供一个 ArrayBuffer 作为 asm.js 堆。<br>
+由于标准的 asm.js 模块在被 JavaScript 引擎解析和执行之前便会经过 AOT 处理被编译成静态代码，这部分静态代码有着固定的可用内存段。模块运行时对变量的内存分配也统一在这个固定大小的堆内存上进行 ，因此，所有 asm.js 模块外部的数据都需要存放到该堆内存中才能够在 asm.js 模块内部使用。</p>
+</li>
+</ul>
+<p>asm.js 模块的参数使得模块可以调用外部 JavaScript，并与外部 JavaScript 共享其 ArrayBuffer
+堆缓冲区；相反，从模块返回的导出对象允许外部 JavaScript 调用 asm.js；asm.js 对象的交互和绑定过程我们称之为 asm.js
+模块链接。asm.js 模块化和链接的底层机制基本沿袭了 JavaScript 模块和链接的设计，并在一定程度上被 WebAssembly 继承并发展，虽然
+asm.js 标准自 2014 年发布至今已经鲜有人关注了，但可以为我们深入理解 WebAssembly 模块及链接机制提供帮助。</p>
+<p>接下来，就让我们一起对 WebAssembly 的模块化和链接机制进行分析和理解。</p>
+<h2>3. WebAssembly 模块及动态链接</h2>
+<p>WebAssembly 在 asm.js 的基础上对模块和链接机制进行了扩展，它定义了 import 和 export 段来声明与外界环境交互的关键对象和组件；WebAssembly 模块介绍请参见课程的第 4 章内容。</p>
+<p>asm.js 模块通过输入参数来引入外界环境的变量，为了提供统一入口来导入多种不同的类型，WebAssembly 定义了 Import 段来声明需要使用到的外界环境变量。Import 段会声明模块所使用的所有类型的导入对象，包括 Fucntion 对象、Table 对象、 Memroy 对象或 Global 对象。Import 的设计初衷是使模块可以共享代码和数据，同时支持模块独立编译和模块缓存；在模块进行实例化阶段，这些导入对象将由宿主环境或者三方模块提供。</p>
+<p>与 asm.js 通过返回值来实现模块的内部函数导出给外部环境使用不同，WebAssembly 采用了类似 CommonJS 的更友好和灵活的方式，它通过与 <code>module.exports</code> 相似的 Export 段方式来导出不同类型的内部变量。Export 段声明了一个对象的列表，其中包含了模块实例化后外部环境可用的各种类型模块内部定义的对象，这些对象可以是 Function、 Table、Memory 或 Global 中的任意类型。</p>
+<p>因此，WebAssembly 作为可移植性，语言和平台无关的发布产物，可以嵌入在众多平台上运行；它的运行时加载和宿主的链接过程主要通过 <code>import</code> 和 <code>export</code> 两个段中的内容来完成；其中，包含了 WebAssembly 的4种类型的关键对象，他们分别是 Function，Global，Memory，Table。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20230602-1816-2.png" alt=""></p>
+<p>图 2. WebAssembly 模块链接示意图</p>
+<p>WebAssembly 可以嵌入众多的宿主及不同的语言，并仍在不断的在扩展现有边界；上图 2 展示了 WebAssembly 与外部环境对象链接，内存共享和交互的主要场景；其中 JavaScript 是 WebAssembly 相对成熟的宿主环境和语言，因此，接下来，本文将以 JavaScript 作为宿主环境，通过如下三个关键的场景来深入分析 WebAssembly 与 JavaScript 环境的运行期动态链接原理及其可能的实现。</p>
+<h3>3.1 WebAssembly exports -&gt; JavaScript imports</h3>
+<p>上图 2 所示的 WebAssembly 链接场景中，<code>shared-module.wasm</code> 提供了一个共享的 WebAssembly 模块，定义并导出了 WebAssembly 核心类型的对象，包括 Global 栈指针变量 <code>stack_pointer</code>，Table 对象 <code>indrect_funtion_table</code>，memory 对象以及全局函数 <code>fib</code> 和 <code>distance</code>。JavaScript 宿主在运行期可以动态加载 <code>shared-module.wasm</code> 文件，并通过 WebAssembly 执行环境创建 shared-module 模块实例，最后为 WebAssembly 执行环境中的 <code>exports</code> 对象在 JavaScript 环境中创建对应的 JavaScript 对象实例，从而完成 <code>shared-module.wasm</code> 模块的动态加载和链接过程；此后，在运行环境中就可以按照 JavaScript 访问方式来范围和调用 WebAssembly <code>exports</code> 的多种类型的对象实例，如下列代码所示。</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/* source link:  </span>
+<span class="cm"> * https://github.com/yaozhongxiao/webassembly_tech/tree/master/samples/module-linking/js-shared-module-linking.js  </span>
+<span class="cm"> */</span><span class="w">   </span>
+<span class="nx">JSModule</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{};</span><span class="w">  </span>
+<span class="cm">/* ... skip non-critical code */</span><span class="w">  </span>
+<span class="kd">let</span><span class="w"> </span><span class="nx">instance</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">wasmLoad</span><span class="p">(</span><span class="nx">__dirname</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s2">&quot;/lib/shared-module.wasm&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">JSModule</span><span class="p">);</span><span class="w">  </span>
+<span class="cm">/* exports memory */</span><span class="w">  </span>
+<span class="kd">let</span><span class="w"> </span><span class="nx">memory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">instance</span><span class="p">.</span><span class="nx">exports</span><span class="p">.</span><span class="nx">memory</span><span class="p">;</span><span class="w">  </span>
+<span class="cm">/* exports global */</span><span class="w">  </span>
+<span class="kd">let</span><span class="w"> </span><span class="nx">sp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">instance</span><span class="p">.</span><span class="nx">exports</span><span class="p">.</span><span class="nx">stack_pointer</span><span class="p">;</span><span class="w">  </span>
+<span class="cm">/* exports func */</span><span class="w">  </span>
+<span class="kd">let</span><span class="w"> </span><span class="nx">fn_fib</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">instance</span><span class="p">.</span><span class="nx">exports</span><span class="p">.</span><span class="nx">fib</span><span class="p">;</span><span class="w">  </span>
+<span class="kd">let</span><span class="w"> </span><span class="nx">fn_distance</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">instance</span><span class="p">.</span><span class="nx">exports</span><span class="p">.</span><span class="nx">distance</span><span class="p">;</span><span class="w">  </span>
+<span class="cm">/* exports table */</span><span class="w">  </span>
+<span class="kd">let</span><span class="w"> </span><span class="nx">tbl</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">instance</span><span class="p">.</span><span class="nx">exports</span><span class="p">.</span><span class="nx">indirect_function_table</span><span class="p">;</span>
+</code></pre></div>
+<h3>3.2 JavaScript exports -&gt; WebAssembly imports</h3>
+<p>上图 2 所示的 WebAssembly 链接场景中，<code>user-module.wasm</code> 定义了一个 WebAssembly 应用程序，其依赖于宿主环境提供的应用所需要的 WebAssembly 核心类型的对象，包括 Global 栈指针变量<code>stack_pointer</code>，Table 对象 <code>indrect_funtion_table</code>，memory 对象以及全局函数 <code>fib</code> 和<code>distance</code>。为了 WebAssembly 执行环境在加载和实例化 <code>user-module.wasm</code>模块时能够解析模块中的未定义符号，JavaScript 宿主需提供满足链接需求的 JSModule 对象，WebAssembly 虚拟机会在执行环境中创建与 JSModule 对应的 WebAssembly 实例对象，并将 JSModule 与 WebAssembly 实例对象绑定，从而完成未定义符号解析和链接。此后，WebAssembly 执行环境中就可以按照其原生对象访问方式来访问 JSModule 对象，如下列代码所示。</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/* source link:  </span>
+<span class="cm"> * https://github.com/yaozhongxiao/webassembly_tech/tree/master/samples/module-linking/js-user-module-linking.js  </span>
+<span class="cm"> */</span><span class="w">   </span>
+<span class="cm">/* ... skip non-critical code */</span><span class="w">  </span>
+<span class="cm">/* ############## 1. define the JSModule ############## */</span><span class="w">  </span>
+<span class="cm">/* define S.funcs */</span><span class="w">  </span>
+<span class="kd">function</span><span class="w"> </span><span class="nx">fib</span><span class="p">(</span><span class="nx">num</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">num</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mf">1</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">num</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">num</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">fib</span><span class="p">(</span><span class="nx">num</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">1</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">fib</span><span class="p">(</span><span class="nx">num</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mf">2</span><span class="p">);</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">distance</span><span class="p">(</span><span class="nx">n1</span><span class="p">,</span><span class="w"> </span><span class="nx">n2</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Math</span><span class="p">.</span><span class="nx">abs</span><span class="p">(</span><span class="nx">n1</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">n2</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">&quot;invoke distance(&quot;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">n1</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s2">&quot;, &quot;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">n2</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s2">&quot;) = &quot;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">ret</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">ret</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span><span class="w"> </span>
+
+<span class="cm">/* define S.table */</span><span class="w">  </span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">fn_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">WebAssembly</span><span class="p">.</span><span class="nx">Table</span><span class="p">({</span><span class="w">  </span>
+<span class="w">  </span><span class="nx">initial</span><span class="o">:</span><span class="w"> </span><span class="mf">2</span><span class="p">,</span><span class="w">  </span>
+<span class="w">  </span><span class="nx">maximum</span><span class="o">:</span><span class="w"> </span><span class="mf">2</span><span class="p">,</span><span class="w">  </span>
+<span class="w">  </span><span class="nx">element</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;anyfunc&quot;</span><span class="p">,</span><span class="w">  </span>
+<span class="p">});</span><span class="w"> </span>
+
+<span class="cm">/* define S.memory */</span><span class="w">  </span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">importMemory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">WebAssembly</span><span class="p">.</span><span class="nx">Memory</span><span class="p">({</span><span class="w">  </span>
+<span class="w">  </span><span class="nx">initial</span><span class="o">:</span><span class="w"> </span><span class="mf">256</span><span class="p">,</span><span class="w">  </span>
+<span class="w">  </span><span class="nx">maximum</span><span class="o">:</span><span class="w"> </span><span class="mf">32768</span><span class="p">,</span><span class="w">  </span>
+<span class="p">});</span><span class="w"> </span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">sp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">WebAssembly</span><span class="p">.</span><span class="nx">Global</span><span class="p">({</span><span class="w"> </span><span class="nx">value</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;i32&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">mutable</span><span class="o">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="mf">5243920</span><span class="p">);</span><span class="w">  </span>
+
+<span class="nx">JSModule</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="nx">share_ctx</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="nx">stack_pointer</span><span class="o">:</span><span class="w"> </span><span class="nx">sp</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="nx">fib</span><span class="o">:</span><span class="w"> </span><span class="nx">fib</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="nx">distance</span><span class="o">:</span><span class="w"> </span><span class="nx">distance</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="nx">indirect_function_table</span><span class="o">:</span><span class="w"> </span><span class="nx">fn_table</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="nx">memory</span><span class="o">:</span><span class="w"> </span><span class="nx">importMemory</span><span class="w">  </span>
+<span class="w">  </span><span class="p">},</span><span class="w">  </span>
+<span class="w">  </span><span class="nx">env</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="nx">print</span><span class="o">:</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">.</span><span class="nx">bind</span><span class="p">(</span><span class="nx">console</span><span class="p">),</span><span class="w">  </span>
+<span class="w">  </span><span class="p">},</span><span class="w">  </span>
+<span class="p">};</span><span class="w">  </span>
+
+<span class="cm">/* ######## 2. user-module load and link with JSDepModule ######### */</span><span class="w">  </span>
+<span class="kd">let</span><span class="w"> </span><span class="nx">instance</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">wasmLoad</span><span class="p">(</span><span class="nx">__dirname</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s2">&quot;/lib/user-module.wasm&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">JSModule</span><span class="p">);</span><span class="w">  </span>
+<span class="cm">/* ... skip non-critical code */</span>
+</code></pre></div>
+<h3>3.3 WebAssembly exports -&gt; WebAssembly imports</h3>
+<p>现有的 WebAssembly 引擎中并没有标准化的 WebAssembly 模块间链接实现，虽然 wasm-micro-runtime[12]中有多模块和加载时链接机制，但使用场景相对有限而且并非是遵循标准化规范的实现。在 JavaScript 环境中，我们可以通过前2种方式的组合来实现 <code>WebAssembly exports -&gt; JavaScript re-exports -&gt; WebAssembly imports</code> 的模式，从而间接实现 WebAssembly 模块间的动态链接机制。JavaScript 运行环境首先加载并实例化 <code>shared-module</code>，并将 WebAssembly 实例对象的 <code>exports</code> 导出变量绑定到 JSModule 对象上，这些绑定到 JSModule 上的 WebAssembly 实例对象的 <code>exports</code> 导出变量，都将作为不可变的绑定提供给其他 WebAssembly 模块。因此，<code>shared-module</code> 导出对象被包装到一个 JSModule 对象，包括 Global 栈指针变量 <code>stack_pointer</code>，Table 对象 <code>indrect_funtion_table</code>，memory 对象以及全局函数 <code>fib</code> 和 <code>distance</code>。WebAssembly 虚拟机在加载和实例化 user-module.wasm 模块时，将 JSModule 中 shared-module 对应的实例绑定导入到 user-module 模块中的 WebAssembly <code>imports</code> 中，从而完成 user-module 与 shared-moudule 导入导出符号的动态链接，如下列代码所示。</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/* source link:  </span>
+<span class="cm"> * https://github.com/yaozhongxiao/webassembly_tech/tree/master/samples/module-linking/js-user-module-linking.js  </span>
+<span class="cm"> */</span><span class="w">   </span>
+<span class="w"> </span><span class="cm">/* ... skip non-critical code */</span><span class="w">  </span>
+<span class="w"> </span><span class="cm">/* ############## 1. wasmLoad shared-module ############## */</span><span class="w">  </span>
+<span class="kd">let</span><span class="w"> </span><span class="nx">sharedModule</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">wasmLoad</span><span class="p">(</span><span class="nx">__dirname</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s2">&quot;/lib/shared-module.wasm&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">{});</span><span class="w">  </span>
+
+<span class="cm">/* ############## 2. Initialize JSModule with sharedModule ############## */</span><span class="w">  </span>
+<span class="nx">JSModule</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="nx">share_ctx</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="nx">stack_pointer</span><span class="o">:</span><span class="w"> </span><span class="nx">sharedModule</span><span class="p">.</span><span class="nx">exports</span><span class="p">.</span><span class="nx">stack_pointer</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="nx">fib</span><span class="o">:</span><span class="w"> </span><span class="nx">sharedModule</span><span class="p">.</span><span class="nx">exports</span><span class="p">.</span><span class="nx">fib</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="nx">distance</span><span class="o">:</span><span class="w"> </span><span class="nx">sharedModule</span><span class="p">.</span><span class="nx">exports</span><span class="p">.</span><span class="nx">distance</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="nx">indirect_function_table</span><span class="o">:</span><span class="w"> </span><span class="nx">sharedModule</span><span class="p">.</span><span class="nx">exports</span><span class="p">.</span><span class="nx">indirect_function_table</span><span class="p">,</span><span class="w">  </span>
+<span class="w">    </span><span class="nx">memory</span><span class="o">:</span><span class="w"> </span><span class="nx">sharedModule</span><span class="p">.</span><span class="nx">exports</span><span class="p">.</span><span class="nx">memory</span><span class="p">,</span><span class="w">  </span>
+<span class="w">  </span><span class="p">},</span><span class="w">  </span>
+<span class="w">  </span><span class="nx">env</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="nx">print</span><span class="o">:</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">.</span><span class="nx">bind</span><span class="p">(</span><span class="nx">console</span><span class="p">),</span><span class="w">  </span>
+<span class="w">  </span><span class="p">},</span><span class="w">  </span>
+<span class="p">};</span><span class="w">  </span>
+
+<span class="cm">/* ######## 3. load user-module and link with JSDepModule ######### */</span><span class="w">  </span>
+<span class="kd">let</span><span class="w"> </span><span class="nx">instance</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">wasmLoad</span><span class="p">(</span><span class="nx">__dirname</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s2">&quot;/lib/user-module.wasm&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">JSModule</span><span class="p">);</span><span class="w">  </span>
+
+<span class="cm">/* ... skip non-critical code */</span>
+</code></pre></div>
+<p>在本小节中，我们构建了 WebAssembly 与 JavaScript 环境的运行期动态链接的三种核心使用场景示例，并深入分析了模块链接的原理及其可能的实现；由于篇幅有限，我们仅在文中展示了示例程序的核心实现代码，本节所涉及到的示例代码及完整实现请参见<code>webassembly_tech</code>[11]仓库，读者可以方便的按照仓库中的指引快速重建和运行本节中所有的示例程序，</p>
+<h2>4. WebAssembly 动态链接发展趋势</h2>
+<p>使用动态链接技术，不仅能够减小 WebAssembly 应用的二进制文件大小；以此同时，将公共代码提取出来也会在一定程度上减少公共资源在内存中副本数量，从而节省宝贵的内存资源。WebAssembly 模块化和动态链接机制在 JavaScript 环境下可以通过标准的 JavaScript API 来实现大部分需求，但这种机制是建立在宿主和语言的特定约定和依赖的的基础上，对不同的宿主和语言环境没有普适性和标准化；例如，对于 Rust 环境需要采用自身语言相关的 wasm-bindgen[13] 来实现，而无法与 JavaScript 的模块化机制兼容和共享。此外，即使 JavaScript 可以在一定程度上实现 WebAssembly 的动态绑定，但 WebAssembly 仍然无法融入 JavaScript 模块系统中，导致中间有很多的交互操作和成本。CG 和 WG 有多个提案来尝试解决 WebAssembly 模块的实例化和动态链行为；接下来，我们尝试对提案的原理做简要的介绍，以便更好地了解和把握 WebAssembly 模块化和动态链接的趋势，从而最大程度的利用具有高移植性、独立于宿主和语言的可组合 WebAssembly 模块生态系统。</p>
+<h3>4.1 WebAssembly/ES Module Integration</h3>
+<p>在阐述 WebAssembly 在 JavaScript 环境中的动态链接时，我们通过 W3C 定义的标准 JavaScript API 实例化 WebAssembly 模块，该过程中需要用户手动、显示地获取模块文件，链接导入导出函数，并调用 <code>WebAssembly.instantiate</code> 或 <code>WebAssembly.instantiateStreaming</code> 进行模块实例化，如下列代码所示。</p>
+<div class="highlight"><pre><code><span></span><span class="kd">let</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="s2">&quot;./shared-module.wasm&quot;</span><span class="p">);</span><span class="w">  </span>
+<span class="kd">let</span><span class="w"> </span><span class="nx">imports</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="nx">env</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="nx">print</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w"> </span><span class="p">};</span><span class="w">  </span>
+
+<span class="w"> </span><span class="nx">WebAssembly</span><span class="p">.</span><span class="nx">instantiateStreaming</span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">imports</span><span class="p">)</span><span class="w">  </span>
+<span class="w"> </span><span class="p">.</span><span class="nx">then</span><span class="p">(</span><span class="nx">obj</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">obj</span><span class="p">.</span><span class="nx">instance</span><span class="p">.</span><span class="nx">exports</span><span class="p">.</span><span class="nx">fib</span><span class="p">());</span>
+</code></pre></div>
+<p>从工程学上来说，WebAssembly 模块的显示实例化方式是非常不友好和优雅的解决方案。虽然，我们也尝试在原型实现中提供 wasm-loader.js[14] 库来复用 WebAssembly 实例化过程，但 WebAssembly 宿主和语言环境的巨大差异不可避免地导致它们需要实现各自的库，这亟需WebAssembly 社区统一规范，从而实现进行标准化。由于 WebAssembly 和 JavaScript 的渊源以及 ES Module 组件的标准化进程，ECMAScript Module Integration [15] 提案尝试添加声明式 API 来隐藏 WebAssembly 文件请求、加载、实例化和链接过程，如下列代码所示。</p>
+<div class="highlight"><pre><code><span></span><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="nx">fib</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s2">&quot;./shared-module.wasm&quot;</span>
+</code></pre></div>
+<p>不仅如此，WebAssembly Module 也可以通过 import 来直接使用 JavaScript Module 的导出对象，从而不再依赖 "协调者" 来完成 WebAssembly 与 JS Module 的链接过程，如下列代码所示。</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/* counter.js  */</span><span class="w">  </span>
+<span class="kd">let</span><span class="w"> </span><span class="nx">count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">42</span><span class="p">;</span><span class="w">  </span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">getCount</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">count</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+<span class="k">export</span><span class="w"> </span><span class="p">{</span><span class="nx">getCount</span><span class="p">};</span><span class="w">  </span>
+
+<span class="p">;;</span><span class="w"> </span><span class="nx">main</span><span class="p">.</span><span class="nx">wat</span><span class="w"> </span><span class="o">--&gt;</span><span class="w"> </span><span class="nx">main</span><span class="p">.</span><span class="nx">wasm</span><span class="w">  </span>
+<span class="p">(</span><span class="nx">module</span><span class="w">  </span>
+<span class="w">  </span><span class="p">(</span><span class="k">import</span><span class="w"> </span><span class="s2">&quot;./counter.js&quot;</span><span class="w"> </span><span class="s2">&quot;getCount&quot;</span><span class="w"> </span><span class="p">(</span><span class="nx">func</span><span class="w"> </span><span class="nx">$getCount</span><span class="w"> </span><span class="p">(</span><span class="nx">func</span><span class="w"> </span><span class="p">(</span><span class="nx">result</span><span class="w"> </span><span class="nx">i32</span><span class="p">))))</span><span class="w">  </span>
+<span class="p">)</span>
+</code></pre></div>
+<p>此外，为了使 JavaScript 开发人员可以轻松地组合来自 WebAssembly 模块和 JavaScript 模块的功能。ECMAScriptModule Integration [5][15][16] 提案意图实现 WebAssembly 模块与 JavaScript 模块的融合，使得 WebAssembly 可以参与 JavaScript 模块图，从而使得 JavaScript 和 WebAssembly Module 在 ESM 模块上做到统一，如下图 3 所示。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20230602-1816-3.png" alt=""></p>
+<p>图 3. WebAssembly 与 JavaScript 模块集成示意图</p>
+<h3>4.2 Module Linking Proposal</h3>
+<p>WebAssembly 起源于 Web，但又不局限于 Web 的应用范畴。在前面小节中，结合 WebAssembly 模块的历史演进，深入解析了其模块和动态链接的设计。虽然在特定的宿主和语言环境下，我们可以通过特殊的约定来实现部分模块动态链接能力；但随着 WebAssembly 应用场景和语言环境的不断丰富，这种方式不可避免的会阻碍了模块化和代码重用，导致生产中的代码重复和语言间的隔离。为了解决 WebAssembly 独立定义实例化和动态链行为的困境，Module Linking[17] 曾作为 WebAssembly Proposal 在 CG 被提出，它希望建立一个可移植的、独立于宿主和语言的可组合 WebAssembly 模块生态系统。</p>
+<p>在当前的标准中，WebAssembly 只允许导入已实例化模块的导出对象，而 Module Linking 提案的中心思想是允许主模块将其依赖项作为模块导入；即，通过扩展 WebAssembly 模块规范，将模块及其依赖关系在 WebAssembly 模块和二进制格式中进行标准化，从而实现依赖项作为模块导入，并由主模块控制依赖项的实例化 (提供导入) 和 链接 (公开导出）。</p>
+<p>Module Linking 提案避免了对任何类型的运行时加载程序 (如 ld.so) 的依赖，相反，它让 WebAssembly 运行时最终完成所有工作。Module Linking 提案在 WebAssembly 二进制格式中添加了三个新的 Section 以及两个新的索引空间，他们分别是 模块索引空间和实例索引空间，其中：</p>
+<ul>
+<li><p>Module Section: 在 WebAssembly 中定义嵌套 Module。</p>
+</li>
+<li><p>Instance Section：在 WebAssembly 中声明和定义本地 Instance 实例，从而在动态链接中就可以不依赖于宿主中 WebAssembly Instance 的导入对象。</p>
+</li>
+<li><p>Alias Section: 为 Import对象 和 Export 对象创建别名，将嵌套实例的导出或父模块中的项目引入本地索引空间。</p>
+</li>
+</ul>
+<p>Module Linking 意在保证模块在加载之前的独立性，以便多个程序可以共享公共模块。在下图 4 中包含 zipper 和 imgmgk 两个程序，libc、libzip 和 libimg 三个共享模块；在模块加载之前，各模块间形成了图 4 上半部分所示的模块静态依赖关系图；基于 Module Linking 的动态链接机制，使得 WebAssembly 运行时在实例化过程中，可以根据模块静态依赖关系图创建动态链接的实例图，而不再依赖宿主的动态加载能力，如下图 4 所示。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20230602-1816-4.png" alt=""></p>
+<p>图 4. WebAssembly 动态链接概念示意图</p>
+<p>然而，模块动态链接机制最初在 Module Linking 提案中首先提出，但是该提案暂时处于 "inactive" 状态，而相关的工作转到了 "Component Model " 提案中继续推进[17]；基于此，在接下来的小节中，我们将对组建模型提案做下简要的介绍。</p>
+<h3>4.3 Component Model Proposal</h3>
+<p>ESM-Integrate [15] 和 Module-Link[17] 提案尝试"自下而上"的从已知问题入手，通过修改 WebAssembly 规范，针对性的进行改良；而 "Component Model"[18] 提案则希望"自上而下"的基于模块化(组件化)模型，制定 WebAssembly 的下一代标准。Component Model 提案的核心内容已基本标覆盖了 Module-Link 提案的关键内容，其中，涉及到 WebAssembly 模块化和动态链接的目标，概括起来主要有如下几个方面:</p>
+<ul>
+<li><p>基于 WebAssembly 核心模块，定义一种可独立编译构建的可移植的、加载和运行时高效的二进制格式组件，以实现可移植的跨语言组合。</p>
+</li>
+<li><p>支持可移植的、可虚拟化的(动态链接和多态)、可静态分析的、与语言无关的接口的定义。</p>
+</li>
+<li><p>保持并增强 WebAssembly 的独特价值。</p>
+<ul>
+<li><p>语言中立：避免组件模型只偏向一种语言或语言家族，从而避免依赖特定宿主和语言的约定。</p>
+</li>
+<li><p>可嵌入性：设计组件以嵌入到各种宿主执行环境中，包括浏览器、服务器、中介、小型设备和数据密集型系统。</p>
+</li>
+<li><p>可优化性：最大化 Ahead-of-Time 编译器可用的静态信息，以最小化实例化和启动的成本。</p>
+</li>
+<li><p>形式语义：在与核心 WebAssembly 相同的语义框架内定义组件模型。</p>
+</li>
+<li><p>Web 平台集成：通过扩展现有的 JS API、Web API 和 ESM 与 WebAssembly 的集成方式，确保浏览器可以原生支持组件。</p>
+</li>
+<li><p>增量定义组件模型，既做到可扩展，又做到向前兼容：从支持一组初始用例开始，随着时间的推移扩展用例集，根据反馈和经验确定优先级。</p>
+</li>
+</ul>
+</li>
+</ul>
+<p>Component Model 提案既制定了宏伟的目标，又提出了实施方针；即，从初始用例集出发，增量式进行的完善。为了做到既兼容 WebAssembly 的核心规范，又完成组件模型这个复杂系统的设计和实现，Component Model 提案也采用了计算机科学领域的通用解决方案 (All problems in computer science can be solved by another level of indirection)[17]，即，以 Module Linking 为中心，结合 interface types 等相关特性，为 WebAssembly 核心规范增加一个间接中间层 "Module Linking Layer"[18]，如下图 5 所示。由于 Component Model 还处于非常初期的 Feature Proposal 阶段，本文仅仅作为一个引子，相关的详细设计和演变还需要读者时刻关注和研究。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20230602-1816-5.png" alt=""></p>
+<p>图 5. WebAssembly 分层组件化概念模型示意图</p>
+<h2>5. 总结</h2>
+<p>本文基于 JavaScript 的模块及其链接方式，探讨了利用 WebAssembly 模块的导入导出机制实现动态链接的方式及存在的问题，并进一步结合最新提案，介绍其模块化和动态链接的关键设计和实现，以及当前面临的挑战和未来的发展趋势。</p>
+<p>本文涉及到的示例代码，原型实现等相关资料，请访问参考文献 module-linking[11] 所在的 <code>webassembly_tech</code> 资源库进行查阅和获取。</p>
+<h2>6. 参考文献</h2>
+<ol>
+<li><a href="https://en.wikipedia.org/wiki/Separation_of_concerns">Separation of concerns</a></li>
+<li><a href="https://en.wikipedia.org/wiki/CommonJS">CommonJS</a></li>
+<li><a href="https://wiki.commonjs.org/wiki/Modules/AsynchronousDefinition">AMD</a></li>
+<li><a href="https://github.com/umdjs/umd">Universal Module Definition</a></li>
+<li><a href="https://nodejs.org/api/esm.html">ECMAScript modules</a></li>
+<li><a href="https://github.com/nodejs/node/blob/8822f40b2d48841c6d4fb4c04266a5703bdf33e9/lib/internal/modules/cjs/loader.js">node/loader.js</a></li>
+<li><a href="A cartoon deep-dive: https://hacks.mozilla.org/2018/03/es-modules-a-cartoon-deep-dive/">ES modules</a>s</li>
+<li><a href="http://asmjs.org/spec/latest/">asm.js Working Draft</a></li>
+<li><a href="https://2ality.com/2013/02/asm-js.html">asm.js: closing the gap between JavaScript and native</a></li>
+<li><a href="https://webassembly.github.io/spec/core/syntax/index.html">WebAssembly Spec</a></li>
+<li><a href="https://github.com/yaozhongxiao/webassembly_tech/tree/master/samples/module-linking">webassembly_tech</a></li>
+<li><a href="https://github.com/bytecodealliance/wasm-micro-runtime">multi-module</a></li>
+<li><a href="https://rustwasm.github.io/wasm-bindgen/">wasm-bindgen</a></li>
+<li><a href="https://github.com/yaozhongxiao/webassembly_tech/tree/master/samples/module-linking/lib/wasm-loader.js">wasm-loader.js</a></li>
+<li><a href="https://github.com/WebAssembly/esm-integration/tree/main/proposals/esm-integration">ECMAScript module integration (Phase 2 - Proposed Spec Text Available(CG + WG))</a></li>
+<li><a href="https://www.youtube.com/watch?v=qR_b5gajwug">WebAssembly ES module integration</a></li>
+<li><a href="https://github.com/WebAssembly/module-linking">Module Linking(Inactive Proposals)</a></li>
+<li><a href="https://github.com/WebAssembly/component-model/blob/main/design/high-level/Goals.md">Component Model (Phase 1 - Feature Proposal (CG))</a></li>
+<li><a href="https://en.wikipedia.org/wiki/David_Wheeler_(computer_scientist">All problems in computer science can be solved by another level of indirection</a>)</li>
+<li><a href="https://github.com/yaozhongxiao/webassembly_tech/tree/master/proposal">Scoping and Layering the Module Linking and Interface Types proposals</a></li>
+</ol>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "WebAssembly模块化与动态链接.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

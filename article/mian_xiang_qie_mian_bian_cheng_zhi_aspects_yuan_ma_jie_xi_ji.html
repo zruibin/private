@@ -1,0 +1,698 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>面向切面编程之 Aspects 源码解析及应用 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="面向切面编程之 Aspects 源码解析及应用,iOS,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="面向切面编程之 Aspects 源码解析及应用" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>面向切面编程之 Aspects 源码解析及应用</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2016-08-16 15:38
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_ios.html' class='article_tag'>iOS</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='http://wereadteam.github.io/2016/06/30/Aspects/' target='blank'>面向切面编程之 Aspects 源码解析及应用</a></p></h4>
+<h2>1. 背景</h2>
+<p>最近在做项目的打点统计的时候，发现业务逻辑和打点逻辑经常耦合在一起，这样一方面影响了正常的业务逻辑，同时也很容易搞乱打点逻辑，而且要查看打点情况的时候也很分散，因此想着如何将两者解耦，并将打点逻辑集中起来。其实在 web 编程时候，这种场景很早就有了很成熟的方案，也就是所谓的 aop编程(面向切面编程)，其原理也就是在不更改正常的业务处理流程的前提下，通过生成一个动态代理类，从而实现对目标对象嵌入附加的操作。</p>
+<p>在 iOS 中，要想实现相似的效果也很简单，利用 OC 的动态性，通过 swizzling method 改变目标函数的 selector所指向的实现，然后在新的实现中实现附加的操作，完成之后再回到原来的处理逻辑。想明白这些之后，我就打算动手实现，当然并没有重复造轮子，我在 github发现了一个基于 swizzling method 的开源框架 <a href="https://github.com/steipete/Aspects">Aspects</a>。这个库的代码量比较小，总共就一个类文件，使用起来也比较方便，比如你想统计某个 controller 的 viewwillappear的调用次数，你只需要引入 Aspect.h 头文件，然后在合适的地方初始化如下代码即可。</p>
+<div class="highlight"><pre><code><span></span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">addKvLogAspect</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">[</span><span class="n">self</span><span class="w"> </span><span class="n">wr_Aspect_hookSelector</span><span class="o">:</span><span class="err">@</span><span class="n">selector</span><span class="p">(</span><span class="n">viewWillAppear</span><span class="o">:</span><span class="p">)</span><span class="w"> </span><span class="n">withOptions</span><span class="o">:</span><span class="n">AspectPositionAfter</span><span class="w"> </span><span class="n">usingBlock</span><span class="o">:^</span><span class="p">{</span>
+<span class="w">        </span><span class="n">KVLog_ReviewTimeline</span><span class="p">(</span><span class="n">ReviewTimeline_Open_Tab</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="n">error</span><span class="o">:</span><span class="nb">NULL</span><span class="p">];</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这篇文章主要是介绍 Aspects 源码以及其思路，以及我在实际应用中遇到的一些问题。对 swizzling method不了解的同学可以先去网上了解一下，下面的内容是基于大家对 swizzling method 有一定的了解的基础上的。</p>
+<h2>2. 基本原理</h2>
+<p>我们知道 OC 是动态语言，我们执行一个函数的时候，其实是在发一条消息：<code>[receiver message]</code>，这个过程就是根据 message 生成selector，然后根据 selector 寻找指向函数具体实现的指针
+IMP，然后找到真正的函数执行逻辑。这种处理流程给我们提供了动态性的可能，试想一下，如果在运行时，动态的改变了 selector 和 IMP的对应关系，那么就能使得原来的<code>[receiver message]</code>进入到新的函数实现了。</p>
+<p>那么具体怎么实现这样的动态替换了?</p>
+<p>直观的一种方案是提供一个统一入口，如 commonImp ,将所有需要 hook 的函数都指向这个函数，然后在这里，提取相关信息进行转发，<a href="https://github.com/bang590/JSPatch/wiki/JSPatch-%E5%AE%9E%E7%8E%B0%E5%8E%9F%E7%90%86%E8%AF%A6%E8%A7%A3#1%E5%9F%BA%E7%A1%80%E5%8E%9F%E7%90%86">JSPatch 实现原理详解</a>对此方案的可行性有进行分析，对于64位机器可能会有点问题。另外一个方法就是利用 oc 自己的消息转发机制进行转发，Aspects的大体思路，基本上是顺着这个来的。为了更好的解释这个过程，我们先来看一下消息具体是怎么找到对应的 imp 的，见下图（此图并非原创）。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20160629125258569" alt="流程图"></p>
+<p>从上面我们可以发现，在发消息的时候，如果 selector 有对应的 IMP ,则直接执行，如果没有，oc 给我们提供了几个可供补救的机会，依次有<code>resolveInstanceMethod</code>、<code>forwardingTargetForSelector</code>、<code>forwardInvocation</code>。Aspects 之所以选择在
+<code>forwardInvocation</code> 这里处理是因为，这几个阶段特性都不太一样：<code>resolvedInstanceMethod</code>
+适合给类/对象动态添加一个相应的实现，<code>forwardingTargetForSelector</code>适合将消息转发给其他对象处理,相对而言，<code>forwardInvocation</code> 是里面最灵活，最能符合需求的。因此 Aspects 的方案就是，对于待hook 的 selector，将其指向 <code>objc_msgForward</code> / <code>_objc_msgForward_stret</code> ,同时生成一个新的<code>aliasSelector</code> 指向原来的 IMP，并且 hook 住 <code>forwardInvocation</code>函数，使他指向自己的实现。按照上面的思路，当被 hook 的 selector 被执行的时候，首先根据 selector 找到了<code>objc_msgForward</code> / <code>_objc_msgForward_stret</code> ,而这个会触发消息转发，从而进入<code>forwardInvocation</code>。同时由于 <code>forwardInvocation</code> 的指向也被修改了，因此会转入新的
+<code>forwardInvocation</code> 函数，在里面执行需要嵌入的附加代码，完成之后，再转回原来的 IMP。</p>
+<h2>3. 源码分析</h2>
+<h3>3.1 数据结构</h3>
+<p>介绍完大致思路之后，下面将从代码层来来具体分析。从头文件中可以看到使用aspects有两种使用方式：1）类方法 2）实例方法</p>
+<div class="highlight"><pre><code><span></span><span class="o">+</span><span class="w"> </span><span class="p">(</span><span class="n">id</span><span class="o">&lt;</span><span class="n">AspectToken</span><span class="o">&gt;</span><span class="p">)</span><span class="n">aspect_hookSelector</span><span class="o">:</span><span class="p">(</span><span class="n">SEL</span><span class="p">)</span><span class="n">selector</span>
+<span class="w">                           </span><span class="nl">withOptions</span><span class="p">:(</span><span class="n">AspectOptions</span><span class="p">)</span><span class="n">options</span>
+<span class="w">                            </span><span class="nl">usingBlock</span><span class="p">:(</span><span class="n">id</span><span class="p">)</span><span class="n">block</span>
+<span class="w">                                 </span><span class="nl">error</span><span class="p">:(</span><span class="n">NSError</span><span class="w"> </span><span class="o">**</span><span class="p">)</span><span class="n">error</span><span class="p">;</span>
+
+<span class="c1">/// Adds a block of code before/instead/after the current `selector` for a specific instance.</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="n">id</span><span class="o">&lt;</span><span class="n">AspectToken</span><span class="o">&gt;</span><span class="p">)</span><span class="n">aspect_hookSelector</span><span class="o">:</span><span class="p">(</span><span class="n">SEL</span><span class="p">)</span><span class="n">selector</span>
+<span class="w">                           </span><span class="nl">withOptions</span><span class="p">:(</span><span class="n">AspectOptions</span><span class="p">)</span><span class="n">options</span>
+<span class="w">                            </span><span class="nl">usingBlock</span><span class="p">:(</span><span class="n">id</span><span class="p">)</span><span class="n">block</span>
+<span class="w">                                 </span><span class="nl">error</span><span class="p">:(</span><span class="n">NSError</span><span class="w"> </span><span class="o">**</span><span class="p">)</span><span class="n">error</span><span class="p">;</span>
+</code></pre></div>
+<p>两者的主要原理基本差不多，这里不做一一介绍，只是以实例方法为例进行说明。在介绍之前，先介绍里面几个重要的数据结构：</p>
+<h4>AspectOptions</h4>
+<div class="highlight"><pre><code><span></span><span class="k">typedef</span><span class="w"> </span><span class="n">NS_OPTIONS</span><span class="p">(</span><span class="n">NSUInteger</span><span class="p">,</span><span class="w"> </span><span class="n">AspectOptions</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">AspectPositionAfter</span><span class="w">   </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w">            </span><span class="c1">/// Called after the original implementation (default)</span>
+<span class="w">    </span><span class="n">AspectPositionInstead</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w">            </span><span class="c1">/// Will replace the original implementation.</span>
+<span class="w">    </span><span class="n">AspectPositionBefore</span><span class="w">  </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w">            </span><span class="c1">/// Called before the original implementation.</span>
+<span class="w">    </span><span class="n">AspectOptionAutomaticRemoval</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="c1">/// Will remove the hook after the first execution.</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>这里表示了 block
+执行的时机，也就是额外操作的执行时机，在我的应用场景中就是打点逻辑的执行时机，它可以在原始函数执行之前，也可以是执行之后，甚至可以完全替换掉原来的逻辑。</p>
+<h4>AspectsContainer</h4>
+<p>一个对象或者类的所有的 Aspects 整体情况</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// Tracks all aspects for an object/class.</span>
+<span class="err">@</span><span class="n">interface</span><span class="w"> </span><span class="n">AspectsContainer</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">NSObject</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">addAspect</span><span class="o">:</span><span class="p">(</span><span class="n">AspectIdentifier</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">aspect</span><span class="w"> </span><span class="n">withOptions</span><span class="o">:</span><span class="p">(</span><span class="n">AspectOptions</span><span class="p">)</span><span class="n">injectPosition</span><span class="p">;</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="n">BOOL</span><span class="p">)</span><span class="n">removeAspect</span><span class="o">:</span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="n">aspect</span><span class="p">;</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="n">BOOL</span><span class="p">)</span><span class="n">hasAspects</span><span class="p">;</span>
+<span class="err">@</span><span class="n">property</span><span class="w"> </span><span class="p">(</span><span class="n">atomic</span><span class="p">,</span><span class="w"> </span><span class="n">copy</span><span class="p">)</span><span class="w"> </span><span class="n">NSArray</span><span class="w"> </span><span class="o">*</span><span class="n">beforeAspects</span><span class="p">;</span>
+<span class="err">@</span><span class="n">property</span><span class="w"> </span><span class="p">(</span><span class="n">atomic</span><span class="p">,</span><span class="w"> </span><span class="n">copy</span><span class="p">)</span><span class="w"> </span><span class="n">NSArray</span><span class="w"> </span><span class="o">*</span><span class="n">insteadAspects</span><span class="p">;</span>
+<span class="err">@</span><span class="n">property</span><span class="w"> </span><span class="p">(</span><span class="n">atomic</span><span class="p">,</span><span class="w"> </span><span class="n">copy</span><span class="p">)</span><span class="w"> </span><span class="n">NSArray</span><span class="w"> </span><span class="o">*</span><span class="n">afterAspects</span><span class="p">;</span>
+<span class="err">@</span><span class="n">end</span>
+</code></pre></div>
+<h4>AspectIdentifier</h4>
+<p>一个 Aspect 的具体内容</p>
+<div class="highlight"><pre><code><span></span><span class="err">@</span><span class="n">interface</span><span class="w"> </span><span class="n">AspectIdentifier</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">NSObject</span>
+<span class="o">+</span><span class="w"> </span><span class="p">(</span><span class="n">instancetype</span><span class="p">)</span><span class="n">identifierWithSelector</span><span class="o">:</span><span class="p">(</span><span class="n">SEL</span><span class="p">)</span><span class="n">selector</span><span class="w"> </span><span class="n">object</span><span class="o">:</span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="n">object</span><span class="w"> </span><span class="n">options</span><span class="o">:</span><span class="p">(</span><span class="n">AspectOptions</span><span class="p">)</span><span class="n">options</span><span class="w"> </span><span class="n">block</span><span class="o">:</span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="n">block</span><span class="w"> </span><span class="n">error</span><span class="o">:</span><span class="p">(</span><span class="n">NSError</span><span class="w"> </span><span class="o">**</span><span class="p">)</span><span class="n">error</span><span class="p">;</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="n">BOOL</span><span class="p">)</span><span class="n">invokeWithInfo</span><span class="o">:</span><span class="p">(</span><span class="n">id</span><span class="o">&lt;</span><span class="n">AspectInfo</span><span class="o">&gt;</span><span class="p">)</span><span class="n">info</span><span class="p">;</span>
+<span class="err">@</span><span class="n">property</span><span class="w"> </span><span class="p">(</span><span class="n">nonatomic</span><span class="p">,</span><span class="w"> </span><span class="n">assign</span><span class="p">)</span><span class="w"> </span><span class="n">SEL</span><span class="w"> </span><span class="n">selector</span><span class="p">;</span>
+<span class="err">@</span><span class="n">property</span><span class="w"> </span><span class="p">(</span><span class="n">nonatomic</span><span class="p">,</span><span class="w"> </span><span class="n">strong</span><span class="p">)</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">block</span><span class="p">;</span>
+<span class="err">@</span><span class="n">property</span><span class="w"> </span><span class="p">(</span><span class="n">nonatomic</span><span class="p">,</span><span class="w"> </span><span class="n">strong</span><span class="p">)</span><span class="w"> </span><span class="n">NSMethodSignature</span><span class="w"> </span><span class="o">*</span><span class="n">blockSignature</span><span class="p">;</span>
+<span class="err">@</span><span class="n">property</span><span class="w"> </span><span class="p">(</span><span class="n">nonatomic</span><span class="p">,</span><span class="w"> </span><span class="n">weak</span><span class="p">)</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">object</span><span class="p">;</span>
+<span class="err">@</span><span class="n">property</span><span class="w"> </span><span class="p">(</span><span class="n">nonatomic</span><span class="p">,</span><span class="w"> </span><span class="n">assign</span><span class="p">)</span><span class="w"> </span><span class="n">AspectOptions</span><span class="w"> </span><span class="n">options</span><span class="p">;</span>
+<span class="err">@</span><span class="n">end</span>
+</code></pre></div>
+<p>这里主要包含了单个的 aspect 的具体信息，包括执行时机，要执行 block 所需要用到的具体信息：包括方法签名、参数等等</p>
+<h4>AspectInfo</h4>
+<p>一个 Aspect 执行环境，主要是 NSInvocation 信息。</p>
+<div class="highlight"><pre><code><span></span><span class="err">@</span><span class="n">interface</span><span class="w"> </span><span class="n">AspectInfo</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="o">&lt;</span><span class="n">AspctInfo</span><span class="o">&gt;</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="n">initWithInstance</span><span class="o">:</span><span class="p">(</span><span class="n">__unsafe_unretained</span><span class="w"> </span><span class="n">id</span><span class="p">)</span><span class="n">instance</span><span class="w"> </span><span class="n">invocation</span><span class="o">:</span><span class="p">(</span><span class="n">NSInvocation</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">invocation</span><span class="p">;</span>
+<span class="err">@</span><span class="n">property</span><span class="w"> </span><span class="p">(</span><span class="n">nonatomic</span><span class="p">,</span><span class="w"> </span><span class="n">unsafe_unretained</span><span class="p">,</span><span class="w"> </span><span class="n">readonly</span><span class="p">)</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">instance</span><span class="p">;</span>
+<span class="err">@</span><span class="n">property</span><span class="w"> </span><span class="p">(</span><span class="n">nonatomic</span><span class="p">,</span><span class="w"> </span><span class="n">strong</span><span class="p">,</span><span class="w"> </span><span class="n">readonly</span><span class="p">)</span><span class="w"> </span><span class="n">NSArray</span><span class="w"> </span><span class="o">*</span><span class="n">arguments</span><span class="p">;</span>
+<span class="err">@</span><span class="n">property</span><span class="w"> </span><span class="p">(</span><span class="n">nonatomic</span><span class="p">,</span><span class="w"> </span><span class="n">strong</span><span class="p">,</span><span class="w"> </span><span class="n">readonly</span><span class="p">)</span><span class="w"> </span><span class="n">NSInvocation</span><span class="w"> </span><span class="o">*</span><span class="n">originalInvocation</span><span class="p">;</span>
+<span class="err">@</span><span class="n">end</span>
+</code></pre></div>
+<h3>3.2 代码流程</h3>
+<p>有了上面的了解，我们就能更好的分析整个 apsects 的执行流程。添加一个 aspect 的关键流程如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20160629130456935" alt="这里写图片描述"><br>
+从代码来看，要想使用 aspects ，首先要添加一个 aspect ，可以通过上面介绍的类/实例方法。关键代码实现如下:</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="nf">aspect_add</span><span class="p">(</span><span class="n">id</span><span class="w"> </span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="n">SEL</span><span class="w"> </span><span class="n">selector</span><span class="p">,</span><span class="w"> </span><span class="n">AspectOptions</span><span class="w"> </span><span class="n">options</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">block</span><span class="p">,</span><span class="w"> </span><span class="n">NSError</span><span class="w"> </span><span class="o">**</span><span class="n">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="w">    </span><span class="n">__block</span><span class="w"> </span><span class="n">AspectIdentifier</span><span class="w"> </span><span class="o">*</span><span class="n">identifier</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nil</span><span class="p">;</span>
+<span class="w">    </span><span class="n">aspect_performLocked</span><span class="p">(</span><span class="o">^</span><span class="p">{</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">aspect_isSelectorAllowedAndTrack</span><span class="p">(</span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="n">selector</span><span class="p">,</span><span class="w"> </span><span class="n">options</span><span class="p">,</span><span class="w"> </span><span class="n">error</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="c1">//1判断能否hook</span>
+<span class="w">            </span><span class="p">...</span><span class="c1">//2 记录数据结构</span>
+<span class="w">            </span><span class="n">aspect_prepareClassAndHookSelector</span><span class="p">(</span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="n">selector</span><span class="p">,</span><span class="w"> </span><span class="n">error</span><span class="p">);</span><span class="c1">//3 swizzling</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">identifier</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这个过程基本和上面的流程图一致，这里重点介绍几个关键部分。</p>
+<h4>3.2.1 判断能否被 hook</h4>
+<p>对于对象实例而言，这里主要是根据黑名单，比如 retain forwardInvocation 等这些方法在外部是不能被 hook,(对于类对象还要确保同一个类继承关系层级中，只能被 hook 一次，因此这里需要判断子类，父类有没有被hook，之所以做这样的实现，主要是为了避免出现死循环的出现，这里有相关的讨论)。如果能够 hook，则继续下面的步骤。</p>
+<h4>3.2.2 swizzling method</h4>
+<p>这是真正的核心逻辑，swizzling method 主要有两部分，一个是对对象的 forwardInvocation 进行
+swizzling,另一个是对传入的 selector 进行 swizzling.</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">aspect_prepareClassAndHookSelector</span><span class="p">(</span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="n">SEL</span><span class="w"> </span><span class="n">selector</span><span class="p">,</span><span class="w"> </span><span class="n">NSError</span><span class="w"> </span><span class="o">**</span><span class="n">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">Class</span><span class="w"> </span><span class="n">klass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">aspect_hookClass</span><span class="p">(</span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="n">error</span><span class="p">);</span><span class="w"> </span><span class="c1">//1  swizzling forwardInvocation</span>
+<span class="w">    </span><span class="n">Method</span><span class="w"> </span><span class="n">targetMethod</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">class_getInstanceMethod</span><span class="p">(</span><span class="n">klass</span><span class="p">,</span><span class="w"> </span><span class="n">selector</span><span class="p">);</span>
+<span class="w">    </span><span class="n">IMP</span><span class="w"> </span><span class="n">targetMethodIMP</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">method_getImplementation</span><span class="p">(</span><span class="n">targetMethod</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">aspect_isMsgForwardIMP</span><span class="p">(</span><span class="n">targetMethodIMP</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="c1">//2  swizzling method</span>
+<span class="w">       </span><span class="p">...</span><span class="c1">//</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<h4>3.2.2.1 swizzling forwardInvocation:</h4>
+<p>aspect_hookClass 函数主要 swizzling 类/对象的 forwardInvocation 函数，aspects 的真正的处理逻辑都是在forwradInvocation 函数里面进行的。对于对象实例而言，源代码中并没有直接 swizzling 对象的 forwardInvocation方法，而是动态生成一个当前对象的子类，并将当前对象与子类关联,然后替换子类的 forwardInvocation 方法(这里具体方法就是调用了object_setClass(self, subclass) ,将当前对象 isa 指针指向了 subclass ,同时修改了 subclass 以及其
+subclass metaclass 的 class 方法,使他返回当前对象的 class。,这个地方特别绕，它的原理有点类似 kvo的实现，它想要实现的效果就是，将当前对象变成一个 subclass 的实例，同时对于外部使用者而言，又能把它继续当成原对象在使用，而且所有的swizzling 操作都发生在子类，这样做的好处是你不需要去更改对象本身的类，也就是，当你在 remove aspects 的时候，如果发现当前对象的aspect 都被移除了，那么，你可以将 isa 指针重新指回对象本身的类，从而消除了该对象的 swizzling,同时也不会影响到其他该类的不同对象)。对于每一个对象而言，这样的动态对象只会生成一次，这里aspect_swizzlingForwardInvocation 将使得 forwardInvocation 方法指向 aspects 自己的实现逻辑,具体代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="n">Class</span><span class="w"> </span><span class="nf">aspect_hookClass</span><span class="p">(</span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="n">NSError</span><span class="w"> </span><span class="o">**</span><span class="n">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">     </span><span class="p">...</span>
+<span class="w">     </span><span class="c1">//生成动态子类，并swizzling forwardInvocation方法</span>
+<span class="w">     </span><span class="n">subclass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">objc_allocateClassPair</span><span class="p">(</span><span class="n">baseClass</span><span class="p">,</span><span class="w"> </span><span class="n">subclassName</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"> </span>
+<span class="w">     </span><span class="n">aspect_swizzleForwardInvocation</span><span class="p">(</span><span class="n">subclass</span><span class="p">);</span><span class="c1">//swizzling forwardinvation方法</span>
+
+<span class="w">     </span><span class="n">objc_registerClassPair</span><span class="p">(</span><span class="n">subclass</span><span class="p">);</span>
+<span class="w">      </span><span class="p">...</span>
+<span class="w">     </span><span class="n">object_setClass</span><span class="p">(</span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="n">subclass</span><span class="p">);</span><span class="c1">//将当前self设置为子类，这里其实只是更改了self的isa指针而已</span>
+<span class="w">     </span><span class="k">return</span><span class="w"> </span><span class="n">subclass</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="p">...</span>
+<span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">aspect_swizzleForwardInvocation</span><span class="p">(</span><span class="n">Class</span><span class="w"> </span><span class="n">klass</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">     </span><span class="p">...</span>
+<span class="w">    </span><span class="n">IMP</span><span class="w"> </span><span class="n">originalImplementation</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">class_replaceMethod</span><span class="p">(</span><span class="n">klass</span><span class="p">,</span><span class="w"> </span><span class="err">@</span><span class="n">selector</span><span class="p">(</span><span class="n">forwardInvocation</span><span class="o">:</span><span class="p">),</span><span class="w">     </span><span class="p">(</span><span class="n">IMP</span><span class="p">)</span><span class="n">__ASPECTS_ARE_BEING_CALLED__</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;v@:@&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">originalImplementation</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">         </span><span class="n">class_addMethod</span><span class="p">(</span><span class="n">klass</span><span class="p">,</span><span class="w"> </span><span class="n">NSSelectorFromString</span><span class="p">(</span><span class="n">AspectsForwardInvocationSelectorName</span><span class="p">),</span><span class="w">        </span><span class="n">originalImplementation</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;v@:@&quot;</span><span class="p">)</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="p">...</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>由于子类本身并没有实现 forwardInvocation ，隐藏返回的 originalImplementation 将为空值，所以也不会生成NSSelectorFromString(AspectsForwardInvocationSelectorName) 。</p>
+<h4>3.2.2.2 swizzling selector</h4>
+<p>当 forwradInvocation 被 hook 之后，接下来，将对传入的 selector 进行 hook ，这里的做法是，将 selector指向了转发 IMP ，同时生成一个 aliasSelector ，指向了原来的 IMP ,同时为了放在重复 hook ,做了一个判断，如果发现selector 已经指向了转发 IMP ,那就就不需要进行交换了，代码如下</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">aspect_prepareClassAndHookSelector</span><span class="p">(</span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="n">SEL</span><span class="w"> </span><span class="n">selector</span><span class="p">,</span><span class="w"> </span><span class="n">NSError</span><span class="w"> </span><span class="o">**</span><span class="n">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">     </span><span class="p">...</span>
+<span class="w">     </span><span class="n">Method</span><span class="w"> </span><span class="n">targetMethod</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">class_getInstanceMethod</span><span class="p">(</span><span class="n">klass</span><span class="p">,</span><span class="w"> </span><span class="n">selector</span><span class="p">);</span>
+<span class="w">     </span><span class="n">IMP</span><span class="w"> </span><span class="n">targetMethodIMP</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">method_getImplementation</span><span class="p">(</span><span class="n">targetMethod</span><span class="p">);</span>
+<span class="w">     </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">aspect_isMsgForwardIMP</span><span class="p">(</span><span class="n">targetMethodIMP</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">     </span><span class="p">...</span>
+<span class="w">     </span><span class="n">SEL</span><span class="w"> </span><span class="n">aliasSelector</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">aspect_aliasForSelector</span><span class="p">(</span><span class="n">selector</span><span class="p">);</span><span class="c1">//generator aliasSelector</span>
+<span class="w">     </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="p">[</span><span class="n">klass</span><span class="w"> </span><span class="n">instancesRespondToSelector</span><span class="o">:</span><span class="n">aliasSelector</span><span class="p">])</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="n">__unused</span><span class="w"> </span><span class="n">BOOL</span><span class="w"> </span><span class="n">addedAlias</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">class_addMethod</span><span class="p">(</span><span class="n">klass</span><span class="p">,</span><span class="w"> </span><span class="n">aliasSelector</span><span class="p">,</span><span class="w"> </span><span class="n">method_getImplementation</span><span class="p">(</span><span class="n">targetMethod</span><span class="p">),</span><span class="w"> </span><span class="n">typeEncoding</span><span class="p">);</span><span class="w"> </span>
+<span class="w">     </span><span class="p">}</span>
+<span class="w">     </span><span class="n">class_replaceMethod</span><span class="p">(</span><span class="n">klass</span><span class="p">,</span><span class="w"> </span><span class="n">selector</span><span class="p">,</span><span class="w"> </span><span class="n">aspect_getMsgForwardIMP</span><span class="p">(</span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="n">selector</span><span class="p">),</span><span class="w"> </span><span class="n">typeEncoding</span><span class="p">);</span><span class="c1">// point to   _objc_msgForward</span>
+<span class="w">   </span><span class="p">...</span>
+<span class="w">     </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<h4>3.2.3 handle ForwardInvocation</h4>
+<p>基于上面的代码分析知道，转发最终的逻辑代码最终转入 <code>__ASPECTS_ARE_BEING_CALLED__</code>
+函数的处理中。这里，需要处理的部分包括额外处理代码（如打点代码）以及最终重新转会原来的 selector 所指向的函数，其实现代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">__ASPECTS_ARE_BEING_CALLED__</span><span class="p">(</span><span class="n">__unsafe_unretained</span><span class="w"> </span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="n">SEL</span><span class="w"> </span><span class="n">selector</span><span class="p">,</span><span class="w"> </span><span class="n">NSInvocation</span><span class="w"> </span><span class="o">*</span><span class="n">invocation</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="p">...</span>
+<span class="w">     </span><span class="c1">// Before hooks.  原来逻辑之前执行</span>
+<span class="w">    </span><span class="n">aspect_invoke</span><span class="p">(</span><span class="n">classContainer</span><span class="p">.</span><span class="n">beforeAspects</span><span class="p">,</span><span class="w"> </span><span class="n">info</span><span class="p">);</span>
+<span class="w">    </span><span class="n">aspect_invoke</span><span class="p">(</span><span class="n">objectContainer</span><span class="p">.</span><span class="n">beforeAspects</span><span class="p">,</span><span class="w"> </span><span class="n">info</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// Instead hooks.</span>
+<span class="w">    </span><span class="n">BOOL</span><span class="w"> </span><span class="n">respondsToAlias</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">YES</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">objectContainer</span><span class="p">.</span><span class="n">insteadAspects</span><span class="p">.</span><span class="n">count</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">classContainer</span><span class="p">.</span><span class="n">insteadAspects</span><span class="p">.</span><span class="n">count</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="c1">//是否需要替换掉原来的路基</span>
+<span class="w">         </span><span class="n">aspect_invoke</span><span class="p">(</span><span class="n">classContainer</span><span class="p">.</span><span class="n">insteadAspects</span><span class="p">,</span><span class="w"> </span><span class="n">info</span><span class="p">);</span>
+<span class="w">         </span><span class="n">aspect_invoke</span><span class="p">(</span><span class="n">objectContainer</span><span class="p">.</span><span class="n">insteadAspects</span><span class="p">,</span><span class="w"> </span><span class="n">info</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">Class</span><span class="w"> </span><span class="n">klass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">object_getClass</span><span class="p">(</span><span class="n">invocation</span><span class="p">.</span><span class="n">target</span><span class="p">);</span>
+<span class="w">        </span><span class="k">do</span><span class="w"> </span><span class="p">{</span>
+<span class="w">              </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">respondsToAlias</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">klass</span><span class="w"> </span><span class="n">instancesRespondToSelector</span><span class="o">:</span><span class="n">aliasSelector</span><span class="p">]))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                    </span><span class="p">[</span><span class="n">invocation</span><span class="w"> </span><span class="n">invoke</span><span class="p">];</span><span class="c1">//根据aliasSelector找到原来的逻辑并执行</span>
+<span class="w">                    </span><span class="k">break</span><span class="p">;</span>
+<span class="w">                </span><span class="p">}</span>
+<span class="w">            </span><span class="p">}</span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">respondsToAlias</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">(</span><span class="n">klass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">class_getSuperclass</span><span class="p">(</span><span class="n">klass</span><span class="p">)));</span>
+<span class="w">     </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// After hooks.  原来逻辑之后执行</span>
+<span class="w">     </span><span class="n">aspect_invoke</span><span class="p">(</span><span class="n">classContainer</span><span class="p">.</span><span class="n">afterAspects</span><span class="p">,</span><span class="w"> </span><span class="n">info</span><span class="p">);</span>
+<span class="w">     </span><span class="n">aspect_invoke</span><span class="p">(</span><span class="n">objectContainer</span><span class="p">.</span><span class="n">afterAspects</span><span class="p">,</span><span class="w"> </span><span class="n">info</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// If no hooks are installed, call original implementation (usually to throw an exception)</span>
+<span class="w">     </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">respondsToAlias</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="c1">//找不到aliasSelector的IMP实现，没有找到原来的逻辑，进行消息转发</span>
+<span class="w">          </span><span class="n">invocation</span><span class="p">.</span><span class="n">selector</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">originalSelector</span><span class="p">;</span>
+<span class="w">          </span><span class="n">SEL</span><span class="w"> </span><span class="n">originalForwardInvocationSEL</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NSSelectorFromString</span><span class="p">(</span><span class="n">AspectsForwardInvocationSelectorName</span><span class="p">);</span>
+<span class="w">          </span><span class="k">if</span><span class="w"> </span><span class="p">([</span><span class="n">self</span><span class="w"> </span><span class="n">respondsToSelector</span><span class="o">:</span><span class="n">originalForwardInvocationSEL</span><span class="p">])</span><span class="w"> </span><span class="p">{</span>
+<span class="w">               </span><span class="p">((</span><span class="kt">void</span><span class="p">(</span><span class="w"> </span><span class="o">*</span><span class="p">)(</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">SEL</span><span class="p">,</span><span class="w"> </span><span class="n">NSInvocation</span><span class="w"> </span><span class="o">*</span><span class="p">))</span><span class="n">objc_msgSend</span><span class="p">)(</span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="n">originalForwardInvocationSEL</span><span class="p">,</span><span class="w"> </span><span class="n">invocation</span><span class="p">);</span>
+<span class="w">          </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">              </span><span class="p">[</span><span class="n">self</span><span class="w"> </span><span class="n">doesNotRecognizeSelector</span><span class="o">:</span><span class="n">invocation</span><span class="p">.</span><span class="n">selector</span><span class="p">];</span>
+<span class="w">         </span><span class="p">}</span>
+<span class="w">     </span><span class="p">}</span><span class="w">                     </span>
+<span class="p">...</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>依次处理 before/instead/after hook 以及真正函数实现。如果没有找到原始的函数实现，还需要进行转发操作。</p>
+<h2>4. 遇到的问题</h2>
+<p>以上就是 Apsects 的实现了，接下来会介绍在实际应用过程中遇到的一些问题以及我的解决方案。</p>
+<h3>4.1 JSPatch 兼容问题</h3>
+<h4>原因</h4>
+<p>我们的项目中引入了 JSPatch 作为我们的 hot fix方案。 JSPatch 也会 hook 住对象的 forwradInvocation方法，并且 swizzling 相应的 method ，使其指向转发 IMP ,由于 aspects
+也是基于这两者实现的，那么会不会导致问题呢(其实类似的问题也会发生在对象提前被 kvo 了，会不会有影响)？</p>
+<p>回过头去看3.2.1 我们先是 hook了 类的 <code>forwardInvocation</code> 使其指向了
+<code>__ASPECTS_ARE_BEING_CALLED__</code>，然后在 swizzling method 那里，aspect 有做一个判断，如果传入的selector 指向了转发 IMP ,那么我们什么也不做。因此可想而知，如果传入的 selector 先被 JSPatch hook,那么，这里我们将不会再处理,也就不会生成 aliasSelector 。</p>
+<p>这会导致什么问题了？设想一下，当 selector 被触发的时候，由于 selector 指向了转发 IMP ，因此会进入消息转发过程，同时由于<code>forwardInvocation</code> 被 aspects 所 hook ,最终会进入到 aspects 的处理逻辑<code>__ASPECTS_ARE_BEING_CALLED__</code> 中来。让我们回过头去看看3.2.2中的分析，由于找不到 aliasSelector 的 IMP实现，因此会在此进行消息转发。而在 3.2.2.1 的分析中我们知道，子类并没有实现<code>NSSelectorFromString(AspectsForwardInvocationSelectorName)</code> ，所以这里的流程就会进入<code>doesNotRecognizeSelector</code>，从而抛出异常。</p>
+<h4>解决方案</h4>
+<p>出现上诉问题的原因在于，当 aliasSelector 没有被找到的时候，我们没能将消息正常的转发，也就是没有实现一个<code>NSSelectorFromString(AspectsForwardInvocationSelectorName)</code> ，
+使得消息有机会重新转发回去的方法。因此解决方案也就呼之欲出了，我的做法是在对子类的 <code>forwardInvocation</code>方法进行交换而不仅仅是替换，实现逻辑如下，强制生成一个
+<code>NSSelectorFromString(AspectsForwardInvocationSelectorName)</code> 指向原对象的
+<code>forwardInvocation</code> 的实现。</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="n">Class</span><span class="w"> </span><span class="nf">aspect_hookClass</span><span class="p">(</span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="n">NSError</span><span class="w"> </span><span class="o">**</span><span class="n">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="w">   </span><span class="n">subclass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">objc_allocateClassPair</span><span class="p">(</span><span class="n">baseClass</span><span class="p">,</span><span class="w"> </span><span class="n">subclassName</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="w">   </span><span class="p">...</span>
+<span class="w">   </span><span class="n">IMP</span><span class="w"> </span><span class="n">originalImplementation</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">class_replaceMethod</span><span class="p">(</span><span class="n">subclass</span><span class="p">,</span><span class="w"> </span><span class="err">@</span><span class="n">selector</span><span class="p">(</span><span class="n">forwardInvocation</span><span class="o">:</span><span class="p">),</span><span class="w"> </span><span class="p">(</span><span class="n">IMP</span><span class="p">)</span><span class="n">__ASPECTS_ARE_BEING_CALLED__</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;v@:@&quot;</span><span class="p">);</span>
+<span class="w">   </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">originalImplementation</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">class_addMethod</span><span class="p">(</span><span class="n">subclass</span><span class="p">,</span><span class="w"> </span><span class="n">NSSelectorFromString</span><span class="p">(</span><span class="n">AspectsForwardInvocationSelectorName</span><span class="p">),</span><span class="w">   </span><span class="n">originalImplementation</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;v@:@&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">Method</span><span class="w"> </span><span class="n">baseTargetMethod</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">class_getInstanceMethod</span><span class="p">(</span><span class="n">baseClass</span><span class="p">,</span><span class="w"> </span><span class="err">@</span><span class="n">selector</span><span class="p">(</span><span class="n">forwardInvocation</span><span class="o">:</span><span class="p">));</span>
+<span class="w">        </span><span class="n">IMP</span><span class="w"> </span><span class="n">baseTargetMethodIMP</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">method_getImplementation</span><span class="p">(</span><span class="n">baseTargetMethod</span><span class="p">);</span>
+<span class="w">       </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">baseTargetMethodIMP</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">               </span><span class="n">class_addMethod</span><span class="p">(</span><span class="n">subclass</span><span class="p">,</span><span class="w"> </span><span class="n">NSSelectorFromString</span><span class="p">(</span><span class="n">AspectsForwardInvocationSelectorName</span><span class="p">),</span><span class="w"> </span><span class="n">baseTargetMethodIMP</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;v@:@&quot;</span><span class="p">);</span>
+<span class="w">         </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">...</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>注意如果 <code>originalImplementation</code> 为空，那么生成的<code>NSSelectorFromString(AspectsForwardInvocationSelectorName)</code> 将指向 baseClass
+也就是真正的这个对象的 forwradInvocation ,这个其实也就是 JSPatch hook 的方法。同时为了保证 block的执行顺序（也就是前面介绍的 before hooks / instead hooks / after hooks ），这里需要将这段代码提前到 afterhooks 执行之前进行。这样就解决了 forwardInvocation 在外面已经被 hook 之后的冲突问题。</p>
+<h3>4.2 remove操作</h3>
+<h4>4.2.1 单个aspect remove</h4>
+<p>单个 aspect 的 remove 貌似有个问题，先来看看源码。</p>
+<div class="highlight"><pre><code><span></span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">aspect_isMsgForwardIMP</span><span class="p">(</span><span class="n">targetMethodIMP</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">SEL</span><span class="w"> </span><span class="n">aliasSelector</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">aspect_aliasForSelector</span><span class="p">(</span><span class="n">selector</span><span class="p">);</span>
+<span class="w">      </span><span class="n">Method</span><span class="w"> </span><span class="n">originalMethod</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">class_getInstanceMethod</span><span class="p">(</span><span class="n">klass</span><span class="p">,</span><span class="w"> </span><span class="n">aliasSelector</span><span class="p">);</span>
+<span class="w">      </span><span class="n">IMP</span><span class="w"> </span><span class="n">originalIMP</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">method_getImplementation</span><span class="p">(</span><span class="n">originalMethod</span><span class="p">);</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">originalIMP</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">            </span>
+<span class="w">            </span><span class="n">class_replaceMethod</span><span class="p">(</span><span class="n">klass</span><span class="p">,</span><span class="w"> </span><span class="n">selector</span><span class="p">,</span><span class="w"> </span><span class="n">originalIMP</span><span class="p">,</span><span class="w"> </span><span class="n">typeEncoding</span><span class="p">);</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>当你对某个 aspect 执行 remove 操作的时候，它会直接 replace 这个 selector 的
+IMP，这个操作是对整个类的所有实例都生效的，这会导致什么问题呢？</p>
+<p>以类 A 为例，你先进入了 A 的一个实例 A1 ，hook 住了方法 selector1 ，然后，并没有销毁这个实例的时候，通过其他路径又进入类 A的另一个实例 A2 ,当然也 hook 了 selector1 ，然后这个时候，如果你 A2 中执行了这个 aspect 的 remove操作，按照上面的逻辑，类 A 的 selector1 将会恢复正常，可像而知，当你退回 A1 的时候， A1 的 aspect将会失效。这里其实我的解决思路很简单，因为在执行 remove 操作的时候，其实和这个对象相关的数据结构都已经被清除了，即使不去恢复 selector1
+的执行，在进入 <code>__ASPECTS_ARE_BEING_CALLED__</code> 由于这个没有响应的 aspects,其实会直接跳到原来的处理逻辑，并不会有其他附加影响。</p>
+<h4>4.2.2 整个对象aspect remove</h4>
+<p>还有一个问题就是，aspects 的 remove 操作只能支持单个的 remove 操作,不支持一次性删除一个对象的所有 aspects。这里，也做了一个扩展，对原来的 aspects 进行扩展，实现了一次性 remove 一个对象所有 aspects 的方法。</p>
+<hr>
+
+
+
+<!--BEGIN_DATA
+<table>
+    <tr>
+    <td id='create_date'>2016-09-12 11:39</td>
+    <td id='modify_date'>2016-09-12 11:39</td>
+    <td id='is_top'>0</td>
+    <td id='summary'></td>
+    <td id='tags'></td>
+  </tr>
+</table>
+END_DATA-->
+
+<h4><p>原文出处：<a href='http://www.jianshu.com/p/dc1deaa1b28e' target='blank'>全面谈谈Aspects和JSPatch兼容问题</a></p></h4>
+<h3>1. 背景</h3>
+<p><a href="https://github.com/steipete/Aspects">Aspects</a> 和
+<a href="https://github.com/bang590/JSPatch">JSPatch</a> 是 iOS 开发中非常常见的两个库。Aspects
+提供了方便简单的方法进行面向切片编程(AOP)，JSPatch可以让你用 JavaScript 书写原生 iOS APP 和进行热修复。关于实现原理可以参考 <a href="http://wereadteam.github.io/2016/06/30/Aspects/">面向切面编程之 Aspects 源码解析及应用</a> 和 <a href="https://github.com/bang590/JSPatch/wiki/JSPatch-%E5%AE%9E%E7%8E%B0%E5%8E%9F%E7%90%86%E8%AF%A6%E8%A7%A3">JSPatch wiki</a>。简单地概括就是将原方法实现替换为<code>_objc_msgForward</code>（或<code>_objc_msgForward_stret</code>），当执行这个方法是直接进入消息转发过程，最后到达替换后的<code>-forwardInvocation:</code>，在<code>-forwardInvocation:</code>内执行新的方法，这是两者的共同原理。最近项目开发中需要用 JSPatch 替换方法修复一个 bug，然而这个方法已经使用 <code>Aspects</code> 进行 <code>hook</code> 过了，那么两者同时使用会不会有问题呢？关于这个问题，网上介绍比较详细的是 <a href="http://wereadteam.github.io/2016/06/30/Aspects/">面向切面编程之
+Aspects 源码解析及应用</a> 和 <a href="http://www.jianshu.com/p/d5c3c2f236b8">有关Swizzling的一个问题</a>，深入研究后发现这两篇文章讲得都不够全面。本文基于<code>Aspects</code> 1.4.1 和 <code>JSPatch</code> 1.1 介绍几种测试结果和原因。</p>
+<h3>2. 测试</h3>
+<h5>2.0. 源码</h5>
+<p><a href="https://github.com/zhao0/JPAndAspects">这是本文使用的测试代码</a>，你可以clone下来，泡杯咖啡，找个安静的地方跟着本文一步一步实践。</p>
+<h5>2.1. 代码说明</h5>
+<p><code>ViewController.m</code>中首先定义一个简单类<code>MyClass</code>，只有<code>-test</code>和<code>-test2</code>方法，方法内打印log</p>
+<div class="highlight"><pre><code><span></span><span class="err">@</span><span class="n">interface</span><span class="w"> </span><span class="n">MyClass</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">NSObject</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">test</span><span class="p">;</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">test2</span><span class="p">;</span>
+<span class="err">@</span><span class="n">end</span>
+<span class="err">@</span><span class="n">implementation</span><span class="w"> </span><span class="n">MyClass</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">test</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">NSLog</span><span class="p">(</span><span class="err">@</span><span class="s">&quot;MyClass origin log&quot;</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">test2</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">NSLog</span><span class="p">(</span><span class="err">@</span><span class="s">&quot;MyClass test2 origin log&quot;</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="err">@</span><span class="n">end</span>
+</code></pre></div>
+<p>接着是三个hook方法，分别是对<code>-test</code>进行<code>hook</code>的<code>-jp_hook</code>、<code>-aspects_hook</code>和对<code>-test2</code>进行<code>hook</code>的<code>-aspects_hook_test2</code></p>
+<div class="highlight"><pre><code><span></span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">jp_hook</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">[</span><span class="n">JPEngine</span><span class="w"> </span><span class="n">startEngine</span><span class="p">];</span>
+<span class="w">    </span><span class="n">NSString</span><span class="w"> </span><span class="o">*</span><span class="n">sourcePath</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[[</span><span class="n">NSBundle</span><span class="w"> </span><span class="n">mainBundle</span><span class="p">]</span><span class="w"> </span><span class="n">pathForResource</span><span class="o">:</span><span class="err">@</span><span class="s">&quot;demo&quot;</span><span class="w"> </span><span class="n">ofType</span><span class="o">:</span><span class="err">@</span><span class="s">&quot;js&quot;</span><span class="p">];</span>
+<span class="w">    </span><span class="n">NSString</span><span class="w"> </span><span class="o">*</span><span class="n">script</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">NSString</span><span class="w"> </span><span class="n">stringWithContentsOfFile</span><span class="o">:</span><span class="n">sourcePath</span><span class="w"> </span><span class="n">encoding</span><span class="o">:</span><span class="n">NSUTF8StringEncoding</span><span class="w"> </span><span class="n">error</span><span class="o">:</span><span class="n">nil</span><span class="p">];</span>
+<span class="w">    </span><span class="p">[</span><span class="n">JPEngine</span><span class="w"> </span><span class="n">evaluateScript</span><span class="o">:</span><span class="n">script</span><span class="p">];</span>
+<span class="p">}</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">aspects_hook</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">[</span><span class="n">MyClass</span><span class="w"> </span><span class="n">aspect_hookSelector</span><span class="o">:</span><span class="err">@</span><span class="n">selector</span><span class="p">(</span><span class="n">test</span><span class="p">)</span><span class="w"> </span><span class="n">withOptions</span><span class="o">:</span><span class="n">AspectPositionAfter</span><span class="w"> </span><span class="n">usingBlock</span><span class="o">:^</span><span class="p">(</span><span class="n">id</span><span class="w"> </span><span class="n">aspects</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">NSLog</span><span class="p">(</span><span class="err">@</span><span class="s">&quot;aspects log&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="n">error</span><span class="o">:</span><span class="n">nil</span><span class="p">];</span>
+<span class="p">}</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">aspects_hook_test2</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">[</span><span class="n">MyClass</span><span class="w"> </span><span class="n">aspect_hookSelector</span><span class="o">:</span><span class="err">@</span><span class="n">selector</span><span class="p">(</span><span class="n">test2</span><span class="p">)</span><span class="w"> </span><span class="n">withOptions</span><span class="o">:</span><span class="n">AspectPositionInstead</span><span class="w"> </span><span class="n">usingBlock</span><span class="o">:^</span><span class="p">(</span><span class="n">id</span><span class="w"> </span><span class="n">aspects</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">NSLog</span><span class="p">(</span><span class="err">@</span><span class="s">&quot;aspects test2 log&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="n">error</span><span class="o">:</span><span class="n">nil</span><span class="p">];</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>demo.js</code>代码也非常简单，对<code>MyClass</code>的<code>-test</code>进行替换</p>
+<div class="highlight"><pre><code><span></span><span class="n">require</span><span class="p">(</span><span class="err">&#39;</span><span class="n">MyClass</span><span class="err">&#39;</span><span class="p">)</span>
+<span class="n">defineClass</span><span class="p">(</span><span class="err">&#39;</span><span class="n">MyClass</span><span class="err">&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nl">test</span><span class="p">:</span><span class="w"> </span><span class="n">function</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="c1">//        self.ORIGtest();</span>
+<span class="w">        </span><span class="n">console</span><span class="p">.</span><span class="n">log</span><span class="p">(</span><span class="s">&quot;jspatch log&quot;</span><span class="p">)</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">});</span>
+</code></pre></div>
+<h5>2.2. 具体测试</h5>
+<h6>2.2.1. JSPatch 先 hook 、Aspects 采用 AspectPositionInstead (替换) hook</h6>
+<p>那么代码就是下面这样，注意把<code>-aspects_hook</code>方法设置为<code>AspectPositionInstead</code></p>
+<div class="highlight"><pre><code><span></span><span class="c1">// ViewController.m</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">viewDidLoad</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">[</span><span class="n">super</span><span class="w"> </span><span class="n">viewDidLoad</span><span class="p">];</span>
+<span class="w">    </span><span class="p">[</span><span class="n">self</span><span class="w"> </span><span class="n">jp_hook</span><span class="p">];</span>
+<span class="w">    </span><span class="p">[</span><span class="n">self</span><span class="w"> </span><span class="n">aspects_hook</span><span class="p">];</span>
+<span class="w">    </span><span class="n">MyClass</span><span class="w"> </span><span class="o">*</span><span class="n">a</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[[</span><span class="n">MyClass</span><span class="w"> </span><span class="n">alloc</span><span class="p">]</span><span class="w"> </span><span class="n">init</span><span class="p">];</span>
+<span class="w">    </span><span class="p">[</span><span class="n">a</span><span class="w"> </span><span class="n">test</span><span class="p">];</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>执行结果：</p>
+<div class="highlight"><pre><code><span></span><span class="n">JPAndAspects</span><span class="p">[</span><span class="mi">2092</span><span class="o">:</span><span class="mi">1554779</span><span class="p">]</span><span class="w"> </span><span class="n">aspects</span><span class="w"> </span><span class="n">log</span>
+</code></pre></div>
+<p>结果是 <code>Aspects</code> 正确替换了方法</p>
+<h6>2.2.2. Aspects 先采用随便一种Position hook，JSPatch再hook</h6>
+<p>那么代码就是下面这样</p>
+<div class="highlight"><pre><code><span></span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">viewDidLoad</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">[</span><span class="n">super</span><span class="w"> </span><span class="n">viewDidLoad</span><span class="p">];</span>
+<span class="w">    </span><span class="p">[</span><span class="n">self</span><span class="w"> </span><span class="n">aspects_hook</span><span class="p">];</span>
+<span class="w">    </span><span class="p">[</span><span class="n">self</span><span class="w"> </span><span class="n">jp_hook</span><span class="p">];</span>
+<span class="w">    </span><span class="n">MyClass</span><span class="w"> </span><span class="o">*</span><span class="n">a</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[[</span><span class="n">MyClass</span><span class="w"> </span><span class="n">alloc</span><span class="p">]</span><span class="w"> </span><span class="n">init</span><span class="p">];</span>
+<span class="w">    </span><span class="p">[</span><span class="n">a</span><span class="w"> </span><span class="n">test</span><span class="p">];</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>执行结果：</p>
+<div class="highlight"><pre><code><span></span><span class="n">JPAndAspects</span><span class="p">[</span><span class="mi">2774</span><span class="o">:</span><span class="mi">1565702</span><span class="p">]</span><span class="w"> </span><span class="n">JSPatch</span><span class="p">.</span><span class="n">log</span><span class="o">:</span><span class="w"> </span><span class="n">jspatch</span><span class="w"> </span><span class="n">log</span>
+</code></pre></div>
+<p>结果是 <code>JSPatch</code> 正确替换了方法</p>
+<h6>Why？</h6>
+<p>前面说到，<code>hook</code> 会替换该方法和 <code>-forwardInvocation:</code>，我们先看看方法被 <code>hook</code> 前后的变化</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/2057602-74e72ce1fd6bd506.png" alt=""></p>
+<p>原方法对应关系</p>
+<p>方法替换后原方法指向了<code>_objc_msgForward</code>，同时添加一个方法<code>PREFIXtest</code>(<code>JSPatch</code>是<code>ORIGtest</code>，<code>Aspects</code> 是<code>aspects_test</code>)指向了原来的实现。<code>JSPatch</code>新增了一个方法指向<code>IMP(NEWtest)</code>，<code>Aspects</code>则保存block为关联属性</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/2057602-751a9d474c0e2c32.png" alt=""></p>
+<p><code>-test</code>变化</p>
+<p><code>-forwardInvocation:</code> 的变化也相似，原来的<code>-forwardInvocation:</code> 没实现是这样的</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/2057602-819b9cab17bf2896.png" alt=""></p>
+<p><code>-forwardInvocation:</code>变化</p>
+<p>如果原来的<code>-forwardInvocation:</code>有实现，就新加一个<code>-ORIGforwardInvocation:</code>指向原<code>IMP(forwardInvocation:)</code></p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/2057602-26d39b3094ee8fc7.png" alt=""></p>
+<p><code>-forwardInvocation:</code>变化</p>
+<p>由于<code>-test</code>方法指向了<code>_objc_msgForward</code>，这时调用<code>-test</code>方法就会进入消息转发，消息转发的第三步进入<code>-forwardInvocation:</code>执行新的<code>IMP(NEWforwardInvocation)</code>，拿到<code>invocation</code>，<code>invocation.selector</code>拼上前缀，然后拼上其他信息直接invoke，最终执行<code>IMP(NEWtest)</code>(<code>Aspects</code>是执行替换的<code>block</code>)。</p>
+<hr>
+<p>以上是只有一次hook的情况，我们看看两者都hook的变化</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/2057602-7bb45678686f76d0.png" alt=""></p>
+<p>JSPatch先hook，<code>-test</code>变化</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/2057602-bc2e452f0bbc401b.png" alt=""></p>
+<p>JSPatch先hook，<code>-forwardInvocation:</code>变化</p>
+<p>这时调用<code>-test</code>同样发生消息转发，进入<code>-forwardInvocation:</code>执行<code>Aspects</code>的<code>IMP(AspectsforwardInvocation)</code>，上文提到<code>Aspects</code>把替换的<code>block</code>保存为关联属性了，到了<code>-forwardInvocation:</code>直接拿出来执行，和原来的实现没有任何关系，所以有了2.2.1 正确的结果。</p>
+<hr>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/2057602-d0c90ee4864a98db.png" alt=""></p>
+<p>Aspects先hook，<code>-test</code>变化</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/2057602-258ec6a2221b5e23.png" alt=""></p>
+<p>Aspects先hook，<code>-forwardInvocation:</code>变化</p>
+<p>这时调用<code>-test</code>同样发生消息转发，进入<code>-forwardInvocation:</code>执行<code>JSPatch</code>的<code>IMP(JSPatchforwardInvocation)</code>，执行<code>_JPtest</code>，和原来的实现<br>
+没有任何关系，所以有了2.2.2 正确的结果。  看到这里，如果细心的话会发现<code>ORIGtest</code>指向了<code>_objc_msgForward</code>，如果我们在<code>JSPatch</code>代码里调用<code>self.ORIGtest()</code>会怎么样呢？</p>
+<h6>2.2.3. Aspects 先采用随便一种Position</h6>
+<p>hook，JSPatch再hook，JSPatch代码里调用self.ORIGtest()</p>
+<p>代码是下面这样的</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// demo.js</span>
+<span class="n">require</span><span class="p">(</span><span class="err">&#39;</span><span class="n">MyClass</span><span class="err">&#39;</span><span class="p">)</span>
+<span class="n">defineClass</span><span class="p">(</span><span class="err">&#39;</span><span class="n">MyClass</span><span class="err">&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nl">test</span><span class="p">:</span><span class="w"> </span><span class="n">function</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">self</span><span class="p">.</span><span class="n">ORIGtest</span><span class="p">();</span>
+<span class="w">        </span><span class="n">console</span><span class="p">.</span><span class="n">log</span><span class="p">(</span><span class="s">&quot;jspatch log&quot;</span><span class="p">)</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">});</span>
+<span class="c1">// ViewController.m</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">viewDidLoad</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">[</span><span class="n">super</span><span class="w"> </span><span class="n">viewDidLoad</span><span class="p">];</span>
+<span class="w">    </span><span class="p">[</span><span class="n">self</span><span class="w"> </span><span class="n">aspects_hook</span><span class="p">];</span>
+<span class="w">    </span><span class="p">[</span><span class="n">self</span><span class="w"> </span><span class="n">jp_hook</span><span class="p">];</span>
+<span class="w">    </span><span class="n">MyClass</span><span class="w"> </span><span class="o">*</span><span class="n">a</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[[</span><span class="n">MyClass</span><span class="w"> </span><span class="n">alloc</span><span class="p">]</span><span class="w"> </span><span class="n">init</span><span class="p">];</span>
+<span class="w">    </span><span class="p">[</span><span class="n">a</span><span class="w"> </span><span class="n">test</span><span class="p">];</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>执行结果：</p>
+<div class="highlight"><pre><code><span></span><span class="n">JPAndAspects</span><span class="p">[</span><span class="mi">8668</span><span class="o">:</span><span class="mi">1705052</span><span class="p">]</span><span class="w"> </span><span class="o">-</span><span class="p">[</span><span class="n">MyClass</span><span class="w"> </span><span class="n">ORIGtest</span><span class="p">]</span><span class="o">:</span><span class="w"> </span><span class="n">unrecognized</span><span class="w"> </span><span class="n">selector</span><span class="w"> </span><span class="n">sent</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">instance</span><span class="w"> </span><span class="mh">0x7ff592421a30</span>
+</code></pre></div>
+<h6>Why?</h6>
+<p><code>-test</code>和<code>-forwardInvocation:</code>的变化同上一步<code>Aspects</code>先<code>hook</code>。<br>
+由于<code>-ORIGtest</code>指向了<code>_objc_msgForward</code>，调用方法时进入<code>-forwardInvocation:</code>执行<code>IMP(JSPatchforwardInvocation)</code>，<code>JSPatchforwardInvocation</code>中有这样一段代码</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">JPForwardInvocation</span><span class="p">(</span><span class="n">__unsafe_unretained</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">assignSlf</span><span class="p">,</span><span class="w"> </span><span class="n">SEL</span><span class="w"> </span><span class="n">selector</span><span class="p">,</span><span class="w"> </span><span class="n">NSInvocation</span><span class="w"> </span><span class="o">*</span><span class="n">invocation</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="p">...</span>
+<span class="w">  </span><span class="n">JSValue</span><span class="w"> </span><span class="o">*</span><span class="n">jsFunc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">getJSFunctionInObjectHierachy</span><span class="p">(</span><span class="n">slf</span><span class="p">,</span><span class="w"> </span><span class="n">JPSelectorName</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">jsFunc</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">JPExecuteORIGForwardInvocation</span><span class="p">(</span><span class="n">slf</span><span class="p">,</span><span class="w"> </span><span class="n">selector</span><span class="p">,</span><span class="w"> </span><span class="n">invocation</span><span class="p">);</span>
+<span class="w">      </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">...</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这个<code>-ORIGtest</code>在对象中找不到具体的实现，因此转发给了<code>-ORIGINforwardInvocation:</code>。<strong>注意：这里直接把<code>-ORIGtest</code>转发出去了</strong>，很显然<code>IMP(AspectsforwardInvocation)</code>也是处理不了这个消息的。因此，出现了<code>unrecognizedselector</code>异常。<br>
+<strong>这里是两者兼容出现的最大问题，如果<code>JSPatch</code>在转发前判断一下这个方法是自己添加的<code>-ORIGxxx</code>，把前缀<code>ORIG</code>去掉再转发，这个问题就解决了。</strong></p>
+<h6>2.2.4. JSPatch先hook， Aspects</h6>
+<p>再采用AspectPositionInstead(替换)hook，JSPatch代码里调用self.ORIGtest()</p>
+<p>和2.2.1 相同，不管<code>JSPatch</code> <code>hook</code>之后是什么样的，都只执行<code>Aspects</code>的<code>block</code></p>
+<h6>2.2.5. JSPatch先hook， Aspects 再采用AspectPositionBefore(替换)hook</h6>
+<p>代码如下，<strong>注意把<code>AspectPositionInstead</code>替换为<code>AspectPositionBefore</code></strong></p>
+<div class="highlight"><pre><code><span></span><span class="c1">// demo.js</span>
+<span class="n">require</span><span class="p">(</span><span class="err">&#39;</span><span class="n">MyClass</span><span class="err">&#39;</span><span class="p">)</span>
+<span class="n">defineClass</span><span class="p">(</span><span class="err">&#39;</span><span class="n">MyClass</span><span class="err">&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nl">test</span><span class="p">:</span><span class="w"> </span><span class="n">function</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">console</span><span class="p">.</span><span class="n">log</span><span class="p">(</span><span class="s">&quot;jspatch log&quot;</span><span class="p">)</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">});</span>
+<span class="c1">// ViewController.m</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">viewDidLoad</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">[</span><span class="n">super</span><span class="w"> </span><span class="n">viewDidLoad</span><span class="p">];</span>
+<span class="w">    </span><span class="p">[</span><span class="n">self</span><span class="w"> </span><span class="n">jp_hook</span><span class="p">];</span>
+<span class="w">    </span><span class="p">[</span><span class="n">self</span><span class="w"> </span><span class="n">aspects_hook</span><span class="p">];</span>
+<span class="w">    </span><span class="n">MyClass</span><span class="w"> </span><span class="o">*</span><span class="n">a</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[[</span><span class="n">MyClass</span><span class="w"> </span><span class="n">alloc</span><span class="p">]</span><span class="w"> </span><span class="n">init</span><span class="p">];</span>
+<span class="w">    </span><span class="p">[</span><span class="n">a</span><span class="w"> </span><span class="n">test</span><span class="p">];</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>执行结果：</p>
+<div class="highlight"><pre><code><span></span><span class="n">JPAndAspects</span><span class="p">[</span><span class="mi">10943</span><span class="o">:</span><span class="mi">1756624</span><span class="p">]</span><span class="w"> </span><span class="n">aspects</span><span class="w"> </span><span class="n">log</span>
+<span class="n">JPAndAspects</span><span class="p">[</span><span class="mi">10943</span><span class="o">:</span><span class="mi">1756624</span><span class="p">]</span><span class="w"> </span><span class="n">JSPatch</span><span class="p">.</span><span class="n">log</span><span class="o">:</span><span class="w"> </span><span class="n">jspatch</span><span class="w"> </span><span class="n">log</span>
+</code></pre></div>
+<p>执行结果如期是正确的。<br>
+<code>IMP(AspectsforwardInvocation)</code>的部分代码如下</p>
+<div class="highlight"><pre><code><span></span><span class="n">SEL</span><span class="w"> </span><span class="n">originalSelector</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">invocation</span><span class="p">.</span><span class="n">selector</span><span class="p">;</span>
+<span class="w">    </span><span class="n">SEL</span><span class="w"> </span><span class="n">aliasSelector</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">aspect_aliasForSelector</span><span class="p">(</span><span class="n">invocation</span><span class="p">.</span><span class="n">selector</span><span class="p">);</span>
+<span class="w">    </span><span class="n">invocation</span><span class="p">.</span><span class="n">selector</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">aliasSelector</span><span class="p">;</span>
+<span class="w">    </span><span class="n">AspectsContainer</span><span class="w"> </span><span class="o">*</span><span class="n">objectContainer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">objc_getAssociatedObject</span><span class="p">(</span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="n">aliasSelector</span><span class="p">);</span>
+<span class="w">    </span><span class="n">AspectsContainer</span><span class="w"> </span><span class="o">*</span><span class="n">classContainer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">aspect_getContainerForClass</span><span class="p">(</span><span class="n">object_getClass</span><span class="p">(</span><span class="n">self</span><span class="p">),</span><span class="w"> </span><span class="n">aliasSelector</span><span class="p">);</span>
+<span class="w">    </span><span class="n">AspectInfo</span><span class="w"> </span><span class="o">*</span><span class="n">info</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[[</span><span class="n">AspectInfo</span><span class="w"> </span><span class="n">alloc</span><span class="p">]</span><span class="w"> </span><span class="n">initWithInstance</span><span class="o">:</span><span class="n">self</span><span class="w"> </span><span class="n">invocation</span><span class="o">:</span><span class="n">invocation</span><span class="p">];</span>
+<span class="w">    </span><span class="c1">// Before hooks.</span>
+<span class="w">    </span><span class="n">aspect_invoke</span><span class="p">(</span><span class="n">classContainer</span><span class="p">.</span><span class="n">beforeAspects</span><span class="p">,</span><span class="w"> </span><span class="n">info</span><span class="p">);</span>
+<span class="w">    </span><span class="n">aspect_invoke</span><span class="p">(</span><span class="n">objectContainer</span><span class="p">.</span><span class="n">beforeAspects</span><span class="p">,</span><span class="w"> </span><span class="n">info</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// Instead hooks.</span>
+<span class="w">    </span><span class="n">BOOL</span><span class="w"> </span><span class="n">respondsToAlias</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">YES</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">objectContainer</span><span class="p">.</span><span class="n">insteadAspects</span><span class="p">.</span><span class="n">count</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">classContainer</span><span class="p">.</span><span class="n">insteadAspects</span><span class="p">.</span><span class="n">count</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">aspect_invoke</span><span class="p">(</span><span class="n">classContainer</span><span class="p">.</span><span class="n">insteadAspects</span><span class="p">,</span><span class="w"> </span><span class="n">info</span><span class="p">);</span>
+<span class="w">        </span><span class="n">aspect_invoke</span><span class="p">(</span><span class="n">objectContainer</span><span class="p">.</span><span class="n">insteadAspects</span><span class="p">,</span><span class="w"> </span><span class="n">info</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">Class</span><span class="w"> </span><span class="n">klass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">object_getClass</span><span class="p">(</span><span class="n">invocation</span><span class="p">.</span><span class="n">target</span><span class="p">);</span>
+<span class="w">        </span><span class="k">do</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">respondsToAlias</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">klass</span><span class="w"> </span><span class="n">instancesRespondToSelector</span><span class="o">:</span><span class="n">aliasSelector</span><span class="p">]))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="p">[</span><span class="n">invocation</span><span class="w"> </span><span class="n">invoke</span><span class="p">];</span>
+<span class="w">                </span><span class="k">break</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">respondsToAlias</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">(</span><span class="n">klass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">class_getSuperclass</span><span class="p">(</span><span class="n">klass</span><span class="p">)));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// After hooks.</span>
+<span class="w">    </span><span class="n">aspect_invoke</span><span class="p">(</span><span class="n">classContainer</span><span class="p">.</span><span class="n">afterAspects</span><span class="p">,</span><span class="w"> </span><span class="n">info</span><span class="p">);</span>
+<span class="w">    </span><span class="n">aspect_invoke</span><span class="p">(</span><span class="n">objectContainer</span><span class="p">.</span><span class="n">afterAspects</span><span class="p">,</span><span class="w"> </span><span class="n">info</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// If no hooks are installed, call original implementation (usually to throw an exception)</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">respondsToAlias</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">invocation</span><span class="p">.</span><span class="n">selector</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">originalSelector</span><span class="p">;</span>
+<span class="w">        </span><span class="n">SEL</span><span class="w"> </span><span class="n">originalForwardInvocationSEL</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NSSelectorFromString</span><span class="p">(</span><span class="n">AspectsForwardInvocationSelectorName</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">([</span><span class="n">self</span><span class="w"> </span><span class="n">respondsToSelector</span><span class="o">:</span><span class="n">originalForwardInvocationSEL</span><span class="p">])</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="p">((</span><span class="kt">void</span><span class="p">(</span><span class="w"> </span><span class="o">*</span><span class="p">)(</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">SEL</span><span class="p">,</span><span class="w"> </span><span class="n">NSInvocation</span><span class="w"> </span><span class="o">*</span><span class="p">))</span><span class="n">objc_msgSend</span><span class="p">)(</span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="n">originalForwardInvocationSEL</span><span class="p">,</span><span class="w"> </span><span class="n">invocation</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="p">[</span><span class="n">self</span><span class="w"> </span><span class="n">doesNotRecognizeSelector</span><span class="o">:</span><span class="n">invocation</span><span class="p">.</span><span class="n">selector</span><span class="p">];</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+</code></pre></div>
+<p>首先执行<code>Before hooks</code>；接着查找是否有<code>Instead hooks</code>，如果有就执行，如果没有就在类继承链中查找父类能否响应<code>-aspects_test</code>，如果可以就invoke这个invocation，否则把<code>respondsToAlias</code>置为<code>NO</code>；接着执行<code>Afterhooks</code>；接着<code>if (!respondsToAlias)</code>把这个<code>-test</code>转发给<code>ORIGINforwardInvocation</code>即<code>IMP(JSPatchforwardInvocation)</code>处理了这个消息。<strong>注意这里是把<code>-test</code>转发</strong></p>
+<h6>2.2.6. JSPatch先hook， Aspects 再采用AspectPositionAfter hook</h6>
+<p>代码同2.2.5，<strong>注意把<code>AspectPositionBefore</code>替换为<code>AspectPositionAfter</code></strong></p>
+<div class="highlight"><pre><code><span></span><span class="n">JPAndAspects</span><span class="p">[</span><span class="mi">11706</span><span class="o">:</span><span class="mi">1776713</span><span class="p">]</span><span class="w"> </span><span class="n">aspects</span><span class="w"> </span><span class="n">log</span>
+<span class="n">JPAndAspects</span><span class="p">[</span><span class="mi">11706</span><span class="o">:</span><span class="mi">1776713</span><span class="p">]</span><span class="w"> </span><span class="n">JSPatch</span><span class="p">.</span><span class="n">log</span><span class="o">:</span><span class="w"> </span><span class="n">jspatch</span><span class="w"> </span><span class="n">log</span>
+</code></pre></div>
+<p>结果都输出了，但是顺序不对。<br>
+从<code>IMP(AspectsforwardInvocation)</code>代码中不难看出，<code>After hooks</code>先执行了，再将这个消息转发。这也可以说是<code>Aspects</code>的不足。</p>
+<h5>2.2.7. Aspects随便一种Position hook方法-test2，JSPatch再hook</h5>
+<p>-test，JSPatch代码里调用self.ORIGtest()， Aspects 以随便一种Position hook方法-test</p>
+<p>同2.2.5和2.2.6很像，不过前面多了对<code>-test2</code>的hook，代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// demo.js</span>
+<span class="n">require</span><span class="p">(</span><span class="err">&#39;</span><span class="n">MyClass</span><span class="err">&#39;</span><span class="p">)</span>
+<span class="n">defineClass</span><span class="p">(</span><span class="err">&#39;</span><span class="n">MyClass</span><span class="err">&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nl">test</span><span class="p">:</span><span class="w"> </span><span class="n">function</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">self</span><span class="p">.</span><span class="n">ORIGtest</span><span class="p">();</span>
+<span class="w">        </span><span class="n">console</span><span class="p">.</span><span class="n">log</span><span class="p">(</span><span class="s">&quot;jspatch log&quot;</span><span class="p">)</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">});</span>
+<span class="c1">// ViewController.m</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">viewDidLoad</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">[</span><span class="n">super</span><span class="w"> </span><span class="n">viewDidLoad</span><span class="p">];</span>
+<span class="w">    </span><span class="p">[</span><span class="n">self</span><span class="w"> </span><span class="n">aspects_hook_test2</span><span class="p">];</span>
+<span class="w">    </span><span class="p">[</span><span class="n">self</span><span class="w"> </span><span class="n">jp_hook</span><span class="p">];</span>
+<span class="w">    </span><span class="p">[</span><span class="n">self</span><span class="w"> </span><span class="n">aspects_hook</span><span class="p">];</span>
+<span class="w">    </span><span class="n">MyClass</span><span class="w"> </span><span class="o">*</span><span class="n">a</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[[</span><span class="n">MyClass</span><span class="w"> </span><span class="n">alloc</span><span class="p">]</span><span class="w"> </span><span class="n">init</span><span class="p">];</span>
+<span class="w">    </span><span class="p">[</span><span class="n">a</span><span class="w"> </span><span class="n">test</span><span class="p">];</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>代码执行结果：</p>
+<div class="highlight"><pre><code><span></span><span class="n">JPAndAspects</span><span class="p">[</span><span class="mi">12597</span><span class="o">:</span><span class="mi">1797663</span><span class="p">]</span><span class="w"> </span><span class="n">MyClass</span><span class="w"> </span><span class="n">origin</span><span class="w"> </span><span class="n">log</span>
+<span class="n">JPAndAspects</span><span class="p">[</span><span class="mi">12597</span><span class="o">:</span><span class="mi">1797663</span><span class="p">]</span><span class="w"> </span><span class="n">JSPatch</span><span class="p">.</span><span class="n">log</span><span class="o">:</span><span class="w"> </span><span class="n">jspatch</span><span class="w"> </span><span class="n">log</span>
+</code></pre></div>
+<p>结果是Aspects对<code>-test</code>的hook没有生效。</p>
+<h6>Why?</h6>
+<p>不废话，直接看<code>Aspects</code>代码：</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="n">Class</span><span class="w"> </span><span class="nf">aspect_hookClass</span><span class="p">(</span><span class="n">NSObject</span><span class="w"> </span><span class="o">*</span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="n">NSError</span><span class="w"> </span><span class="o">**</span><span class="n">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">NSCParameterAssert</span><span class="p">(</span><span class="n">self</span><span class="p">);</span>
+<span class="w">    </span><span class="n">Class</span><span class="w"> </span><span class="n">statedClass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">class</span><span class="p">;</span>
+<span class="w">    </span><span class="n">Class</span><span class="w"> </span><span class="n">baseClass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">object_getClass</span><span class="p">(</span><span class="n">self</span><span class="p">);</span>
+<span class="w">    </span><span class="n">NSString</span><span class="w"> </span><span class="o">*</span><span class="n">className</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NSStringFromClass</span><span class="p">(</span><span class="n">baseClass</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// Already subclassed</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">([</span><span class="n">className</span><span class="w"> </span><span class="n">hasSuffix</span><span class="o">:</span><span class="n">AspectsSubclassSuffix</span><span class="p">])</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">baseClass</span><span class="p">;</span>
+<span class="w">        </span><span class="c1">// We swizzle a class object, not a single object.</span>
+<span class="w">    </span><span class="p">}</span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">class_isMetaClass</span><span class="p">(</span><span class="n">baseClass</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">aspect_swizzleClassInPlace</span><span class="p">((</span><span class="n">Class</span><span class="p">)</span><span class="n">self</span><span class="p">);</span>
+<span class="w">        </span><span class="c1">// Probably a KVO&#39;ed class. Swizzle in place. Also swizzle meta classes in place.</span>
+<span class="w">    </span><span class="p">}</span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">statedClass</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">baseClass</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">aspect_swizzleClassInPlace</span><span class="p">(</span><span class="n">baseClass</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// Default case. Create dynamic subclass.</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">subclassName</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">className</span><span class="w"> </span><span class="n">stringByAppendingString</span><span class="o">:</span><span class="n">AspectsSubclassSuffix</span><span class="p">].</span><span class="n">UTF8String</span><span class="p">;</span>
+<span class="w">    </span><span class="n">Class</span><span class="w"> </span><span class="n">subclass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">objc_getClass</span><span class="p">(</span><span class="n">subclassName</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">subclass</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">nil</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">subclass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">objc_allocateClassPair</span><span class="p">(</span><span class="n">baseClass</span><span class="p">,</span><span class="w"> </span><span class="n">subclassName</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">subclass</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">nil</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">NSString</span><span class="w"> </span><span class="o">*</span><span class="n">errrorDesc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">NSString</span><span class="w"> </span><span class="n">stringWithFormat</span><span class="o">:</span><span class="err">@</span><span class="s">&quot;objc_allocateClassPair failed to allocate class %s.&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">subclassName</span><span class="p">];</span>
+<span class="w">            </span><span class="n">AspectError</span><span class="p">(</span><span class="n">AspectErrorFailedToAllocateClassPair</span><span class="p">,</span><span class="w"> </span><span class="n">errrorDesc</span><span class="p">);</span>
+<span class="w">            </span><span class="k">return</span><span class="w"> </span><span class="n">nil</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="n">aspect_swizzleForwardInvocation</span><span class="p">(</span><span class="n">subclass</span><span class="p">);</span>
+<span class="w">        </span><span class="n">aspect_hookedGetClass</span><span class="p">(</span><span class="n">subclass</span><span class="p">,</span><span class="w"> </span><span class="n">statedClass</span><span class="p">);</span>
+<span class="w">        </span><span class="n">aspect_hookedGetClass</span><span class="p">(</span><span class="n">object_getClass</span><span class="p">(</span><span class="n">subclass</span><span class="p">),</span><span class="w"> </span><span class="n">statedClass</span><span class="p">);</span>
+<span class="w">        </span><span class="n">objc_registerClassPair</span><span class="p">(</span><span class="n">subclass</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">object_setClass</span><span class="p">(</span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="n">subclass</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">subclass</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这段代码的作用是区分<code>self</code>的类型，进行不同的<code>swizzleForwardInvocation</code>。<code>self</code>本身可能是一个<code>Class</code>；或者self通过<code>-class</code>方法返回的self真正的<code>Class</code>不同，最典型的<code>KVO</code>，会创建一个子类加上<code>NSKVONotify_</code>前缀，然后重写class方法，看不懂的可以参考<code>Objective-C 对象模型</code>。这两种情况都对self真正的Class进行<code>aspect_swizzleClassInPlace</code>；如果self是一个普通对象，则模仿KVO的实现方式，创建一个子类，<code>swizzle</code>子类的<code>-forwardInvocation:</code>，通过<code>object_setClass</code>强行设置<code>Class</code>。</p>
+<hr>
+<p>再看<code>aspect_swizzleClassInPlace</code></p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="n">Class</span><span class="w"> </span><span class="nf">aspect_swizzleClassInPlace</span><span class="p">(</span><span class="n">Class</span><span class="w"> </span><span class="n">klass</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="p">[</span><span class="n">swizzledClasses</span><span class="w"> </span><span class="n">containsObject</span><span class="o">:</span><span class="n">className</span><span class="p">])</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">aspect_swizzleForwardInvocation</span><span class="p">(</span><span class="n">klass</span><span class="p">);</span>
+<span class="w">            </span><span class="p">[</span><span class="n">swizzledClasses</span><span class="w"> </span><span class="n">addObject</span><span class="o">:</span><span class="n">className</span><span class="p">];</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>问题就出在这个<code>aspect_swizzleClassInPlace</code>，它会判断如果这个类的<code>-forwardInvocation:</code> <code>swizzle</code>过，就什么都不做，但是通过数组这种方式是会出问题，第二次<code>hook</code>的时候就不会<code>-forwardInvocation:</code>替换成<code>IMP(AspectsforwardInvocation)</code>，所以第二次<code>hook</code>不生效。相比，<code>JSPatch</code>的实现就比较合理，判断两个IMP是否相等。</p>
+<div class="highlight"><pre><code><span></span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">class_getMethodImplementation</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span><span class="w"> </span><span class="err">@</span><span class="n">selector</span><span class="p">(</span><span class="n">forwardInvocation</span><span class="o">:</span><span class="p">))</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="p">(</span><span class="n">IMP</span><span class="p">)</span><span class="n">JPForwardInvocation</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="p">}</span>
+</code></pre></div>
+<h6>2.2.8. Aspects 先采用随便一种Position</h6>
+<p>hook父类，JSPatch再hook子类，JSPatch代码里调用self.super().xxx()</p>
+<p>代码是下面这样的</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// demo.js</span>
+<span class="n">require</span><span class="p">(</span><span class="err">&#39;</span><span class="n">MySubClass</span><span class="err">&#39;</span><span class="p">)</span>
+<span class="n">defineClass</span><span class="p">(</span><span class="err">&#39;</span><span class="n">MySubClass</span><span class="err">&#39;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nl">test</span><span class="p">:</span><span class="w"> </span><span class="n">function</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">self</span><span class="p">.</span><span class="n">super</span><span class="p">().</span><span class="n">test</span><span class="p">();</span>
+<span class="w">        </span><span class="n">console</span><span class="p">.</span><span class="n">log</span><span class="p">(</span><span class="s">&quot;jspatch log&quot;</span><span class="p">)</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">});</span>
+<span class="c1">// ViewController.m</span>
+<span class="c1">// 增加一个子类</span>
+<span class="err">@</span><span class="n">interface</span><span class="w"> </span><span class="n">MySubClass</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">MyClass</span>
+<span class="err">@</span><span class="n">end</span>
+<span class="err">@</span><span class="n">implementation</span><span class="w"> </span><span class="n">MySubClass</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">test</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">NSLog</span><span class="p">(</span><span class="err">@</span><span class="s">&quot;MySubClass origin log&quot;</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="err">@</span><span class="n">end</span>
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">viewDidLoad</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="p">[</span><span class="n">super</span><span class="w"> </span><span class="n">viewDidLoad</span><span class="p">];</span>
+<span class="w">    </span><span class="p">[</span><span class="n">self</span><span class="w"> </span><span class="n">aspects_hook</span><span class="p">];</span>
+<span class="w">    </span><span class="p">[</span><span class="n">self</span><span class="w"> </span><span class="n">jp_hook</span><span class="p">];</span>
+<span class="w">    </span><span class="n">MySubClass</span><span class="w"> </span><span class="o">*</span><span class="n">a</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[[</span><span class="n">MySubClass</span><span class="w"> </span><span class="n">alloc</span><span class="p">]</span><span class="w"> </span><span class="n">init</span><span class="p">];</span>
+<span class="w">    </span><span class="p">[</span><span class="n">a</span><span class="w"> </span><span class="n">test</span><span class="p">];</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>执行结果：</p>
+<div class="highlight"><pre><code><span></span><span class="n">JPAndAspects</span><span class="p">[</span><span class="mi">89642</span><span class="o">:</span><span class="mi">1600226</span><span class="p">]</span><span class="w"> </span><span class="o">-</span><span class="p">[</span><span class="n">MySubClass</span><span class="w"> </span><span class="n">SUPER_test</span><span class="p">]</span><span class="o">:</span><span class="w"> </span><span class="n">unrecognized</span><span class="w"> </span><span class="n">selector</span><span class="w"> </span><span class="n">sent</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">instance</span><span class="w"> </span><span class="mh">0x7fa4cadabc70</span>
+</code></pre></div>
+<h6>Why?</h6>
+<p>父类<code>MyClass</code>的<code>-test</code>和<code>-forwardInvocation:</code>的变化同2.2.1中原<code>-forwardInvocation</code>没有实现的情况。  <code>JSPatch</code>中<code>super</code>的实现是新增加一个方法<code>-SUPER_test</code>，IMP指向了父类的IMP，由于<code>-test</code>指向了<code>_objc_msgForward</code>，调用方法时进入<code>-forwardInvocation:</code>执行<code>IMP(JSPatchforwardInvocation)</code>，执行<code>self.super().test()</code>时，实际执行了<code>-SUPER_test</code>，这个<code>-SUPER_test</code>在对象中找不到具体的实现，发生了<code>-ORIGtest</code>一样的异常。</p>
+<p><strong>这里是两者兼容出现的第二个比较严重的问题。</strong></p>
+<h5>2.3 总结</h5>
+<p>写到这里，除了<code>Aspects</code>对对象的<code>hook</code>(这种情况很少见，你可以自己测试)，可能已经解答了两者兼容的大部分问题。通过以上分析，得出不兼容的四种情况：</p>
+<ul>
+<li><code>Aspects</code>先<code>hook</code>某一方法，<code>JSPatch</code>再<code>hook</code>同一方法且<code>JSPatch</code>调用了<code>self.ORIGxxx()</code>，结果是异常崩溃。</li>
+<li><code>Aspects</code>先<code>hook</code>父类某一方法，<code>JSPatch</code>再<code>hook</code>子类同一方法且<code>JSPatch</code>调用了<code>self.super().xxx()</code>，结果是异常崩溃。</li>
+<li><code>JSPatch</code>先<code>hook</code>某一方法，<code>Aspects</code>以<code>After</code>的方式<code>hook</code>同一方法，结果是执行顺序不对</li>
+<li><code>Aspects</code>先<code>hook</code>任何方法，<code>JSPatch</code>再<code>hook</code>另一方法，<code>Aspects</code>再<code>hook</code>和<code>JSPatch</code>相同的方法，结果是最后一次<code>hook</code>不生效</li>
+</ul>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "面向切面编程之 Aspects 源码解析及应用.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

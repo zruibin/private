@@ -1,0 +1,628 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>iOS SQLite源码优化实践 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="iOS SQLite源码优化实践,iOS,数据库,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="iOS SQLite源码优化实践" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>iOS SQLite源码优化实践</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2016-09-01 10:23
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_ios.html' class='article_tag'>iOS</a>
+
+<a href='../article/tag_shu_ju_ku.html' class='article_tag'>数据库</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='http://dev.qq.com/topic/57b6a449433221be01499486' target='blank'>微信iOS SQLite源码优化实践</a></p></h4>
+<p>分享内容简介：</p>
+<blockquote><p>SQLite是微信iOS选用的数据库，随着微信iOS客户端业务的增长，在重度用户的场景下，性能瓶颈逐渐显现。靠单纯地修改SQLite的参数配置，已经不能彻底解决问题，因此我们尝试从源码开始做深入的优化。</p>
+</blockquote>
+<h4>内容大体框架:</h4>
+<ul>
+<li>SQLite对于多线程的处理和不足及微信的优化</li>
+<li>SQLite在I/O上可压榨的性能</li>
+<li>其他细节优化</li>
+</ul>
+<h3>下面是本期分享内容整理</h3>
+<p>Hello，大家好，我是张三华，目前在微信主要负责 iOS 的基础优化工作。第一次进行这种微信群分享，可能准备的不是太充分。若有任何疑问，欢迎在分享结束后提问。</p>
+<p>下面开始我们今天的分享。</p>
+<h3>引言</h3>
+<p>SQLite 是我们在移动端常用的数据库，微信也是基于它封装了一层 ObjC 接口。我们知道，微信里消息的收发是很频繁的，尤其是对于重度用户，这对于数据库的多线程并发和 I/O 是很大的挑战。</p>
+<p>通常对这部分做优化，有两种方式：</p>
+<ul>
+<li>一是修改 SQLite 的参数，如 Cache Size 等</li>
+<li>二是改业务层调用，如主线程操作 dispatch 到子线程。</li>
+</ul>
+<p>然而，前者有明显的瓶颈，后者则是个 endless 的工作。我们希望能一劳永逸地解决同类问题。这就是我们本次所要分享的优化。</p>
+<h4>1. 多线程并发优化</h4>
+<h5>1.1 SQLite 多句柄方案</h5>
+<p>我们先讲 SQLite 所提供的多线程并发方案。它对这方面的支持做的很不错，在使用上，只需</p>
+<p>开启句柄多线程支持的配置 PRAGMA SQLITE_THREADSAFE=2确保同一个句柄同一时间只有一个线程在操作
+（可选）开启 WAL 模式 PRAGMA journal_mode=WAL 此时写操作会先 append 到 wal 文件末尾，而不是直接覆盖旧数据。而读操作开始时，会记下当前的 WAL 文件状态，并且只访问在此之前的数据。这就确保了多线程读与读、读与写之间可以并发地进行。</p>
+<h5>1.2 Busy Retry 方案</h5>
+<p>而写与写之间仍会互相阻塞。SQLite 提供了 Busy Retry 的方案，即发生阻塞时，会触发 Busy Handler，此时可以让线程休眠一段时间后，重新尝试操作。重试一定次数依然失败后，则返回 SQLITE_BUSY 错误码。</p>
+<p>下面这段代码是 SQLite 默认的 Busy Handler</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1.jpg" alt=""></p>
+<h5>1.3 Busy Retry 方案的不足</h5>
+<p>上面介绍了 SQLite 多线程并发方案，接下来我们把焦点放在 Busy Retry 这个方案的不足上。</p>
+<p>Busy Retry 的方案虽然基本能解决问题，但对性能的压榨做的不够极致。在 Retry 过程中，休眠时间的长短和重试次数，是决定性能和操作成功率的关键。</p>
+<p>然而，它们的最优值，因不同操作不同场景而不同。若休眠时间太短或重试次数太多，会空耗 CPU 的资源；若休眠时间过长，会造成等待的时间太长；若重试次数太少，则会降低操作的成功率。如下图</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_2.jpg" alt=""></p>
+<p>可以看到</p>
+<p>CPU空转那段，线程一操作还没结束，这里空耗了 CPU 的资源线程闲置那段，线程一已经结束，而线程二仍在等待，空耗了时间对于这个的优化，简单的方法可以是修改休眠时间，尽最大限度缩短以上两段空耗的资源。</p>
+<p>我们通过 A/B Test 对不同休眠时间进行了实验，得到了如下的结果</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_3.jpg" alt=""></p>
+<p>可以看到，倘若休眠时间与重试成功率的关系，按照绿色的曲线进行分布，那么 p 点的值也不失为该方案的一个次优解。然而不同业务和操作的需求，还是有很大的不同的。</p>
+<p>既然 SQLite 的方案不行，我们就要开始往深层探索新的可能性了。</p>
+<h5>1.4 SQLite 中控制并发相关的原理</h5>
+<p>SQLite是一个适配不同平台的数据库，不仅支持多线程并发，还支持多进程并发。它的核心逻辑可以分为两部分：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_4.png" alt=""></p>
+<ul>
+<li><p><strong>Core 层</strong>。包括了接口层、编译器和虚拟机。通过接口传入 SQL 语句，由编译器编译SQL生成虚拟机的操作码 opcode。而虚拟机是基于生成的操作码，控制 Backend 的行为。</p>
+</li>
+<li><p><strong>Backend 层</strong>。由 B-Tree、Pager、OS 三部分组成，实现了数据库的存取数据的主要逻辑。
+在架构最底端的 OS 层是对不同操作系统的系统调用的抽象层。它实现了一个 VFS（Virtual File System），将 OS 层的接口在编译时映射到对应操作系统的系统调用。锁的实现也是在这里进行的。</p>
+</li>
+</ul>
+<p>SQLite 通过两个锁来控制并发。第一个锁对应 DB 文件，通过5种状态进行管理；第二个锁对应WAL文件，通过修改一个 16-bit 的 unsigned short int 的每一个 bit 进行管理。尽管锁的逻辑有一些复杂，但此处并不需关心。这两种锁最终都落在 OS 层的 sqlite3OsLock、sqlite3OsUnlock 和sqlite3OsShmLock 上具体实现。</p>
+<p>它们在锁的实现比较类似。以 lock 操作在 iOS 上的实现为例：</p>
+<p>通过 pthread_mutex_lock 进行线程锁，防止其他线程介入。然后比较状态量，若当前状态不可跳转，则返回 SQLITE_BUSY 通过 fcntl 进行文件锁，防止其他进程介入。若锁失败，则返回 SQLITE_BUSY
+而 SQLite 选择 Busy Retry 的方案的原因也正是在此</p>
+<p>文件锁没有线程锁类似 pthread_cond_signal 的通知机制。当一个进程的数据库操作结束时，无法通过锁来第一时间通知到其他进程进行重试。因此只能退而求其次，通过多次休眠来进行尝试。</p>
+<h5>1.5 新的方案</h5>
+<p>搞清楚了 SQLite 并发的实现，我们就是可以开始改造了。</p>
+<p>我们知道，iOS app 是单进程的，并没有多进程并发的需求，这和 SQLite 的设计初衷是不相同的。这就给我们的优化提供了理论上的基础。在 iOS 这一特定场景下，我们可以舍弃兼容性，提高并发性。</p>
+<p>新的方案修改为，当 OS 层进行 lock 操作时：</p>
+<p>通过 pthread_mutex_lock 进行线程锁，防止其他线程介入。然后比较状态量，若当前状态不可跳转，则将当前期望跳转的状态，插入到一个 FIFO 的 Queue 尾部。最后，线程通过 pthread_cond_wait 进入 休眠状态，等待其他线程的唤醒。</p>
+<p>忽略文件锁
+当 OS 层的 unlock 操作结束后：</p>
+<p>取出 Queue 头部的状态量，并比较状态是否能够跳转。若能够跳转，则通过pthread_cond_signal_thread_np 唤醒对应的线程重试。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_5.jpg" alt=""></p>
+<p>新的方案可以在 DB 空闲时的第一时间，通知到其他正在等待的线程，最大程度地降低了空等待的时间，且准确无误。</p>
+<p>此外，由于 Queue 的存在，当主线程被其他线程阻塞时，可以将主线程的操作“插队”到 Queue 的头部。当其他线程发起唤醒通知时，主线程可以有更高的优先级，从而降低用户可感知的卡顿</p>
+<h4>2. I/O 性能优化</h4>
+<p>上面介绍了多线程并发的优化，接下来将介绍 I/O 方面的优化。</p>
+<h5>2.1 mmap</h5>
+<p>提到 I/O 效率的提升，最容易想到的就是 mmap了，它可以减少数据从 kernel 层到 user 层的数据拷贝，从而提高效率。</p>
+<p>SQLite 不仅支持 mmap，而且推荐使用，在大多数平台是在一定程度上默认打开的。然而早期的 iOS 版本的存在一些 bug，SQLite 在编译层就关闭了在 iOS 上对 mmap 的支持，并且后知后觉地在16年1月才重新打开。所以如果使用的 SQLite 版本较低，还需注释掉相关代码后，重新编译生成后，才可以享受上 mmap 的性能。</p>
+<p>下图就是 SQLite 注释掉相关代码的 commit</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_6.jpg" alt=""></p>
+<p>开启 mmap 后，SQLite 性能将有所提升，但这还不够。因为它只会对 DB 文件进行了 mmap，而 WAL 文件享受不到这个优化。原因如下：</p>
+<p>开启 WAL 模式后，写入的数据会先 append 到 WAL 文件的末尾。待文件增长到一定长度后，SQLite 会进行 checkpoint。这个长度默认为1000个页大小，在 iOS 上约为3.9MB。</p>
+<p>而在多句柄下，对 WAL 文件的操作是并行的。一旦某个句柄将 WAL 文件缩短了，而没有一个通知机制让其他句柄进行更新 mmap 的内容。此时其他句柄若使用 mmap 操作已被缩短的内容，就会造成 crash。而普通的 I/O 接口，则只会返回错误，不会造成 crash。因此，SQLite 没有实现对 WAL 文件的 mmap。</p>
+<p>显然 SQLite 的设计是针对容量较小的设备，尤其是在十几年前的那个年代，这样的设备并不在少数。而随着硬盘价格日益降低，对于像 iPhone 这样的设备，几 MB 的空间已经不再是需要斤斤计较的了。</p>
+<p>另一方面，文件重新增长，对于文件系统来说，这就意味着需要消耗时间重新寻找合适的文件块。</p>
+<p>权衡两者，我们可以改为</p>
+<p>数据库关闭并 checkpoint 成功时，不再 truncate 或删除 WAL 文件，只修改 WAL 的文件头的 Magic Number。下次数据库打开时， SQLite 会识别到 WAL 文件不可用，重新从头开始写入。
+为 WAL 添加 mmap 的支持 有了上面两个优化，整体性能就会提升不少了。
+这里我没有贴具体代码需要改哪些地方，一方面是因为改动点较零散，另一方面是代码上的改动并不难。这个优化的工作量主要是在 SQLite 原理和优化点的挖掘上了，大家可以根据优化方案去尝试。</p>
+<h4>3. 其他优化</h4>
+<p>不过我们还有一些简单易行且效果还不错的小优化，希望可以成为大家打开 SQLite 黑盒的一个契机。</p>
+<h5>3.1 禁用文件锁</h5>
+<p>如我们在多线程优化时所说，对于 iOS app 并没有多进程的需求。因此我们可以直接注释掉 os_unix.c 中所有文件锁相关的操作。也许你会很奇怪，虽然没有文件锁的需求，但这个操作耗时也很短，是否有必要特意优化呢？其实并不全然。耗时多少是比出来。</p>
+<p>SQLite 中有 cache 机制。被加载进内存的 page，使用完毕后不会立刻释放。而是在一定范围内通过 LRU 的算法更新 page cache。这就意味着，如果 cache 设置得当，大部分读操作不会读取新的 page。然而因为文件锁的存在，本来只需在内存层面进行的读操作，不得不进行至少一次 I/O 操作。而我们知道，I/O 操作是远远慢于内存操作的。</p>
+<h5>3.2 禁用内存统计锁</h5>
+<p>SQLite 会对申请的内存进行统计，而这些统计的数据都是放到同一个全局变量里进行计算的。这就意味着统计前后，都是需要加线程锁，防止出现多线程问题的。</p>
+<p>以下 SQLite 内存申请的函数可以看到，当内存统计打开时，会跑代码的第二个 if，malloc 的前后被锁保护了起来。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_7.jpg" alt=""></p>
+<p>其实这里内存申请的量不大，并不是非常耗时的操作，但却很频繁。多线程并发时，各线程很容易互相阻塞。因为耗时很短，所以被阻塞的时间也很短暂。似乎不会有太大问题。但频繁地阻塞却意味着线程不断地切换，这是个很影响性能的操作，尤其对于单核设备。</p>
+<p>因此，如果不需要内存统计的特性，可以通过 sqlite3_config(SQLITE_CONFIG_MEMSTATUS, 0)进行关闭。这个修改虽然不需要改动源码，但如果不查看源码，恐怕是比较难发现的。</p>
+<h4>4. 结语</h4>
+<p>总的来说，移动客户端数据库虽然不如后台数据库那么复杂，但也存在着不少可挖掘的技术点。</p>
+<p>这次也只尝试了对 SQLite 原有的方案进行优化，而市面上还有许多优秀的数据库，如 LevelDB、RocksDB、Realm 等，它们采用了和 SQLite 不同的实现原理。后续我们将借鉴它们的优化经验，尝试更深入的优化。</p>
+<p>以上就是我今天的分享，谢谢大家。</p>
+<h4>问答环节</h4>
+<h5>Q1 ：前一阵微信提示我微信数据文件发现有损坏，这个是什么原因呢？</h5>
+<blockquote><p>这个是数据库损坏，SQLite 是以B树结构存储的，如果某一个节点发生损坏，可能导致无法读取数据。损坏的原因多种多样，如断电、文件系统错误、硬盘损坏等。据我所知很多产品都出现了类似问题。</p>
+<p>你看到的那个是微信的损坏监测和修复逻辑，我们做了自研的工具进行修复。这块我们后续也会分享 db 损坏的监测、保护、修复方案的</p>
+</blockquote>
+<h5>Q2 ：请问 sqlite 有时候会出 signal 11的错误，可能是什么原因导致的</h5>
+<blockquote><p>signal 11 就是 SQLITE_CORRUPT，上面提到的数据库损坏的其中一种。另一种是26 SQLITE_NOTADB</p>
+</blockquote>
+<h5>Q3 ：请问微信在全文索引上有实践吗？有没有自己做本地的搜索索引</h5>
+<blockquote><p>SQLite 是支持有全文索引的支持的，我们要做的是提供一个好的，支持中文的分词器。</p>
+</blockquote>
+<h5>Q4 ：请问微信在 db 文件修复上有什么心得呢？</h5>
+<blockquote><p>看来大家对 db 文件损坏很关注啊。SQLite 提供了 PRAGMA integrity_check 的工具检测损坏 和 DUMP 工具导出损坏 db。但从实践来看，效果并不理想。我们采用了按 BTree 结构遍历修复的方式，以后有机会可以分享给大家</p>
+</blockquote>
+<h5>Q5 ：目前有没有已有的优化过的 sqlite 框架可供使用呢？</h5>
+<blockquote><p>iOS上SQLite 的框架似乎只有 FMDB 和 CoreData，坦白说两个都不是很好。我们是自己封装的 WCDB 框架。</p>
+</blockquote>
+<h5>Q6 ：微信的 orm 是怎么搞的</h5>
+<blockquote><p>通过封装和规范来处理 ORM</p>
+</blockquote>
+<h5>Q7 ：请问下多句柄怎么开启，是修改 sqlite 源码后再编译的吗？</h5>
+<blockquote><p>这个最开始有提到了</p>
+<p>开启句柄多线程支持的配置 PRAGMA SQLITE_THREADSAFE=2 确保同一个句柄同一时间只有一个线程在操作</p>
+</blockquote>
+<h5>Q8 ：微信是怎么分析它的锁竞争的？</h5>
+<blockquote><p>最重要的是读懂源码。辅助手段可以有 SQLite 官方的 Technical/Design Document 和 Instrument 工具</p>
+</blockquote>
+<h5>Q9 ：请问有没有对能耗的监测和优化经验？</h5>
+<blockquote><p>检测相关的我们有卡顿监控系统，可以到我们的公众号 WeMobileDev 上了解</p>
+</blockquote>
+<h5>Q10 ：请问 sqlite 优化后有性能对比数据吗，差别有多大？</h5>
+<blockquote><p>性能数据我以我们的卡顿系统为准，多线程并发优化使得卡顿率从4.08%降至0.19，I/O 优化使得读卡顿从1.50%降至0.20%，写卡顿从1.18%降至0.21%</p>
+</blockquote>
+<h5>Q11 ：iOS 客户端用操作数据库需要每次先 open，执行完了再 close，每次都这样，还是 app 只需要开关一次比较好呢？</h5>
+<blockquote><p>常用的 db 没有必要经常开关，db 占用的内存并不高，可以权衡一下</p>
+</blockquote>
+<h5>Q12 ：微信对于本地空间不足会有一个强提醒，这是出于什么考虑？不同机型有不同的策略吗？</h5>
+<blockquote><p>空间不足是个硬伤，所谓巧妇难为无米之炊。如16GB 的 iPhone，其实很影响正常使用了。不同机型会做细化</p>
+</blockquote>
+<h5>Q13 ：请问 sqlite 多线程机制，大概能应付多大量级的数据库操作（基本无卡顿），微信有这方面的测试体验吗，然后是使用了底层代码修改多线程机制后，有大概的提升量级吗？</h5>
+<blockquote><p>优化的效果我们是以卡顿系统检测到的为准的。能否减少用户感知到的卡顿，优化用户体验才是重点，而不在于能承受多大的量级</p>
+</blockquote>
+<h5>Q14 ：微信对于数据库升级有没有特别优化的地方？或者说不同版本的跳版本升级</h5>
+<blockquote><p>不知道这个问题指的是 SQLite 的升级还是表结构的升级。前者的话，暂时没看到 SQLite 新版本有比较大的特性值得我们跟进。后者可以用 alter table 在封装层支持升级，性能损耗不大</p>
+</blockquote>
+<h5>Q15 ：请问微信的 SQLite 有没有开启加密？如果有，性能是否有提升空间？</h5>
+<blockquote><p>iOS 版本目前没有开启加密</p>
+</blockquote>
+<h5>Q16 ：微信 sqllite 数据库用的内存数据库吗？那和文件数据库导入导出怎么控制的？</h5>
+<blockquote><p>没有使用内存数据库</p>
+</blockquote>
+<h5>Q17 ：可以问一下，目前做 iOS 版，没有针对 android 版么？</h5>
+<blockquote><p>这次分享的大部分内容，对Android也是通用的，触类旁通即可。</p>
+</blockquote>
+<h5>Q18 ：请问下，句柄开几个比较合适？读写分离开来对性能是否会有提升呢？</h5>
+<blockquote><p>我们是按需生成新句柄的，并设了上限，若超过上限会有报警。如果同一时间并发量太大的话，其实更多要考虑业务层是否适用得当。至于业务层的使用，若能做细化那自然是更好</p>
+</blockquote>
+<hr>
+
+
+
+
+<h4><p>原文出处：<a href='http://wereadteam.github.io/2016/08/19/SQLite/' target='blank'>SQLite线程模式探讨</a></p></h4>
+<h2>背景</h2>
+<p>最近微信 iOS 团队发表了一篇文章<a href="http://mp.weixin.qq.com/s?__biz=MzAwNDY1ODY2OQ==&mid=2649286361&idx=1&sn=78bbcda7f41a14291ad71289e4821f71&scene=4#wechat_redirect">《微信iOS SQLite源码优化实践》</a>，该文章介绍了微信 iOS 客户端对 SQLite 进行的源码层级的优化，以及其所取得的成果。优化点包括：</p>
+<ol>
+<li>多线程并发优化（Busy Retry 的优化）</li>
+<li>I/O 性能优化（保留 WAL 文件大小，mmap 优化）</li>
+<li>其他优化（禁用文件锁，禁用内存统计锁）</li>
+</ol>
+<p>其中，单是<strong>禁用内存统计锁</strong>这点优化，就取得了非常显著的效果，这里引用原文：</p>
+<blockquote><p>该优化上线后，卡顿监控系统监测到</p>
+<ul>
+<li>DB写操作造成的卡顿下降超过80%</li>
+<li>DB读操作造成的卡顿下降超过85%</li>
+</ul>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/wechat_stutter.png" alt=""></p>
+</blockquote>
+<p>看到这结果，首先是满怀惊喜，仅仅是禁用 SQLite 的内存统计这一点，就能使 DB 的卡顿下降超过80%，如果再加上其他优化，那么 SQLite
+的性能将实现一次突破！但冷静下来之后，也很快产生怀疑，<strong>SQLite
+这么成熟的开源数据库，怎么会为了一个内存统计牺牲这么大的性能，要知道，性能是任何一个数据库都极力追求的目标</strong>。</p>
+<p>所有的猜测都是没用的，实际测一下便知道孰是孰非。为了测试方便，使用自己的开源框架 GYDataCenter，每一行数据包括NSInteger，double，BOOL，NSDate(double)，NSString 5列，测试机器为 iPhone 6s 64G，测试过程如下：</p>
+<ol>
+<li>打开 SQLite 内存统计，分别测试写入 10, 100, 1000，10000，100000 条数据所需时间；</li>
+<li>关闭 SQLite 内存统计，分别测试写入 10, 100, 1000，10000，100000 条数据所需时间；</li>
+<li>对比结果如下，横轴是数据量，纵轴是时间，单位秒；</li>
+</ol>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/memstatus_performance.png" alt=""></p>
+<p>从结果我们可以看出，<strong>打开或关闭 SQLite 的内存统计，性能基本没差别</strong>，仅有的一点点差别都是在误差范围内的。我们又对读操作进行了同样的测试，结果依然没有差别。</p>
+<p>问题出在于哪？究竟是哪个数据有问题？又或者是两个数据都没问题，只是我们打开的方式不对？于是，又重读了一遍微信的文章，发现该文章给出了这样的解释：</p>
+<blockquote><p>多线程并发时，各线程很容易互相阻塞。 阻塞虽然也很短暂，但频繁地切换线程，却是个很影响性能的操作，尤其是单核设备。因此，如果不需要内存统计的特性，可以通过sqlite3_config(SQLITE_CONFIG_MEMSTATUS, 0)进行关闭。</p>
+</blockquote>
+<p><strong>加锁和释放锁本身是有性能损耗，但这种损耗是很小的，基本上可以忽略，通常锁所带来的性能损耗正是在于等待其他线程释放锁的时间上</strong>。这正是两者的区别所在：</p>
+<ol>
+<li><strong>GYDataCenter 使用的是单线程单句柄的模式</strong>。对于同一个 db 的所有操作，都放到同一个队列同一个数据库句柄上，排队执行。并通过定时事务自动地把多个操作包在一起，批量地写入磁盘。</li>
+<li><strong>微信 iOS 客户端采用的是多线程多句柄的模式</strong>。对于每一个 db，会开多个数据库句柄。对于同一个数据库句柄，同一时间只能在一个队列运行。多个句柄间可以做到读与读，读与写的并发。</li>
+</ol>
+<p>GYDataCenter 在关闭 SQLite 的内存统计后，性能没有得到提升，正是因为 GYDataCenter 使用的是单线程模式，不会有多线程间等待锁的问题。GYDataCenter 从设计上根本地避免了多线程间等待锁的问题。而反观微信的文章，大部分的优化都是在解决多线程间等待锁所引起的性能损耗问题，解决 Busy Retry
+使<code>等待线程锁的造成的卡顿下降超过90%</code>，解决内存统计的锁使<code>卡顿下降超过80%</code>。这似乎也说明了<strong>多线程模式带来了很严重的竞争锁的问题</strong>。并且，Busy Retry 的线程锁，内存统计的锁只是其中两种锁，可能还有其他各种各样的锁急需优化。</p>
+<p>然而，单从这点就说单线程单句柄模式比多线程多句柄模式好是不正确的，多线程多句柄模式有它自己的优点，其中最明显的一点正是这种模式支持读与读，读与写的并发（WAL 模式下）。那么，我们就来具体分析一下，在移动客户端这个场景下，哪种模式可能更适用。</p>
+<h2>多线程多句柄 vs 单线程单句柄</h2>
+<h3>并发的需求</h3>
+<p>要回答这个问题，首先我们要问，<strong>在移动客户端下，数据库的读与读，读与写的并发的需求有多强</strong>？</p>
+<p>还是拿数据说话。在 iPhone 6s 上对微信读书 app 的主要场景进行了数据库并发性的统计。由于不同 app
+不尽相同，不同机器性能也不一样，因此下面的统计数据只能做参考意义。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/concurrence.png" alt=""></p>
+<p>在上面的结果中，对于<strong>n读0写</strong>跟<strong>n读1写</strong>的情况，多线程模式能起到优化作用。这两种情况分别占了 2% 跟 7%。我们进一步分析发现，出现这两种情况的场景，大多数是在网络请求回来时处理数据。</p>
+<p><strong>分析：移动客户端 app 的运行，都是用户操作驱动的。用户在界面上进行一系列操作，从主线程发起请求，app 响应请求，处理数据，显示结果，一般来说这一系列动作是一条线串起来执行的，没有并发的需求。移动客户端出现的最多的并发情况，在于发起网络请求，和网络请求回来后的数据处理。然而，在网络请求回来的情况下，数据库执行最多的操作是存储返回的数据。对于这种情况，我们都知道，通过事务把多个写操作包在一起能极大地提升性能。</strong>下面，我们分析一下两种方案在这种情况下的表现：</p>
+<ol>
+<li>多线程多句柄：如果把写操作放在一个事务中，在事务结束前，其他线程其他句柄的操作都会被卡住，返回 Busy Retry，造成空等待。</li>
+<li>单线程单句柄：自动地把多个写操作包在一个事务中，由于所有操作都放到一个队列，其他的读写操作可以穿插其中，不会被卡住。</li>
+</ol>
+<p>当然，如果你对返回的数据的存储有原子性要求，即要求在存储期间不能有其他任何的读写操作，那么其他读写操作是一定会被卡住的，两种方案都是无法解决的。</p>
+<h3>Cache 的管理</h3>
+<p>我们都知道，cache 能很好地提升性能。如果采用单线程的方案，cache 的实现就比较简单了。由于所有操作都是在一个队列上排队操作，cache 的维护与查询也在一个队列上排队进行即可，cache 与 db 数据的一致性可以得到保证。</p>
+<p>而如果在多线程多句柄方案上做 cache，可能会有以下两个难点：</p>
+<ol>
+<li>保证 cache 与 db 数据的一到性；</li>
+<li>由于 cache 也是在多线程访问的，因此也需要加锁，也有可能引进竞争锁的性能问题；</li>
+</ol>
+<h2>结语</h2>
+<p>通过上面的分析，我个人更偏向于使用单线程单句柄的模式。然而，世事无绝对，还是要具体情况具体分析。</p>
+<hr>
+
+
+
+<h4><p>原文出处：<a href='http://dev.qq.com/topic/57b57f2a0703f7d31b9a3932' target='blank'>移动客户端中高效使用SQLite</a></p></h4>
+<h3>导语</h3>
+<p>iOS 程序能从网络获取数据。少量的 KV 类型数据可以直接写文件保存在 Disk 上，App内部通过读写接口获取数据。稍微复杂一点的数据类型，也可以将数据格式化成 JSON 或 XML 方便保存，这些通用类型的增删查改方法也很容易获取和使用。这些解决方案在数据量在数百这一量级有着不错的表现，但对于大数据应用的支持则在稳定性、性能、可扩展性方面都有所欠缺。在更大一个量级上，移动客户端需要用到更专业的桌面
+数据库 SQLite。</p>
+<p>这篇文章主要从 SQLite 数据库的使用入手，介绍如何合理、高效、便捷的将这个桌面数据库和 App 全面结合。避免 App开发过程中可能遇到的坑，也提供一些在开发过程中通过大量实践和数据对比后总结出的一些参数设置。整篇文章将以一个个具体的技术点作为讲解单元，从 SQLite数据库生命周期起始讲解到其终结。希望无论是从微观还是从宏观都能给工程师以帮助。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_1.jpg" alt=""></p>
+<h3>一、SQLite 初始化</h3>
+<blockquote><p>在写提纲的时候发现，原来 SQLite 初始化竟然是技术点一点也不少。</p>
+</blockquote>
+<h5>1. 设置合理的 <strong>page_size</strong> 和 <strong>cache_size</strong></h5>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_2.png" alt=""></p>
+<p>网上有很多的文章提到了，在内存允许的情况下增加 page_size 和 cache_size 能够获得更快的查询速度。但过大的 page_size 也会造成 B-Tree 查询退化到二分查找、CPU 占用增加以及 OS 级 cache 命中率的下降的问题。</p>
+<p>通过反复比较测试不同组合的 page_size、cache_size、table_size、存储的数据类型以及各种可能的增删查改比例，我们发现后三者都是引起 page_size 和 cache_size 性能波动的因素。也就是说对于不同的数据库并不存在普遍适用的 page_size 和 cache_size 能一劳永逸的帮我们解决问题。</p>
+<p>并且在对比测试中我们发现 page_size 的选取往往会出现一个拐点。拐点以前随着 page_size 增加各种性能指标都会持续改善。但一旦过了拐点，性能将没有明显的改变，各个指标将围绕拐点时的数据值小范围波动。</p>
+<p>那么如何选取合适的 page_size 和 cache_size 呢？</p>
+<p>上一点我们已经提到了可能影响到 page_size 和 cache_size 最优值选取的三个因素：</p>
+<ol>
+<li><p><strong>table_size</strong></p>
+</li>
+<li><p><strong>存储的数据类型</strong></p>
+</li>
+<li><p><strong>增删查改比例</strong></p>
+</li>
+</ol>
+<p>我们简单的分析一下看看为什么这三个变量会共同作用于 page_size 和 cache_size。</p>
+<p>SQLite 数据库把其所存储的数据以 page 为最小单位进行存储。cache_size 的含义为当进行查询操作时，用多少个 page 来缓存查询结果，加快后续查询相同索引时方便从缓存中寻找结果的速度。</p>
+<p>了解了两者的含义，我们可以发现。SQLite 存储等长的 int int64 BOOL 等数据时，page 可以优化对齐地址存储更多的数据。而在存储变长的 varchar blob 等数据时，一则 page 因为数据变长的影响无法提前计算存储地址，二则变长的数据往往会造成 page 空洞，空间利用率也有下降。</p>
+<p>下表是设置不同的 page_size 和 cache_size 时，数据库操作中最耗时的增查改三种操作分别与不同数据类型，表列数不同的表之间共同作用的一组测试数据。</p>
+<p>其中各列数据含义如下，时间单位为毫秒</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_3.png" alt=""></p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_4.png" alt=""></p>
+<p>从上表我们看到，放大 page_size 和 cache_size 并不能不断的获得性能的提升，在拐点以后提升带来的优化不明显甚至是副作用了。这一点甚至体现到了数据库大小这方面。从 G 列可以看到，page_size
+的增加对于数据库查询的优化明显优于插入操作的优化。从05、06行可以发现，增加 cache_size 对于数据库性能提升并不明显。从 J 列可以看到，当插入操作的数据量比较小的时候，反而是小的 page_size 和 cache_size 更有优势。但 App DB 耗时更多的体现在大量数据增删查改时的性能，所以选取合适的、稍微大点的 page_size 是合理的。</p>
+<p>所以通过表格分析以后，我们倾向于选择 DB 线程总耗时以及线程内部耗时最多的三个方法，作为衡量 page_size 优劣的参考标准。</p>
+<p>page_size 有两种设置方法。一是在创建 DB 的时候进行设置。二是在初始化时设置新的 page_size 后，需要调用 <code>vacuum</code> 对数据表对应的节点重新计算分配大小。这里可参考 pragma_page_size 官方文档</p>
+<blockquote><p><a href="https://www.sqlite.org/pragma.html#pragma_page_size">https://www.sqlite.org/pragma...</a></p>
+</blockquote>
+<h5>2. 通过 timer 控制数据库事务定时提交</h5>
+<p>Transaction 是任何一个数据库中最核心的功能，但其对 Server 端和客户端的意义却不尽相同。对 Server 而言，一个 Transaction 是主备容灾分片的最小单位(当然还有其他意义)。对客户端而言，一个 Transaction 能够大大的提升其内部的增删查改操作的速度。SQLite 官方文档以及工程实测的数据都显示，事务的引入能提升性能 <strong>两个数量级</strong> 以上。</p>
+<p>实现方案其实非常简单。程序初始化完毕以后，启动一个事务，并创建一个 repeated 的 Timer</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_5.png" alt=""></p>
+<p>在 Timer 的回调函数 RenewTransaction 中，提交事务，并新启动一个事务</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_6.png" alt=""></p>
+<p>这样就能实现自动化的事务管理，将优化的实现黑盒化。逻辑使用方能将更多精力集中在逻辑实现方面，不用关心性能优化、数据丢失方面的问题。</p>
+<p><strong>从手动事务管理到自动事务管理会引发一个问题：</strong></p>
+<p>当两份数据必须拥有相同的生命周期，同时写入 DB、同时从 DB 删除、同时被修改时，通过时间作为提交事务的唯一标准，就有可能引发两份数据的操作进入了不同的事务。而第二个事务如果不能正确的提交，就会造成数据丢失或错误。</p>
+<p>解决这个问题，可以利用 SQLite 的事务嵌套功能，设计一组开启事务和关闭提交事务的接口，供逻辑使用者按照其需求调用事务的开始、提交和关闭。让内层事务保证两(多)份数据的完整性。</p>
+<h5>3. 缓存被编译后的 SQL 语句</h5>
+<p>和其他很多编程语言一样，数据库使用的 SQL 语句也需要经过编译后才能被执行使用。SQL语句的编译结果如果能够被缓存下来，第二次及以后再被使用时就能直接利用缓存结果，大大减少整个操作的执行时间。与此同理的还有 Java 数学库优化，通过把极其复杂的 Java 数学库实现翻译成 byte code，在调用处直接执行机器码，能大大优化 Java 数学库的执行速度和 C++ 持平甚至优于其。而对 SQLite 而言，一次 compile 的时间根据语句复杂程度从几毫秒到十几毫秒不等，对于批量操作性能优化是极其明显的。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_7.png" alt=""></p>
+<p>其实在上面的第2点中，已经是用一个专门的类将编译结果保存下来。每次根据文件名称和行号为索引，获得对应位置的 SQL 语句编译结果。为了便于大家理解，我在注释中也将 SQLIite 内部最底层的方法写出来供大家参考和对比性能数据。</p>
+<h5>4. 数据库完整性校验</h5>
+<p>移动客户端中的数据库运行环境要远复杂于桌面平台和服务器。掉电、后台被挂起、进程被 kill、磁盘空间不足等原因都有可能造成数据库的损坏。SQLite提供了检查数据库完整性的命令</p>
+<div class="highlight"><pre><code><span></span><span class="n">PRAGMA</span><span class="w"> </span><span class="n">integrity_check</span>
+</code></pre></div>
+<p>该 SQL 语句的执行结果如果不为 OK ，则意味着数据库损坏。程序可以通过 ROLLBACK 到一个稍老的版本等方法来解决数据库损坏带来的不稳定性。</p>
+<h5>5. 数据库升级逻辑</h5>
+<p>代码管理可以用 git、svn，数据库如果要做升级逻辑相对来说会复杂很多。好在我们可以利用 SQLite，在内部用一张 meta 表专门用于记录数据库的当前版本号、最低兼容版本号等信息。用好了这张表，我们就可以对数据库是否需要升级、升级的路径进行规范。<br>
+我们代入一个简单银行客户的例子来说明如何进行数据库的升级。</p>
+<p><strong>a.</strong> V1 版本对数据库的要求非常简单，保存客户的账号、姓、名、出生日期、年龄、信用这6列。以及对应的增删查改，对应的SQL语句如下</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_8.png" alt=""></p>
+<p>并且在 meta 表中保存当前数据库的版本号为1，向前兼容的版本为1，代码如下</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_9.png" alt=""></p>
+<p><strong>b.</strong> V2 版本时需要在数据库中增加客户在银行中的存款和欠款两列。首先我们需要从 meta 表中读取用户的数据库版本号。增加了两列后创建 table 和增删查改的 SQL 语句都要做出适当的修改。代码如下</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_10.jpg" alt=""></p>
+<p>很显然 V2 版本的 SQL 语句很多都和 V1 是不兼容的。V1 的数据使用 V2 的 SQL 进行操作会引发异常产生。所以在 SQLite 封装层，我们需要根据当前数据库版本分别进行处理。V1 版本的数据库需要通过 ALTER 操作增加两列后使用。记得升级完毕后要更新数据库的版本。代码如下</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_11.png" alt=""></p>
+<p><strong>c.</strong> V3 版本发现出生日期与年龄两个字段有重复，冗余的数据会带来数据库体积的增加。希望 V3 数据库能够只保留出生日期字段。我们依然从 meta 读取数据库版本号信息。不过这次需要注意的是直到 SQLite 3.9.10 版本并没有删掉一列的操作。不过这并不影响新版本创建的 TABLE 会去掉这一列，而老版本的DB也可以和新的 SQL 语句一起配合工作不会引发异常。代码如下</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_12.jpg" alt=""></p>
+<p>注意 last_compatible_version 这里可以填2也可以填3，主要根据业务逻辑合理选择</p>
+<p><strong>d.</strong> 除了数据库结构发生变化时可以用上述的方法升级。当发现老版本的逻辑引发了数据错误，也可以用类似的方法重新计算正确结果，刷新数据库。</p>
+<h3>二、如何写出高效的 SQL 语句</h3>
+<blockquote><p>这个部分将以 App 开发中经常面对的场景作为样例进行对比分析。</p>
+</blockquote>
+<h5>1. 分类建索引(covering index &amp; explain query)</h5>
+<p>或许很多开发都知道，当用某列或某些列作为查询条件时，给这些列增加索引是能大大提升查询速度的。</p>
+<p>但真的如此的简单吗？</p>
+<p>要回答这个问题，我们需要借助 SQLite 提供的 explain query 工具。</p>
+<p>顾名思义，它是用来向开发人员解释在数据库内部一条查询语句是如何进行的。在 SQLite 数据库内部，一条查询语句可能的执行方式是多种多样的。它有可能会扫描整张数据表，也可能会扫描主键子表、索引子表，或者是这些方式的组合。具体的关于 SQLite 查询的方式可以参看官方文档 Query Planning</p>
+<blockquote><p><a href="https://www.sqlite.org/queryplanner.html#searching">https://www.sqlite.org/queryp...</a></p>
+</blockquote>
+<p>简单的说，SQLite 对主键会按照平衡多叉树理论对其建树，使其搜索速度降低到 Log(N)。</p>
+<p><strong>针对某列建立索引，就是将这列以及主键所有数据取出。以索引列为主键按照升序，原表主键为第二列，重新创建一张新的表。需要特别注意的是，针对多列建立索引的内部实现方案是，索引第一列作为主键按照升序，第一列排序完毕后索引第二列按照升序，以此类推，最后以原表主键作为最后一列。这样就能保证每一行的数据都不完全相同，这种多列建索引的方式也叫 COVERING INDEX。所以对多列进行索引，只有第一列的搜索速度理论上能到 Log(N)。</strong></p>
+<p>更重要的是，SQLite 这种建索引的方式确实可以带来搜索性能的提升，但对于数据库初始化的性能有着非常大的负面影响。这里先点到为止，下文会专门论述如何进行优化。这里以 SQLite 官方的一个例子来说明，在逻辑上 SQLite 是如何建立索引的。</p>
+<blockquote><p>实际上 SQLite 建立索引的方式并不是下列图看起来的聚集索引，而是采用了非聚集索引。因为非聚集索引的性能并不比聚集索引低，但空间开销却会小很多。SQLite 官方图片只是示意，请一定注意</p>
+</blockquote>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_13.png" alt=""></p>
+<p>一列行号外加三列数据 fruit state price</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_14.png" alt=""></p>
+<p>当我们用 <code>CREATE INDEX Idx1 ON fruitsforsale(fruit)</code> 为 fruit 列创建索引后，SQLite
+在内部会创建一张新的索引表，并以 fruit 为主键。如上图所示</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_15.png" alt=""></p>
+<p>而当我们继续用 <code>CREATE INDEX Idx3 ON FruitsForSale(fruit, state)</code> 创建了 COVERING IDNEX时，SQLite 在内部并不会为所有列单独创建索引表。而是以第一列作为主键，其他列升序，行号最后来创建一张表。如上图所示</p>
+<p>我们接下来要做的就是利用 explain query 来分析不同的索引方式对于查询方式的影响，以及性能对比。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_16.png" alt=""></p>
+<p>不加索引的时候，查询将会扫描整个数据表</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_17.png" alt=""></p>
+<p>针对 WHERE CLAUSE 中的列加了索引以后的情况。SQLite 在进行搜索的时候会先根据索引表i1找到对应的行，再根据 rowid 去原表中获取 b 列对应的数据。可能有些工程师已经发现了，这里可以优化啊，没必要找到一行数据后还要去原表找一次。刚才不是说了嘛，对多列建索引的时候，是把这些列的数据都放入一个新的表。那我们试试看。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_18.png" alt=""></p>
+<p>果然，同样的搜索语句，不同的建索引的方式，SQLite 的查询方式也是不同的。这次 SQLite 选择了索引 i2 而非索引 i1，因为 a、b 列数据都在同一张表中，减少了一次根据行号去原表查询数据的操作。</p>
+<p>看到这里不知道大家有没有产生这样的一个疑问，如果我们用 COVERING INDEX i2 的非第一列去搜索是不是并没有索引的效果？</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_19.png" alt=""></p>
+<p>WTF，果然，看起来我们为 b 列创建了索引 i2，但用 EXPLAIN QUERY PLAN 一分析发现 SQLite 内部依然是扫描整张数据表。这点也和上面分析的对 COVERING INDEX 建索引表的理论一致，不过情况依然没这么简单，我们看看下面三个搜索</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_20.png" alt=""></p>
+<p>WTF，搜索的时候用 AND 和 OR 的效果是不一样的。其实多想想 COVERING INDEX 的实现原理也就想通了。对于没有建索引的列进行搜索那不就是扫描整张数据表。所以如果 App 对于两列或以上有搜索需求时，就需要了解一个概念 <strong>“前导列”</strong>。所谓前导列，就是在创建 COVERING INDEX 语句的第一列或者连续的多列。比如通过：CREATE INDEX covering_idx ON table1(a, b, c)创建索引，那么 a, ab, abc 都是前导列，而 bc，b，c 这样的就不是。在 WHERE CLAUSE 中，前导列必须使用等于或者 in 操作，最右边的列可以使用不等式，这样索引才可以完全生效。如果确实要用到等于类的操作，需要像上面最后一个例子一样为右边的、不等于类操作的列单独建索引。</p>
+<p>很多时候，我们对于搜索结果有排序的要求。如果对于排序列没有建索引，可以想象 SQLite 内部会对结果进行一次排序。实际上如果对没有建索引，SQLite会建一棵临时 B Tree 来进行排序。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_21.png" alt=""></p>
+<p>所以我们建索引的时候别忘了对 ORDER BY 的列进行索引</p>
+<blockquote><p>讲了这么多关于 SQLite 建索引，其实也不过官方文档的万一。但是了解了 SQLite 建索引的理论和实际方案，掌握了通过 EXPLAIN QUERY PLAN 去分析自己的每一条 WHERE CLAUSE和ORDER BY。我们就可以分析出性能到底还有没有可以优化的空间。尽量减少扫描数据表的次数、尽量扫描索引表而非原始表，做好与数据库体积的平衡。让好的索引加快你程序的运行。</p>
+</blockquote>
+<h5>2. 先建原始数据表，再创建索引 - insert first then index</h5>
+<p>是的，当我第一眼看见这个结论时，我甚至觉得这是搞笑的。当我去翻阅 SQLite 官方文档时，并没有对此相关的说明文档。看着 StackOverflow上面华丽丽的 insert first then index VS insert and index together的对比数据，当我真的将建索引挪到了数据初始化插入后，奇迹就这样发生了。XCode Instrument统计的十万条数据的插入CPU耗时，降低了20%(StackOverflow 那篇介绍文章做的对比测试下降还要更多达30%)。</p>
+<p>究其原因，索引表在 SQLite 内部是以 B-Tree 的形式进行组织的，一个树节点一般对应一个 page。我们可以看到数据库要写入、读取、查询索引表其实都需要用到公共的一个操作是搜索找到对应的树节点。从外存读取索引表的一个节点到内存，再在内存判断这个节点是否有对应的 key(或者判断节点是否需要合并或分裂)。而统计研究表明，外存中获取下一个节点的耗时比内存中各项操作的耗时多好几个数量级。也就是说，对索引表的各项操作，增删查改的耗时取决于外存获取节点的时间(SQLite 用 B-Tree 而非 STL 中采用的 RB-Tree 或平衡二叉树，正是为了尽可能降低树的高度，减少外存读取次数)。一边插入原始表的数据，一边插入索引表数据，有可能造成索引表节点被频繁换到外存又从外存读取。而同一时间只进行建索引的操作，OS缓存节点的量将增加，命中率提高以后速度自然得到了一定的提升。</p>
+<p>SQLite 的索引采用了 B-Tree，树上的一个 Node 一般占用一个 page_size。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_22.png" alt=""></p>
+<p>B-Tree 的搜索节点复杂度如上。我们可以看到公式中的 m 就是 B-Tree 的阶数也就是节点中最大可存放关键字数+1。也就是说，m 是和page_size 成正比和复杂度成反比和树的高度成反比和读取外存次数成反比和耗时成反比。所以 page_size 越大确实可以减少 SQLite含有查询类的操作。但无限制的增加 page_size 会使得节点内数据过多，节点内数据查询退化成线性二分查询，复杂度反而有些许上升。</p>
+<blockquote><p><strong>所以在这里还是想强调一下，page_size 的选择没有普适标准，一定要根据性能工具的实际分析结果来确定</strong></p>
+</blockquote>
+<h5>3. SELECT then INSERT VS INSERT OR REPLACE INTO</h5>
+<p>有过 SQLite 开发经验的工程师都知道，INSERT插入数据时如果主键已经存在是会引发异常的。而这时往往逻辑会要求用新的数据代替数据库已存在的老数据。曾经老版本的 SQLite 只能通过先 SELECT查询插入数据主键对应的行是否存在，不存在才能 INSERT，否则只能调用 UPDATE。而3.x版本起，SQLite 引入了 INSERT OR REPLACE INTO，用一行 SQL 语句就把原来的三行 SQL 封装替代了。</p>
+<p>不过需要注意的是，SQLite 在实现 INSERT OR REPLACE INTO 时，实现的方案也是先查询主键对应行是否存在，如果存在则删除这一行，最后插入这行的数据。从其实现过程来看，当数据存在时原来只需要刷新这一行，现在则是删掉老的插入新的，理论速度上会变慢。这种写法仅仅是对数据库封装开发提供了便利，对性能还是有些许影响的。不过对于数据量比较少不足1000行的情况，用这种方法对性能的损耗还是细微的，且这样写确实方便了很多。但对于更多的数据，插入的时候还是推荐虽然写起来很麻烦，但是性能更好的，先 SELECT 再选择 INSERT OR UPDATE 的方法。</p>
+<h5>4. Full Text Search(FTS)</h5>
+<blockquote><p>INTEGER 类的数据能够很方便的建索引，但对于 VARCHAR 类的数据，如果不建索引则只能使用 LIKE 去进行字符串匹配。如果 App 对于字符串搜索有要求，那么基本上 LIKE 是满足不了要求的。</p>
+</blockquote>
+<p>FTS 是 SQLite 为加快字符串搜索而创建的虚拟表。FTS 不仅能通过分词大大加快英文类字符串的搜索，对于中文字符串 FTS 配合 ICU 也能对中文等其他语言进行分词、分字处理，加快这些语言的搜索速度。下面这个是 SQLite 官方文档对两者搜索速度的一个对比。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_23.png" alt=""></p>
+<p>上面创建 FTS 虚拟表的方式只能对英文搜索起作用，对其他语言的支持是通过 ICU 模块支持来实现的。所以工程是需要编译创建 ICU 的静态库，编译 SQLite 时需要指定链接ICU库。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_24.png" alt=""></p>
+<p>其实无论创建数据表的时候是否创建了行号(rowid)列，SQLite 都会为每个数据表创建行号列。想想上面的
+fruitsforsale，当数据表没有任何列建了索引的时候，行号就是数据表的唯一索引。FTS 表略微不同的是，它的行号叫 docid，并且是可以用 SQL语句访问的。我们一般会用字符串在原始表中的行号作为这里的 docid。</p>
+<p>如果你仔细看搜索语句你会发现和官方文档不太一样的是，对于 MATCH 的结果我们会再用 LIKE 过滤一次。</p>
+<p>在回答这个问题前，我们需要知道 SQLite 默认对英文是按单词(空格为分隔符)进行分词，对中文则是按照字进行拆分。当中文是按字进行拆分时，SQLite 会对关键字也按字进行拆分后进行搜索。这会带来一个 bug，当关键字是叠词时，比如“天天”，除了可以把正确的如“天天向上”搜索出来，还能把“今天天气不错，挺风
+和日丽的”给搜索出来。就是因为关键词“天天”也被按字拆分了。如果我们把 SQLite 内英文搜索设置成按字母拆分，一样会产生相同的问题。所以我们需要把结果再LIKE 一次，因为在一个小范围内 LIKE 且不用加%通配符，这里的速度也是很快的。</p>
+<p>如果希望对英文也按字母拆分，使得输入关键字 "cent"，就能匹配上 "Tencent" 也非常简单。只需要找到，SQLite 实现的 icuOpen方法。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_25.jpg" alt=""></p>
+<p>其实只需要改变读取 ICU 的方式，就能支持英文按字母拆分了。</p>
+<h5>4. 不固定个数的元素集合不要分表</h5>
+<p>在设计数据库时，我们会把一个对象的属性分成不同的列按行存储。如果属性是个数量不定的数组，切忌不要把这个数组属性放到一个新表里面。上面我们提到过数据操作最耗时的其实是访问外存上面的数据。当数据量很大时，多张表的外存访问是非常慢的。这里的做法是讲数组数据用 JSON 序列化后，已 VARCHAR 或者 BLOB
+的形式存成一列，和其他的数据放在同一个数据表当中。</p>
+<h5>5. 用 protobuf 作为数据库的输入输出参数</h5>
+<p>先说结论，这样做是数据库 Model 跨 iOS、Android 平台的解决方案。两个平台用同一份 proto
+文件分别生成各自的实现文件。需要跨平台时将数据序列化后，以传递内存的方式通过 JNI 接口将数据传递给对方平台。对方平台有相应的方式进行反序列化。JNI封装层的工作也大大降低了。这样做还有个好处是，后台返回 protobuf 的结果，网络只需要拷贝在内存一份数据(实际上如果 UI、DB是不同的线程，有可能会需要两份)就能让数据库进行使用，减少了不必要的内存开销。</p>
+<h5>6. 千万不要编译使用 SQLite 多线程实现</h5>
+<p>标题已经胜过千言万语了。多线程版的 SQLite 可是对每行操作加锁的，性能是比较差的，同样的操作耗时是单线程版本的2倍。</p>
+<h3>三、一些可能有用的辅助模块</h3>
+<h5>1. 利用 Lambda 表达式简化从 UI 线程异步调用数据库接口</h5>
+<p>好的 App 架构，一定会为数据库单独安排一个线程。在多线程环境下，UI线程发起了数据库接口请求后，一定要保证接口是异步返回数据才能保证整个UI操作的流畅性。但是异步接口开发最大的麻烦在于调用在A处，还要实现一个 B 方法来处理异步返回的结果。这里推荐使用 C++11的 lambda 表达式加模板函数 base::Bind 来实现像 JavaScript 语言一样，能够将异步回调方法作为输入参数传递给执行方，待执行完成操作后进行异步回调。用异步化接口编程，大大降低开发难度和实现量，并带来了流畅的界面体验。C++要实现将回调函数作为输入参数传递给函数执行者，并在执行者完成预定逻辑获得返回结果时调用回调函数传递回结果，有两个难点需要克服。</p>
+<ol>
+<li><p>如何将函数变成一个局部变量(C++11 lambda 表达式)</p>
+</li>
+<li><p>如何将一个函数匿名化(C++11 auto decltype 联合推导 lambda 表达式的类型)</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/Bugly_SQLite_1_26.jpg" alt=""></p>
+</li>
+</ol>
+<h5>2. 加密数据库</h5>
+<p>有些时候，出于某种考虑，我们需要加密数据库。SQLite 数据库加密对性能的损耗按照官方文档的评测大约在3%的 CPU 时间。实现加密一种方案是购买SQLite 的加密版本，大约是3000刀。还有一种就是自己实现数据库的加密模块。网上有很多介绍如何实现 SQLite 免费版中空实现的加密方法。</p>
+<p>最后，希望本文能对大家有所帮助。</p>
+<hr>
+
+
+
+
+
+<h4><p>原文出处：<a href='http://blog.csdn.net/neo_yin/article/details/52326471' target='blank'>SQLite数据库中索引的使用、索引的优缺点</a></p></h4>
+<p>要使用索引对数据库的数据操作进行优化，那必须明确几个问题：</p>
+<ol>
+<li>什么是索引</li>
+<li>索引的原理</li>
+<li>索引的优缺点</li>
+<li>什么时候需要使用索引，如何使用</li>
+</ol>
+<p>围绕这几个问题，来探究索引在数据库操作中所起到的作用。</p>
+<h4>一、数据库索引简介</h4>
+<p>回忆一下小时候查字典的步骤，索引和字典目录的概念是一致的。字典目录可以让我们不用翻整本字典就找到我们需要的内容页数，然后翻到那一页就可以。索引也是一样，索引是对记录按照多个字段进行排序的一种展现。对表中的某个字段建立索引会创建另一种数据结构，其中保存着字段的值，每个值还包括指向与它相关记录的指针。这样，就不必要查询整个数据库，自然提升了查询效率。同时，索引的数据结构是经过排序的，因而可以对其执行二分查找，那就更快了。</p>
+<h4>二、B-树与索引</h4>
+<p>大多数的数据库都是以B-树或者B+树作为存储结构的，B树索引也是最常见的索引。先简单介绍下B-树，可以增强对索引的理解。</p>
+<p>B-树是为磁盘设计的一种多叉平衡树，B树的真正最准确的定义为：一棵含有t（t&gt;=2）个关键字的平衡多路查找树。一棵M阶的B树满足以下条件：</p>
+<ol>
+<li>每个结点至多有M个孩子</li>
+<li>除根结点和叶结点外，其它每个结点至少有M/2个孩子</li>
+<li>根结点至少有两个孩子（除非该树仅包含一个结点）</li>
+<li>所有叶结点在同一层，叶结点不包含任何关键字信息，可以看作一种外部节点</li>
+<li>有K个关键字的非叶结点恰好包含K+1个孩子</li>
+</ol>
+<p>B树中的每个结点根据实际情况可以包含大量的关键字信息和分支(当然是不能超过磁盘块的大小，根据磁盘驱动(disk drives)的不同，一般块的大小在1k~4k左右)；这样树的深度降低了，这就意味着查找一个元素只要很少结点从外存磁盘中读入内存，很快访问到要查找的数据。B-树上操作的时间通常由存取磁盘的时间和CPU
+计算时间这两部分构成。而相对于磁盘的io速度，cpu的计算时间可以忽略不计，所以B树的意义就显现出来了，树的深度降低，而深度决定了io的读写次数。</p>
+<p>B树索引是一个典型的树结构，其包含的组件主要是：</p>
+<ol>
+<li>叶子节点（Leaf node）：包含条目直接指向表里的数据行。</li>
+<li>分支节点（Branch node）：包含的条目指向索引里其他的分支节点或者是叶子节点。</li>
+<li>根节点（Root node）：一个B树索引只有一个根节点，它实际就是位于树的最顶端的分支节点。</li>
+</ol>
+<p>如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/2012092914383471643.jpg" alt="这里写图片描述"></p>
+<p>每个索引都包含两部分内容，一部分是索引本身的值，第二部分即指向数据页或者另一个索引也的指针。每个节点即为一个索引页，包含了多个索引。</p>
+<p>当你为一个空表建立一个索引，数据库会分配一个空的索引页，这个索引页即代表根节点，在你插入数据之前，这个索引页都是空的。每当你插入数据，数据库就会在根节点创建索引条目。当根节点插满的时候，再插入数据时，根节点就会分裂。举个例子，根节点插入了如图所示的数据。（超过4个就分裂），这时候插入H，就会分裂成2个节点，移动G到新的根节点，把H和N放在新的右孩子节点中。如图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/2012092914383427039.png" alt="这里写图片描述"><br>
+根节点插满4个节点</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/2012092914383471907.png" alt="这里写图片描述"><br>
+插入H，进行分裂。</p>
+<p>大致的分裂步骤如下：</p>
+<ol>
+<li>创建两个子节点  </li>
+<li>将原节点中的数据近似分为两半，写入两个新的孩子节点中。  </li>
+<li>在根节点中放置指向页节点的指针</li>
+</ol>
+<p>当你不断向表中插入数据，根节点中指向叶节点的指针也被插满，当叶子还需要分裂的时候，根节点没有空间再创建指向新的叶节点的指针。那么数据库就会创建分支节点。随着叶子节点的分裂，根节点中的指针都指向了这些分支节点。随着数据的不断插入，索引会增加更多的分支节点，使树结构变成这样的一个多级结构。</p>
+<h4>三、索引的种类</h4>
+<ol>
+<li><p>聚集索引<br>
+表中行的物理顺序与键值的逻辑（索引）顺序相同。因为数据的物理顺序只能有一种，所以一张表只能有一个聚集索引。如果一张表没有聚集索引，那么这张表就没有顺序的概念，所有的新行都会插入到表的末尾。对于聚集索引，叶节点即存储了数据行，不再有单独的数据页。就比如说我小时候查字典从来不看目录，我觉得字典本身就是一个目录，比如查裴字，只需要翻到p字母开头的，再按顺序找到e。通过这个方法我每次都能最快的查到老师说的那个字，得到老师的表扬。</p>
+</li>
+<li><p>非聚集索引<br>
+表中行的物理顺序与索引顺序无关。对于非聚集索引，叶节点存储了索引字段值以及指向相应数据页的指针。叶节点紧邻在数据之上，对数据页的每一行都有相应的索引行与之对应。有时候查字典，我并不知道这个字读什么，那我就不得不通过字典目录的“部首”来查找了。这时候我会发现，目录中的排序和实际正文的排序是不一样的，这对我来说很苦恼，因为我不能比别人快了，我需要先再目录中找到这个字，再根据页数去找到正文中的字。</p>
+</li>
+</ol>
+<h4>四、索引与数据的查询，插入与删除</h4>
+<ol>
+<li><p>查询<br>
+查询操作就和查字典是一样的。当我们去查找指定记录时，数据库会先查找根节点，将待查数据与根节点的数据进行比较，再通过根节点的指针查询下一个记录，直到找到这个记录。这是一个简单的平衡树的二分搜索的过程，我就不赘述了。在聚集索引中，找到页节点即找到了数据行，而在非聚集索引中，我们还需要再去读取数据页。</p>
+</li>
+<li><p>插入<br>
+聚集索引的插入操作比较复杂，最简单的情况，插入操作会找到对于的数据页，然后为新数据腾出空间，执行插入操作。如果该数据页已经没有空间，那就需要拆分数据页，这是一个非常耗费资源的操作。对于仅有非聚集索引的表，插入只需在表的末尾插入即可。如果也包含了聚集索引，那么也会执行聚集索引需要的插入操作。</p>
+</li>
+<li><p>删除<br>
+删除行后下方的数据会向上移动以填补空缺。如果删除的数据是该数据页的最后一行，那么这个数据页会被回收，它的前后一页的指针会被改变，被回收的数据页也会在特定的情况被重新使用。与此同时，对于聚集索引，如果索引页只剩一条记录，那么该记录可能会移动到邻近的索引表中，原来的索引页也会被回收。而非聚集索引没办法做到这一点，这就会导致出现多个数据页都只有少量数据的情况。</p>
+</li>
+</ol>
+<h4>五、索引的优缺点</h4>
+<p>其实通过前面的介绍，索引的优缺点已经一目了然。</p>
+<p>先说优点：</p>
+<ol>
+<li>大大加快数据的检索速度，这也是创建索引的最主要的原因  </li>
+<li>加速表和表之间的连接，特别是在实现数据的参考完整性方面特别有意义  </li>
+<li>在使用分组和排序子句进行数据检索时，同样可以显著减少查询中分组和排序的时间</li>
+</ol>
+<p>再说缺点：</p>
+<ol>
+<li>创建索引需要耗费一定的时间，但是问题不大，一般索引只要build一次  </li>
+<li>索引需要占用物理空间，特别是聚集索引，需要较大的空间  </li>
+<li>当对表中的数据进行增加、删除和修改的时候，索引也要动态的维护，降低了数据的维护速度，这个是比较大的问题。</li>
+</ol>
+<h4>六、索引的使用</h4>
+<p>根据上文的分析，我们大致对什么时候使用索引有了自己的想法。一般我们需要在这些列上建立索引：</p>
+<ol>
+<li>在经常需要搜索的列上，这是毋庸置疑的</li>
+<li>经常同时对多列进行查询，且每列都含有重复值可以建立组合索引，组合索引尽量要使常用查询形成索引覆盖（查询中包含的所需字段皆包含于一个索引中，我们只需要搜索索引页即可完成查询）。同时，该组合索引的前导列一定要是使用最频繁的列。对于前导列的问题，在后面SQLite的索引使用介绍中还会做讨论。</li>
+<li>在经常用在连接的列上，这些列主要是一些外键，可以加快连接的速度，连接条件要充分考虑带有索引的表。</li>
+<li>在经常需要对范围进行搜索的列上创建索引，因为索引已经排序，其指定的范围是连续的，同样，在经常需要排序的列上最好也创建索引。</li>
+<li>在经常放到where子句中的列上面创建索引，加快条件的判断速度。要注意的是where字句中对列的任何操作（如计算表达式，函数）都需要对表进行整表搜索，而没有使用该列的索引。所以查询时尽量把操作移到等号右边。</li>
+</ol>
+<p>对于以下的列我们不应该创建索引：</p>
+<ol>
+<li>很少在查询中使用的列</li>
+<li>含有很少非重复数据值的列，比如只有0，1，这时候扫描整表通常会更有效</li>
+<li>对于定义为<code>TEXT</code>，<code>IMAGE</code>的数据不应该创建索引。这些字段长度不固定，或许很长，或许为空。<br>
+当然，对于更新操作远大于查询操作时，不建立索引。也可以考虑在大规模的更新操作前drop索引，之后重新创建，不过这就需要把创建索引对资源的消耗考虑在内。总之，使用索引需要平衡投入与产出，找到一个产出最好的点。</li>
+</ol>
+<h4>七、在SQLite中使用索引</h4>
+<ol>
+<li><p>SQLite不支持聚集索引，Android默认需要一个<code>_id</code>字段，这保证了你插入的数据会按<code>_id</code>的整数顺序插入，这个integer类型的主键就会扮演和聚集索引一样的角色。所以不要再在对于声明为：<code>INTEGER PRIMARY KEY</code>的主键上创建索引。</p>
+</li>
+<li><p>很多对索引不熟悉的朋友在表中创建了索引，却发现没有生效，其实这大多数和我接下来讲的有关。对于<code>WHERE</code>子句中出现的列要想索引生效，会有一些限制，这就和前导列有关。所谓前导列，就是在创建复合索引语句的第一列或者连续的多列。比如通过：<code>CREATE INDEX comp_ind ON table1(x, y, z)</code>创建索引，那么<code>x</code>,<code>xy</code>,<code>xyz</code>都是前导列，而<code>yz</code>，<code>y</code>，<code>z</code>这样的就不是。下面讲的这些，对于其他数据库或许会有一些小的差别，这里以SQLite为标准。在<code>WHERE</code>子句中，前导列必须使用等于或者<code>IN</code>操作，最右边的列可以使用不等式，这样索引才可以完全生效。同时，<code>WHERE</code>子句中的列不需要全建立了索引，但是必须保证建立索引的列之间没有间隙。举几个例子来看吧：<br>
+用如下语句创建索引：<br>
+<code>CREATE INDEX idx_ex1 ON ex1(a,b,c,d,e,...,y,z);</code><br>
+这里是一个查询语句：<br>
+<code>...WHERE a=5 AND b IN (1,2,3) AND c IS NULL AND d='hello'</code>  这显然对于abcd四列都是有效的，因为只有等于和<code>IN</code>操作，并且是前导列。<br>
+再看一个查询语句：<br>
+<code>... WHERE a=5 AND b IN (1,2,3) AND c&gt;12 AND d='hello'</code><br>
+那这里只有<code>a</code>，<code>b</code>和<code>c</code>的索引会是有效的，<code>d</code>列的索引会失效，因为它在<code>c</code>列的右边，而<code>c</code>列使用了不等式，根据使用不等式的限制，<code>c</code>列已经属
+于最右边。<br>
+最后再看一条：<br>
+<code>... WHERE b IN (1,2,3) AND c NOT NULL AND d='hello'</code><br>
+索引将不会被使用，因为没有使用前导列，这个查询会是一个全表查询。</p>
+</li>
+<li><p>对于<code>between</code>，<code>or</code>，<code>like</code>，都无法使用索引。<br>
+如 <code>...WHERE myfield BETWEEN 10 and 20;</code><br>
+这时就应该将其转换成：<br>
+<code>...WHERE myfield &gt;= 10 AND myfield &lt;= 20;</code><br>
+再如<code>LIKE：...mytable WHERE myfield LIKE 'sql%';</code><br>
+此时应该将它转换成：<br>
+<code>...WHERE myfield &gt;= 'sql' AND myfield &lt; 'sqm';</code><br>
+再如OR：<code>...WHERE myfield = 'abc' OR myfield = 'xyz';</code><br>
+此时应该将它转换成：<br>
+<code>...WHERE myfield IN ('abc', 'xyz');</code><br>
+其实除了索引，对查询性能的影响因素还有很多，比如表的连接，是否排序等。影响数据库操作的整体性能就需要考虑更多因素，使用更对的技巧，不得不说这是一个很大的学问。</p>
+</li>
+</ol>
+<p>最后在android上使用sqlite写一个简单的例子，看下索引对数据库操作的影响。<br>
+创建如下表和索引：<br>
+<code>db.execSQL("create table if not exists t1(a,b)");</code><br>
+<code>db.execSQL("create index if not exists ia on t1(a,b)");</code><br>
+插入10万条数据，分别对表进行如下操作：<br>
+<code>select * from t1 where a='90012'</code><br>
+插入：<code>insert into t1(a,b) values('10008','name1.6982235534984673')</code><br>
+更新：<code>update t1 set b='name1.999999' where a = '887'</code><br>
+删除：<code>delete from t1 where a = '1010'</code><br>
+数据如下（5次不同的操作取平均值）：<br>
+操作 无索引 有索引<br>
+查询 170ms 5ms<br>
+插入 65ms 75ms<br>
+更新 240ms 52ms<br>
+删除 234ms 78ms</p>
+<p>可以看到显著提升了查询的速度，稍稍减慢了插入速度，还稍稍提升了更新数据和删除数据的速度。如果把更新和删除中的where子句中的列换成b，速度就和没有索引一样了，因为索引失效。所以索引能大幅度提升查询速度，对于删除和更新操作，如果where子句中的列使用了索引，即使需要重新build索引，有可能速度还是比不使用索引要快的。对与插入操作，索引显然是个负担。同时，索引让db的大小增加了2倍多。</p>
+<p>还有个要吐槽的是，Android中的rawQurey方法，执行完SQL语句后返回一个cursor，其实并没有完成一个查询操作，我在rawquery之前和之后计算查询时间，永远是1ms…这让我无比苦闷。看了下源码，在对cursor调用moveToNext这些移动游标方法时，都会最终先调用getCount方法，而getCount方法才会调用native方法调用真正的查询操作。这种设计显然更加合理。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "iOS SQLite源码优化实践.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

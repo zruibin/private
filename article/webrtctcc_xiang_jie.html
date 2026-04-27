@@ -1,0 +1,385 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>webrtc tcc详解 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="webrtc tcc详解,WebRTC,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="webrtc tcc详解" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>webrtc tcc详解</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2024-07-28 21:51
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_webrtc.html' class='article_tag'>WebRTC</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://mp.weixin.qq.com/s/sAXSx3435tlgLHE0FyrbOg' target='blank'>webrtc tcc详解</a></p></h4>
+<blockquote><p>之前写过&lt;&lt;<a href="https://mp.weixin.qq.com/s?__biz=Mzk0NzY5NDcxMQ==&mid=2247483704&idx=1&sn=95239e020b1bef96d722ba254f343096&scene=21#wechat_redirect">webrtc gcc详解</a>&gt;&gt;，有网友反馈过当前用webrtc tcc的拥塞算法比较多，这里详解一下webrtc tcc算法，本文主要内容：</p>
+</blockquote>
+<ul>
+<li><p>tcc架构</p>
+</li>
+<li><p>趋势滤波算法</p>
+</li>
+<li><p>webrtc tcc与gcc的比较</p>
+</li>
+</ul>
+<h2>1. 前言</h2>
+<p>webrtc的tcc算法，具体做法是，接收端监控两个数据，并反馈给发送端。</p>
+<ul>
+<li><p>丢包率: 接收端计算出丢包率，定期发送rtcp rr报文(内有丢包率)给发送端，发送端通过丢包率的大小来决定是否降低编码的bitrate；</p>
+</li>
+<li><p>Transport-wide RTCP Feedback Message，接收端记录每个rtp报文的wideSeqNumber，到达timestamp，整理后打包成rtcp tcc报文发送给接收端，接收端整理rtcp tcc报文中的到达timestamp与发送端的时间等数据，通过趋势滤波算法，判断拥塞程度，是否降低码率，增加码率，或保持码率。</p>
+</li>
+</ul>
+<p>基于丢包率来调整动态编码，是比较简单，很多厂家经常在sfu服务端进行调整，如：如果不是长肥型网络，在丢包率&lt;30%的情况下，rtcp rr中的丢包率和丢包总数欺骗性的填写0，这样发送端(尤其是web端)就不会轻易的降低bitrate，到达测试的良好效果</p>
+<p>但是基于tcc架构的带宽预测，相对比较复杂(但是比卡曼滤波简单很多)，本文主要讲解这部分的原理和实现</p>
+<h2>2. Webrtc Tcc架构</h2>
+<h3>2.1 sdp的关键信息</h3>
+<ul>
+<li>rtp extension header</li>
+</ul>
+<p>需要使能这个rtp扩展项:</p>
+<div class="highlight"><pre><code><span></span><span class="n">a</span><span class="o">=</span><span class="n">extmap</span><span class="o">:</span><span class="mi">4</span><span class="w"> </span><span class="n">http</span><span class="o">:</span><span class="c1">//www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01</span>
+</code></pre></div>
+<p>如上例子，extensionId=4，表示有rtp报文将携带扩展项transport-wide sequence。在rtp的扩展头中会有16bit的transport-wide sequence，注意这个wide seq不是针对某个视频或音频，而是针对某个PeerConnection(其中可能传输多个音视频)，rtp报文的扩展项如下格式:</p>
+<div class="highlight"><pre><code><span></span><span class="mi">0</span><span class="w">                   </span><span class="mi">1</span><span class="w">                   </span><span class="mi">2</span><span class="w">                   </span><span class="mi">3</span>
+<span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="mi">6</span><span class="w"> </span><span class="mi">7</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="mi">6</span><span class="w"> </span><span class="mi">7</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="mi">6</span><span class="w"> </span><span class="mi">7</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">1</span>
+<span class="o">+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+</span>
+<span class="o">|</span><span class="w">       </span><span class="mh">0xBE</span><span class="w">    </span><span class="o">|</span><span class="w">    </span><span class="mh">0xDE</span><span class="w">       </span><span class="o">|</span><span class="w">           </span><span class="n">length</span><span class="o">=</span><span class="mi">1</span><span class="w">            </span><span class="o">|</span>
+<span class="o">+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+</span>
+<span class="o">|</span><span class="w">  </span><span class="n">ID</span><span class="w">   </span><span class="o">|</span><span class="w"> </span><span class="n">L</span><span class="o">=</span><span class="mi">1</span><span class="w">   </span><span class="o">|</span><span class="n">transport</span><span class="o">-</span><span class="n">wide</span><span class="w"> </span><span class="n">sequence</span><span class="w"> </span><span class="n">number</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">zero</span><span class="w"> </span><span class="n">padding</span><span class="w">  </span><span class="o">|</span>
+<span class="o">+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+</span>
+</code></pre></div>
+<ul>
+<li>使能Rtcp Fb transport-cc</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">transport</span><span class="o">-</span><span class="n">cc</span>
+</code></pre></div>
+<p>如上，在rtcp-feedback 中使能transport-cc。</p>
+<h3>2.2 基础流程架构</h3>
+<p>webrtc tcc基本的流程架构如下:</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240728-2151-1.png" alt="图片"></p>
+<p>如上图，做带宽预测主要在发送端，在收到发送端的rtcp fb tcc报文后，进行趋势滤波计算，返回带宽状态(保持，增加，减少)。</p>
+<h2>3. 趋势滤波</h2>
+<p>webrtc tcc在发送端的带宽估计算法，主要应用趋势滤波算法。相对卡曼滤波算法来说，简单一些。</p>
+<p>延时的计算方法：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240728-2151-2.png" alt="图片"></p>
+<p>如上图，延时如何得出：</p>
+<div class="highlight"><pre><code><span></span><span class="n">Delay</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="n">t</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">t</span><span class="p">(</span><span class="n">i</span><span class="mi">-1</span><span class="p">)}</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="p">{</span><span class="n">T</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">T</span><span class="p">(</span><span class="n">i</span><span class="mi">-1</span><span class="p">)}</span>
+</code></pre></div>
+<p>趋势滤波的建模思路如下，</p>
+<ul>
+<li><p>x横坐标：为rtp报文到达的时间戳，接收方记录下每个报文到达的系统时间戳；</p>
+</li>
+<li><p>y纵坐标：为rtp报文累积延时，通过<code>Delay(i) = {t(i) - t(i-1)} - {T(i) - T(i-1)}</code>，计算出每次的延时，然后延时经过累加，得到纵坐标；</p>
+</li>
+</ul>
+<p>如下图:</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240728-2151-3.png" alt="图片"></p>
+<p>上图是模拟的打点，所有的打点，正常情况下，能用最小二乘法绘制出一条直线:</p>
+<div class="highlight"><pre><code><span></span><span class="n">y</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">m</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">x</span>
+<span class="n">其中</span>
+<span class="nl">y</span><span class="p">:</span><span class="w"> </span><span class="n">delay</span>
+<span class="nl">x</span><span class="p">:</span><span class="w"> </span><span class="n">arrive_ms</span>
+<span class="nl">m</span><span class="p">:</span><span class="w"> </span><span class="n">斜率</span>
+</code></pre></div>
+<p>对于上面公式汇总的斜率m，就能得到如何估计未来的bitrate变化状态：</p>
+<ul>
+<li><p><code>m &gt; threshold_max</code>: m大于某个阈值，表示delay增加严重，需要降低编码bitrate；</p>
+</li>
+<li><p><code>m &lt; threshold_min</code>: m小于某个阈值，表示delay减少很多，表示可以增加编码bitrate</p>
+</li>
+<li><p><code>threshold_min &lt; m &lt; threshold_max</code>: m在两个阈值之间，保持编码bitrate不变</p>
+</li>
+</ul>
+<p>上面这个公式中的斜率m就是趋势滤波估计带宽的基础，整个趋势滤波就是通过求斜率m，来推定下一步的带宽状态。</p>
+<p>需要的基础数据集就是：</p>
+<ul>
+<li><p>x横坐标: <code>arrive_ms</code></p>
+</li>
+<li><p>y纵坐标：累积delay值</p>
+</li>
+</ul>
+<p>x和y都是通过rtcp tcc能拿到的数据，通过最小二乘法，就能得到斜率m，是不是比卡曼滤波简单很多。</p>
+<h3>3.1 趋势滤波的源码实现</h3>
+<h4>3.1.1 数据准备</h4>
+<p>在函数UpdateTrendline中，输入4个参数。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="n">TrendlineEstimator</span><span class="o">::</span><span class="n">UpdateTrendline</span><span class="p">(</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="n">recv_delta_ms</span><span class="p">,</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="n">send_delta_ms</span><span class="p">,</span>
+<span class="w">  </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">send_time_ms</span><span class="p">,</span>
+<span class="w">  </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">arrival_time_ms</span><span class="p">)</span>
+</code></pre></div>
+<p>再次提到延时公式：<code>Delay(i) = {t(i) - t(i-1)} - {T(i) - T(i-1)}</code></p>
+<p>函数输入的4个参数。</p>
+<ul>
+<li><p><code>recv_delta_ms</code>: 接收端收到连续两批rtp报文的时间差，也就是t(i) - t(i-1)；</p>
+</li>
+<li><p><code>send_delta_ms</code>: 发送端发送两批rtp报文的时间差，也就是T(i) - T(i-1);</p>
+</li>
+<li><p><code>send_time_ms</code>: 发送端发送rtp报文的系统时间；</p>
+</li>
+<li><p><code>arrival_time_ms</code>: 接收端收到rtp报文的系统时间；</p>
+</li>
+</ul>
+<p>有这4个关键参数，就可以录入数据到一个链表<code>delay_hist_</code>中去。</p>
+<p>具体代码如下，加上了详细的注释。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">TrendlineEstimator::UpdateTrendline</span><span class="p">(</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="n">recv_delta_ms</span><span class="p">,</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="n">send_delta_ms</span><span class="p">,</span>
+<span class="w">  </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">send_time_ms</span><span class="p">,</span>
+<span class="w">  </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">arrival_time_ms</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="c1">//delta_ms这个就是delay，也就是延时</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">double</span><span class="w"> </span><span class="n">delta_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">recv_delta_ms</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">send_delta_ms</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">//accumulated_delay_每次加上delta_ms，就是累积延时</span>
+<span class="w">  </span><span class="n">accumulated_delay_</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">delta_ms</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">//smoothed_delay_是简单滤波后的累积延时，</span>
+<span class="w">  </span><span class="c1">//其中滤波参数是smoothing_coef_=0.9</span>
+<span class="w">  </span><span class="c1">//用滤波参数的方式，防止错误延时数据对整体的影响</span>
+<span class="w">  </span><span class="n">smoothed_delay_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">smoothing_coef_</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">smoothed_delay_</span><span class="w"> </span><span class="o">+</span>
+<span class="w">                    </span><span class="p">(</span><span class="mi">1</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">smoothing_coef_</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">accumulated_delay_</span><span class="p">;</span>
+
+<span class="w">  </span><span class="c1">//这个数组非常重要，就是我们要画图的原始数据</span>
+<span class="w">  </span><span class="c1">//其中x坐标轴，就是接收端到达的时间</span>
+<span class="w">  </span><span class="c1">//x坐标轴数据点 = static_cast&lt;double&gt;(arrival_time_ms - first_arrival_time_ms_),</span>
+<span class="w">  </span><span class="c1">//y坐标轴，就是累积延时，</span>
+<span class="w">  </span><span class="c1">//y坐标轴数据点 = smoothed_delay_(经过简单滤波的累积延时)</span>
+<span class="w">  </span><span class="n">delay_hist_</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span>
+<span class="w">      </span><span class="n">static_cast</span><span class="o">&lt;</span><span class="kt">double</span><span class="o">&gt;</span><span class="p">(</span><span class="n">arrival_time_ms</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">first_arrival_time_ms_</span><span class="p">),</span>
+<span class="w">      </span><span class="n">smoothed_delay_</span><span class="p">,</span><span class="w"> </span><span class="n">accumulated_delay_</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>如上，数组<code>delay_hist_</code>就是原始数据集：</p>
+<ol>
+<li><p>x坐标: 接收端达到的系统时间，<code>arrival_time_ms - first_arrival_t</code></p>
+</li>
+<li><p>y坐标：累积延时，<code>smoothed_delay_</code>，也就是简单滤波后的累积延时</p>
+</li>
+</ol>
+<h4>3.1.2 计算斜率</h4>
+<p>在3.1.1中，我们积累数据到<code>delay_hist_</code>数组中，累积了x坐标数据，和y坐标数据，接下来，我们就可以计算斜率trend。</p>
+<div class="highlight"><pre><code><span></span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">delay_hist_</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">settings_</span><span class="p">.</span><span class="n">window_size</span><span class="p">)</span>
+<span class="w">    </span><span class="n">delay_hist_</span><span class="p">.</span><span class="n">pop_front</span><span class="p">();</span><span class="c1">//删除旧的数据</span>
+
+<span class="w">  </span><span class="c1">//如果队列长度等于窗口大小</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">delay_hist_</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">settings_</span><span class="p">.</span><span class="n">window_size</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">//开始计算斜率</span>
+<span class="w">  </span><span class="p">}</span>
+</code></pre></div>
+<p>如上代码，<code>delay_hist_</code>有个窗口的大小，在每次添加新的数据后，如果<code>delay_hist_</code>数组的长度大于窗口大小，就去除最老的数据，以此保留最新的数据。</p>
+<p>如果<code>delay_hist_</code>数据的长度等于窗口大小，就可以开始计算斜率了。</p>
+<p>通过协方差与方差，来计算出斜率的公式：</p>
+<div class="highlight"><pre><code><span></span><span class="n">y</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">b</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">c</span><span class="err">，</span>
+<span class="n">已知x和y的n个序列值</span><span class="err">，</span><span class="n">通过方差和协方差的关系</span><span class="err">，</span><span class="n">可以求斜率</span><span class="err">：</span>
+<span class="n">b</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Cov</span><span class="p">(</span><span class="n">X</span><span class="p">,</span><span class="w"> </span><span class="n">Y</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">Var</span><span class="p">(</span><span class="n">X</span><span class="p">)</span>
+<span class="n">斜率也就是</span><span class="err">：</span>
+<span class="w">       </span><span class="err">∑</span><span class="p">((</span><span class="n">x</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="err">−</span><span class="w"> </span><span class="n">avg_x</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="n">y</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">avg_y</span><span class="p">))</span>
+<span class="n">b</span><span class="w"> </span><span class="o">=</span><span class="w">  </span><span class="o">-------------------------------------</span>
+<span class="w">        </span><span class="err">∑</span><span class="p">(</span><span class="n">x</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">-</span><span class="w"> </span><span class="n">avg_x</span><span class="p">)</span><span class="o">^</span><span class="mi">2</span>
+</code></pre></div>
+<p>计算斜率具体的代码在LinearFitSlope这个函数里：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">double</span><span class="w"> </span><span class="nf">LinearFitSlope</span><span class="p">(</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">deque</span><span class="o">&lt;</span><span class="n">TrendlineEstimator</span><span class="o">::</span><span class="n">PacketTiming</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">packets</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="c1">//第一步，求出x和y的平均值</span>
+<span class="w">  </span><span class="c1">//先求出x，y的各个值的总和</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">packet</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">packets</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">sum_x</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">arrival_time_ms</span><span class="p">;</span>
+<span class="w">    </span><span class="n">sum_y</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">smoothed_delay_ms</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">//求出x和y的平均值</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="n">x_avg</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sum_x</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">packets</span><span class="p">.</span><span class="n">size</span><span class="p">();</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="n">y_avg</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sum_y</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">packets</span><span class="p">.</span><span class="n">size</span><span class="p">();</span>
+
+<span class="w">  </span><span class="c1">//得出斜率的分子，和分母</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="n">numerator</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">double</span><span class="w"> </span><span class="n">denominator</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">packet</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">packets</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">double</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">arrival_time_ms</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">double</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">packet</span><span class="p">.</span><span class="n">smoothed_delay_ms</span><span class="p">;</span>
+
+<span class="c1">//numerator就是：∑((x(i) − avg_x) (y(i) - avg_y))</span>
+<span class="w">    </span><span class="n">numerator</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="p">(</span><span class="n">x</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">x_avg</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="n">y</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">y_avg</span><span class="p">);</span>
+<span class="c1">//denominator就是：∑(x(i)- avg_x)^2</span>
+<span class="w">    </span><span class="n">denominator</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="p">(</span><span class="n">x</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">x_avg</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="n">x</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">x_avg</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">//这个就是斜率</span>
+<span class="w">  </span><span class="c1">//       ∑((x(i) − avg_x) (y(i) - avg_y))</span>
+<span class="w">  </span><span class="c1">//b = -------------------------------------</span>
+<span class="w">  </span><span class="c1">//         ∑(x(i)- avg_x)^2</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">numerator</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">denominator</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>上面的代码就是计算斜率的过程，最终得到斜率。</p>
+<h3>3.1.3 斜率决定带宽状态</h3>
+<p>得出斜率后，用斜率与threshold进行比较，决定带宽当前的状态</p>
+<ul>
+<li><p><code>OverUsing</code>: 带宽过度使用，需要降低编码bitrate；</p>
+</li>
+<li><p><code>UnderUsing</code>: 带宽轻度使用，需要增加编码bitrate:</p>
+</li>
+<li><p><code>Normal</code>: 带宽正常，保持状态</p>
+</li>
+</ul>
+<p>代码在函数<code>TrendlineEstimator::Detect</code>中实现，<code>trend</code>为输入值</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">TrendlineEstimator::Detect</span><span class="p">(</span><span class="kt">double</span><span class="w"> </span><span class="n">trend</span><span class="p">,</span><span class="w"> </span><span class="kt">double</span><span class="w"> </span><span class="n">ts_delta</span><span class="p">,</span><span class="w"> </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">now_ms</span><span class="p">)</span><span class="w"> </span>
+<span class="p">{</span>
+<span class="c1">//原始d的斜率trend * 采样个数 * 斜率增益，得到一个新斜率值与阈值threshold比较</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">double</span><span class="w"> </span><span class="n">modified_trend</span><span class="w"> </span><span class="o">=</span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">num_of_deltas_</span><span class="p">,</span><span class="w"> </span><span class="n">kMinNumDeltas</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">trend</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">threshold_gain_</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">modified_trend</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">threshold_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">//过度使用，需要降低编码bitrate；</span>
+<span class="w">    </span><span class="n">hypothesis_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">BandwidthUsage</span><span class="o">::</span><span class="n">kBwOverusing</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">modified_trend</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="o">-</span><span class="n">threshold_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">//轻度使用，需要增加编码bitrate:</span>
+<span class="w">    </span><span class="n">hypothesis_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">BandwidthUsage</span><span class="o">::</span><span class="n">kBwUnderusing</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">//保持状态</span>
+<span class="w">    </span><span class="n">hypothesis_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">BandwidthUsage</span><span class="o">::</span><span class="n">kBwNormal</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+
+<span class="w">  </span><span class="c1">//每次更新阈值threshold</span>
+<span class="w">  </span><span class="n">UpdateThreshold</span><span class="p">(</span><span class="n">modified_trend</span><span class="p">,</span><span class="w"> </span><span class="n">now_ms</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这里就能得出下一步带宽预测的结果，就可以指导是否<code>减少/增加/保持</code>视频编码的bitrate。</p>
+<p>3.1.4 更新阈值Threshold</p>
+<p>Threshold在每次斜率更新后，也要进行对应的调整，对下一步斜率的变化，调整准确和敏感。</p>
+<p>在函数<code>UpdateThreshold</code>中调整对应的<code>threshold_</code>。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">TrendlineEstimator::UpdateThreshold</span><span class="p">(</span><span class="kt">double</span><span class="w"> </span><span class="n">modified_trend</span><span class="p">,</span>
+<span class="w">                                         </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">now_ms</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// ... ...</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">double</span><span class="w"> </span><span class="n">k</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fabs</span><span class="p">(</span><span class="n">modified_trend</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">threshold_</span><span class="w"> </span>
+<span class="w">                </span><span class="o">?</span><span class="w"> </span><span class="n">k_down_</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">k_up_</span><span class="p">;</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">kMaxTimeDeltaMs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100</span><span class="p">;</span>
+<span class="w">  </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">time_delta_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">now_ms</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">last_update_ms_</span><span class="p">,</span><span class="w"> </span>
+<span class="w">                              </span><span class="n">kMaxTimeDeltaMs</span><span class="p">);</span>
+<span class="w">  </span><span class="n">threshold_</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">k</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="p">(</span><span class="n">fabs</span><span class="p">(</span><span class="n">modified_trend</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">threshold_</span><span class="p">)</span><span class="w"> </span>
+<span class="w">                </span><span class="o">*</span><span class="w"> </span><span class="n">time_delta_ms</span><span class="p">;</span>
+<span class="w">  </span><span class="n">threshold_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">SafeClamp</span><span class="p">(</span><span class="n">threshold_</span><span class="p">,</span><span class="w"> </span><span class="mf">6.f</span><span class="p">,</span><span class="w"> </span><span class="mf">600.f</span><span class="p">);</span>
+<span class="w">  </span><span class="n">last_update_ms_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">now_ms</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>其中调整threshold的增益参数k，有两个值选择：<code>k_down_(0.039)</code>和<code>k_up_(0.0087)</code>。</p>
+<p>明显<code>k_down_</code>远大于<code>k_up_</code>，其含义是下降的threshold比上升的threshold要敏感更多；遇到斜率需要降低带宽更敏感一些，增加带宽就更谨慎一些。</p>
+<p>自己也可以写改这两个值，达到自己想要的流控目的。</p>
+<h2>4. webrtc tcc的优缺点</h2>
+<h3>优点</h3>
+<ul>
+<li>发送端有rtp全面的信息，方便做拥塞控制算法  </li>
+</ul>
+<p>webrtc tcc在接收端统计每个rtp报文的wide seq和到达的系统时间，并且把这些信息打包成rtcp tcc发给发送端，这样发送端拥有的信息比较全，方便做后续的拥塞控制算法。</p>
+<p>除了趋势滤波算法，后面还能有更多的算法可以选择，后续灵活性更好。</p>
+<ul>
+<li>趋势滤波的准确度更高  </li>
+</ul>
+<p>趋势滤波是基于全数据来进行斜率计算，与卡曼滤波是有些不同。卡曼滤波是递归/递增的方式，并不是使用全数据的方式来进行估计。趋势滤波是基于窗口内的全数据来进行计算斜率趋势，更加准确一些。</p>
+<h3>缺点</h3>
+<p>趋势滤波的计算消耗，相对卡曼滤波比较大。卡曼滤波是递归，递增方式来计算估计值，并不存储数据，每次计算没有针对数据集，没有任何循环计算。</p>
+<p>而趋势滤波不一样，需要存储一个<code>settings_.window_size</code>的数据，每次计算斜率都会至少 <code>2 x window_size</code> 次的循环来计算新的斜率，也就是每收到一次新的数据，都有<code>2 x window_size</code> 的循环来进行计算，对cpu有损耗。这个对于递增类型的卡曼滤波是不存在的。</p>
+<h2>5. 总结</h2>
+<p>本文具体消息描述了：</p>
+<ul>
+<li>webrtc tcc架构  </li>
+</ul>
+<p>webrtc tcc技术，是在接收端统计发送rtp报文的wide seq，到达系统时间。接收端通过rtcp tcc报文发给发送端后，发送端计算出：(y纵坐标)累积delay，(x横坐标)到达的<code>arrive_ms</code>，随后计算出斜率，通过斜率预测出未来的带宽状态</p>
+<ul>
+<li>趋势滤波算法</li>
+</ul>
+<p>趋势滤波算法，数据集为：</p>
+<p>(y纵坐标)累积delay，(x横坐标)到达的<code>arrive_ms</code>。</p>
+<p>斜率大于某个阈值，带宽过度使用；</p>
+<p>斜率小于某个阈值，带宽轻度使用；</p>
+<p>否则，带宽保持原状态。</p>
+<p>通过(y纵坐标)和(x横坐标)的数据集，通过协方差和方差的计算得到斜率：</p>
+<p><code>trend = Cov(X, Y)/Var(X)</code></p>
+<p>如果<code>trend &gt; threshold</code>, 带宽过载，需要调低编码bitrate；</p>
+<p>如果<code>trend &lt; -threshold</code>，带宽轻载，需要调高编码bitrate；</p>
+<p>否则，带宽正常，保持编码bitrate。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "webrtc tcc详解.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

@@ -1,0 +1,557 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>UE4网络模块 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="UE4网络模块,C/C++,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="UE4网络模块" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>UE4网络模块</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2022-04-07 22:20
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://km.woa.com/articles/show/518440' target='blank'>UE4网络模块</a></p></h4>
+<h2>逻辑分层</h2>
+<ol>
+<li>系统接口：Socket 特性</li>
+<li>跨平台封装：FSocket 提供统一抽象接口</li>
+<li>连接：握手、拆包合包、可靠传输等</li>
+<li>应用：序列化、对象复制、RPC、同步策略</li>
+</ol>
+<p>本文主要集中在第三和第四层，弄清楚实现原理以便指导设计和开发</p>
+<h2>TCP、UDP 特性</h2>
+<p>TCP</p>
+<ol>
+<li>可靠</li>
+<li>流式传输、无边界</li>
+<li>监听 Socket、通信 Socket</li>
+<li>send、recv 接口不带地址</li>
+<li>I/O 复用（epoll、kqueue、IOCP）</li>
+</ol>
+<p>UDP</p>
+<ol>
+<li>不可靠</li>
+<li>数据报传输、保留边界</li>
+<li>无连接，客户端和服务端都是单个 Socket</li>
+<li>sendto、recvfrom 带地址</li>
+<li>单个报文上限 65507 字节</li>
+</ol>
+<p>特性说明：</p>
+<ol>
+<li>TCP 流式无边界意味着多个 send 调用可能会合并后 recv 或 单个 send 调用可能会拆分后 recv，需要接收端自行做边界判断（保证数据的 FIFO，与 Socket 接口调用次数无关）</li>
+<li>TCP 的监听 socket 仅进行三次握手，握手完毕由对应的通信 socket 进行 IO 操作</li>
+<li>在服务端，TCP 协议下的多个客户端会对应多个 socket，因而需要 IO 复用的系统接口对 socket 进行高效管理（通常所说的 Reactor 模式）</li>
+<li>UDP 保留边界意味着一个 sendto 调用不丢包的话必定对应一个 recvfrom 调用（仅有一个，如果此次接收缓冲无法容纳整个报文，多余部分会被丢弃）</li>
+<li>UDP 单个报文上限 65507 字节其实是一个 IP 报的上限（<code>SO_MAX_MSG_SIZE</code>）（一个 IP 数据报总长记录是 16 位，所以最长是 2^16-1，减去 IP 报头 20 字节，减去 UDP 报头 8 字节，得到 65507 字节）</li>
+<li>UDP 单个报文上限实际测试，默认情况下 Mac：9216， Win、Linux：65507， Mac 通过 setsockopt 设置 SNDBUF 也能提高到 65507，三个平台都无法发送更大的报文</li>
+<li>UDP Socket 有个 <code>MSG_PEEK</code> 的 flag 可以在保留数据缓冲的情况下做一次读取（UE4 没用到）</li>
+</ol>
+<p>TCP 和 UDP 测试图：（图）</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220407-2220-0.png" alt=""></p>
+<p>由上图可以看出，确实是 TCP 可能产生合并或拆分，送达的 UDP 数据报带有正确的边界，测试代码我放到了 Github上：<a href="https://github.com/zhyingkun/lua-5.3.5/blob/master/demo/uvwrap/stick.lua">https://github.com/zhyingkun/lua-5.3.5/blob/master/demo/uvwrap/stick.lua</a></p>
+<p>UE4 的设计</p>
+<ol>
+<li>UE 状态同步的实现是基于 UDP，并且以 Actor 为同步单位，与 UE 整体结构强耦合，从而分多个层次在保证可靠性的同时提高整体效率</li>
+<li>IpNetDriver 中 RecvFrom 代码硬编码了 MAX_PACKET_SIZE 的接收缓冲大小，为 1024 字节</li>
+<li>UNetConnection::InitSendBuffer 函数中设置了 SendBuffer 为 1024 字节，可在初始化 Connection 的时候传入</li>
+<li>通过准确计算将 UDP 数据报严格限制在 1024 字节之内</li>
+</ol>
+<h2>跨平台</h2>
+<ol>
+<li>跨平台通过 UE4 的 Module 机制来实现，底层多平台的 socket 通过 FSocket 封装进行统一，通过 FSocketSubsystemModule 进行加载</li>
+<li>Module 的建立与 UE4 编译过程强绑定</li>
+</ol>
+<h2>基本概念</h2>
+<h3>关键类</h3>
+<p>整个网络通信涉及的关键类：（图）</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220407-2220-1.png" alt=""></p>
+<p>其中：</p>
+<ol>
+<li>NetDriver 管理 Socket 和 NetConnection</li>
+<li>NetConnection 管理 Channel</li>
+<li>ControlChannel 会将消息转发给 FNetworkNotify（实际接收者是 UWorld 或 UPendingNetGame）</li>
+<li>PacketHandler 是充当一个网络通信中间件的概念，负责握手、数据包过滤等</li>
+<li>PacketHandler 也是个管理者的角色，实际干活的是 HandlerComponent</li>
+<li>值得注意的是，不同 Connection 可以有不同的 Packethandler 实例</li>
+</ol>
+<h3>Actor 与 Channel</h3>
+<p>通信组件逻辑关系图：（图）</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220407-2220-2.png" alt=""></p>
+<p>其中，针对服务端：</p>
+<ol>
+<li>NetDriver 中管理着多个 Connection，每个 Connection 对应一个客户端的 IP+Port</li>
+<li>Connection 中管理着多个 ActorChannel，每个 ActorChannel 对应着一个 Actor</li>
+<li>ActorChannel 中管理着多个 FObjectReplicator，每个 FObjectReplicator 负责一个 UObject 的序列化和反序列化操作</li>
+<li>显然，对于服务端中的一个 Actor，面对不同的 Connection 会有不同的 ActorChannel，FObjectReplicator 有类似的情况</li>
+</ol>
+<p>针对客户端：</p>
+<ol>
+<li>NetDriver 中只有一个 Connection，就是 ServerConnection</li>
+<li>一个 Actor 只对应一个 ActorChannel，因为只有一个 Connection</li>
+</ol>
+<h3>Actor 承载的同步内容</h3>
+<ol>
+<li>Actor 自己（ActorChannel 同步的第⼀个 Bunch 附带）</li>
+<li>Properties、DeltaProperty、RPC</li>
+<li>SubObjects（必须是 UObject）<ol>
+<li>SubObject 自己（SubObject 同步的第一个 ContentBlock 附带）</li>
+<li>Properties、DeltaProperty、RPC</li>
+<li>Sub SubObjects（由此可构成一棵 UObject 树）</li>
+</ol>
+</li>
+</ol>
+<p>其中：</p>
+<ol>
+<li>网络通信建立在 Actor 的基础之上</li>
+<li>Actor 中的 Component 和 SubObject 同步（包括属性）也是通过该 ActorChannel 来实现的</li>
+<li>我们在设计 Client 与 DS 通信内容的时候，需要想好通过哪个 Actor 来承担通信任务</li>
+<li>Property 必须是值类型或者 UObject 的引用类型（如果是 F 类的指针，无法同步）</li>
+<li>DeltaProperty 是 UE 设计的用来实现数组的差异传输</li>
+</ol>
+<h3>报文结构</h3>
+<p>报文结构图：（图）</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220407-2220-3.png" alt=""></p>
+<p>图中：</p>
+<ol>
+<li>⼀个 UDP 数据报是⼀个 RawPacket（直接是⼀个 Packet 或者加密处理过的 Packet）</li>
+<li>Connection 处理的数据是 Packet，⼀个 Packet 包含 PacketHeader + n 个 RawBunch（可以对应多个 Channel，另外，这⾥的 n 个 Bunch 肯定属于同⼀个 Connection）</li>
+<li>ActorChanne 处理的数据是 RawBunch，⼀个 RawBunch 可以直接就是⼀个独⽴的 Bunch，或者是 Bunch 的⼀部分</li>
+<li>⼀个 Bunch 包含 BunchHeader + m 个 ContentBlock</li>
+<li>FObjectReplicator 处理的数据是 ContentBlock，一个 ContentBlock 包含 CBHeader + 序列化数据</li>
+</ol>
+<p>另外，图中 NetGUID 代表 FNetworkGUID，用来同步引用关系的，当 DS 同步过来一个引用关系，能找到的直接引用上，找不到的放到 Unmaped 表中</p>
+<h2>数据包路由过程</h2>
+<p>数据路由图：（图）<br>
+<img src="../vender/image/img_loading.gif" data-src="../file/image/20220407-2220-4.png" alt=""></p>
+<p>其中：</p>
+<ol>
+<li>NetDriver 通过 Socket 的 recvfrom 接口收到 RawPacket 和对应的 IP+Port</li>
+<li>NetDriver 此时对 RawPacket 做第一次分流，根据是否有对应的 Connection 和是否握手包，分为三种情况</li>
+<li>第一种情况：找到 Connection，则走流程解包，从而反序列化出属性或 RPC</li>
+<li>第二种情况：是握手包，走握手流程，握手成功会创建该 Client 对应的 Connection，用 IP+Port 来标识</li>
+<li>第三种情况：异常包，走重新握手流程，重新握手成功会更新客户端的 IP+Port</li>
+</ol>
+<p>数据解包图：（图）</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220407-2220-5.png" alt=""></p>
+<p>其中：</p>
+<ol>
+<li>数据解包指的是 RawPacket 路由给 Connection 这个分支的整体变化过程</li>
+<li>从 socket 拿到 RawPacket 之后，UE 拆分了多阶段多层次去解析该数据报</li>
+<li>RawPacket 经由 NetDriver 转发给 Connection</li>
+<li>RawPacket 在 Connection 中经过中间件 PacketHandler 的过滤（比如解压缩等），得到 Packet</li>
+<li>Packet 在 Connection 中被拆解，其中的 PacketHeader 用于 ACK 逻辑，RawBunch 被发往各个 ActorChannel</li>
+<li>RawBunch 经过 ActorChannel 的排序合并，得到 Bunch</li>
+<li>Bunch 在 ActorChannel 中被拆解，得到 ContentBlock</li>
+<li>通过 ContentBlock 的头部数据找到对应的 UObject 和对应的 FObjectReplicator，进而执行反序列化</li>
+</ol>
+<h2>连接流程及其实体</h2>
+<h3>握手流程</h3>
+<p>握手流程图：（图）</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220407-2220-6.png" alt=""></p>
+<p>其中：</p>
+<ol>
+<li>握手阶段也会走数据包路由过程</li>
+<li>Server 和 Client 都是在 PacketHandler 中间件中完成握手逻辑</li>
+<li>客户端实际是 Component 中的 InComing 函数进行响应，服务端实际是 Component 中的 InComingConnectionless 函数进行响应</li>
+</ol>
+<p>针对 Server 端：</p>
+<ol>
+<li>DS 加载配置的地图场景</li>
+<li>创建 GameMode 和 GameState</li>
+<li>创建 NetDriver 和 Socket，并开始监听客户端的连接</li>
+<li>创建中间件：PacketHandler 和对应的 Component</li>
+<li>等待客户端的连接</li>
+<li>收到客户端发来的 Handshake 包，创建 Cookie 并响应 Challenge 包</li>
+<li>收到客户端发来的 ChallengeResponse 包，验证 Cookie，并发出 ChallengeAck 包对 Cookie 进行确认</li>
+<li>握手成功，创建对应的 ClientConnection 并绑定到该客户端的 IP+Port</li>
+</ol>
+<p>针对 Client 端：</p>
+<ol>
+<li>创建 UPendingNetGame</li>
+<li>创建 NetDriver 和 Socket</li>
+<li>创建 ServerConnection，就是一个 UNetConnection，客户端只有一个 Connection 对应着服务端的 IP+Port</li>
+<li>创建中间件：PacketHandler 和对应的 Component</li>
+<li>创建三个基本的 Channel，目前只有 ControlChannel 是有实际作用的</li>
+<li>调用 BeginHandshaking 给 DS 发 Handshake 包</li>
+<li>收到 DS 发来的 Challenge 包，获取其中的 Cookie，组成 ChallengeResponse 包，发给 DS</li>
+<li>收到 DS 发来的 ChallengeAck 包，验证当前的 Cookie</li>
+<li>握手结束，触发 HandshakeComplete 委托</li>
+</ol>
+<h3>连接流程</h3>
+<p>连接流程图：（图）</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220407-2220-7.png" alt=""></p>
+<p>其中：</p>
+<ol>
+<li>连接流程建立在 ControlChannel 上（代码实现在 DataChannel.h 中，报文第一个字段就是 MessageType）</li>
+<li>客户端实际是 UNetPendingGame::NotifyControlMessage 函数进行响应，服务端是 UWorld::NotifyControlMessage 进行响应</li>
+</ol>
+<p>针对 Server 端：</p>
+<ol>
+<li>收到客户端 ControlChannel 发来的 Hello 消息，用 Challenge 消息进行响应</li>
+<li>收到客户端的 Login 消息，走 GameMode 的 PreLogin 接口（此时 GameMode 可以拒绝该 Client 的连接）</li>
+<li>GameMode 接收连接后，给客户端发送 Welcome 消息表示接受加入，并附带地图信息</li>
+<li>收到客户端发来的 NetSpeed 消息，记录起来</li>
+<li>收到客户端发来的 Join 消息，说明客户端加载完地图了</li>
+<li>紧接着走 GameMode 的 Login 流程，会创建该 Client 对应的 PlayerController</li>
+<li>调用 GameMode 的 PostLogin 接口，手动同步 GameState 给客户端，同时触发 APlayerController、APawn 的同步逻辑</li>
+<li>最后，将该 PlayerController 与该 Connection 进行绑定</li>
+</ol>
+<p>针对 Client 端：</p>
+<ol>
+<li>HandshakeComplete 委托函数中触发 Join 操作，向 DS 的 ControlChannel 发送 Hello 消息</li>
+<li>收到 DS 发来的 Challenge 消息，响应一个 Login 消息</li>
+<li>收到 DS 发来的 Welcome 消息，解析出其中的地图信息，并开始加载地图</li>
+<li>给 DS 回应一个 NetSpeed 消息</li>
+<li>地图加载完成则给 DS 发一个 Join 消息，并开始接收后续的同步操作</li>
+<li>地图加载完之后，对应的 UWorld 会替代 UNetPendingGame 成为 ControlChannel 的实际处理者（NetDriver-&gt;Notify）</li>
+</ol>
+<p>连接结束之后一系列 AActor 和 UObject 会被同步到客户端，大致可分为以下 4 类：</p>
+<ol>
+<li>仅 DS：AGameMode</li>
+<li>DS 和 AllClient：AGameState、APlayerState、APawn（AGameState 中保存着所有 APlayerState 的引用）</li>
+<li>DS 和 OwnerClient：APlayerController（Controller 去 Possess 一个 Pawn 是发生在 DS）</li>
+<li>仅 OwnerClient：AHUD、UMGWidget</li>
+</ol>
+<p>另外：</p>
+<ol>
+<li>AGameState 虽然会同步给客户端，但客户端无法调用其 ServerRPC，因为此时客户端的 AGameState 的最外层 Owner 并不是客户端的 PlayerController 或 Pawn，无法找到对应的 Connection</li>
+<li>APlayerState 的创建时机是在 APlayerController 的 FinishSpawning，并由 TickFlush/ReplicationGraph 推动同步给客户端</li>
+<li>APlayerState 中记录的 ExactPing 是 Client 和 DS 通信数据一个来回耗时，Ping * 4 为耗时毫秒数</li>
+<li>掉线或流程结束的时候，Connection 会被销毁，同时 APlayerController 和 APlayerState 会被一起销毁</li>
+</ol>
+<h3>重连流程</h3>
+<p>重连流程图：（图）</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220407-2220-8.png" alt=""></p>
+<p>其中：</p>
+<ol>
+<li>典型情况：用户从 4G 网络切换到 Wifi，切换网络会导致外网 DS 收到的数据报 IP 和端口发生变化，从而触发重连</li>
+<li>重连操作的目的是更新 DS 中对应 ClientConnection 所绑定的 IP+Port</li>
+</ol>
+<p>针对 Server 端：</p>
+<ol>
+<li>收到一个来自新 SockAddr 的非握手包，说明有可能切换了网络</li>
+<li>给该新 SockAddr 发一个 RestartHandshake 包，触发重新握手</li>
+<li>收到该新 SockAddr 发来的带有重新握手标志位的 Handshake 包，则创建一个新 Cookie，组成 Challenge 包响应给它</li>
+<li>收到该新 SockAddr 发来的 ChallengeResponse 包，并带有新 Cookie 和原本的旧 Cookie</li>
+<li>到这里说明这个客户端真的切换了网络，那么，根据 Cookie 更新对应 Connection 的 IP+Port</li>
+<li>给客户端发送一个 ChallengeAck，并带上旧 Cookie，用来表示对旧 Cookie 的确认</li>
+</ol>
+<p>针对 Client 端：</p>
+<ol>
+<li>某种情况下网络被切换，逻辑层并无感知</li>
+<li>按照往常一样向 DS 发送数据包（可能是同步数据，也可能是心跳包）</li>
+<li>突然收到 DS 发来的 RestartHandshake 包，赶紧响应一个 Handshake 包并附带重新握手标志</li>
+<li>收到 DS 发来的带新 Cookie 的 Challenge 包，回应一个 ChallengeResponse 包，并附带新 Cookie 和旧 Cookie</li>
+<li>收到 DS 发来的确认旧 Cookie 的 ChallengeAck 包，说明已经重连成功</li>
+</ol>
+<h2>数据报处理流程</h2>
+<p>Tick 顺序图：（图）</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220407-2220-9.png" alt=""></p>
+<p>其中：</p>
+<ol>
+<li>TickDispatch 是收包</li>
+<li>对象 Tick 是更新世界状态</li>
+<li>TickFlush 是发包</li>
+<li>收包阶段，DS 会同步 Actor、属性、UObject、RPC 等给客户端，其中会包含 Uobject 的引用关系</li>
+<li>在 DS 上 ActorA 引用了 ActorB，这两个 Actor 都 Replicate 到客户端之后，是如何保持这个引用关系的？答案是同步引用的时候会带上 FNetworkGUID，找到了直接引用上，找不到的则加入 Unmaped 表中，另外，对象和对象引用关系是分开同步的</li>
+<li>Client 收到引用关系的时候，可能对应的 UObject 还没同步过来，此时会触发 Unmapped 的属性记录</li>
+<li>当 Unmapped 属性在 TickFlush 阶段被更新引用之后，会触发对应的 OnRep 回调</li>
+</ol>
+<h3>数据包处理步骤</h3>
+<p>数据包处理流程图：（图）</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220407-2220-10.png" alt=""></p>
+<p>其中：</p>
+<ol>
+<li>Connection 收到 RawPacket，第一步丢给中间件 PacketHandler 过滤一下，得到 Packet</li>
+<li>FNetPacketNotify 从 Packet 中读出 Header，并进行 Ack 数据的处理（执行一系列可靠 UDP 的逻辑，记录 ID、更新历史等）</li>
+<li>循环从 Packet 中读出数据<ol>
+<li>根据 Bunch 结构 从 Packet 读出状态位（包括 ChIndex）以及此 RawBunch 的数据大小</li>
+<li>从 Packet 读出 RawBunch 的数据，此时得到一个 RawBunch</li>
+<li>根据 ChIndex 去找对应 Channel，找不到就用 Bunch 结构 的信息创建一个（仅限 ActorChannel）</li>
+<li>将 RawBunch 丢给该 Channel 去处理（以下针对 ActorChannel）<ol>
+<li>ActorChannel 中判断，Reliable 包顺序不对需要排队</li>
+<li>PartialBunch 则需要等待合并，或者，本次 Bunch 就是最后一个部分，则触发合并</li>
+<li>ActorChannel 首次收包会创建对应的 Actor，此时这一个 Bunch 必定包含复制 Actor 需要的数据（静态对象同步 NetGUID、OuterNetGUID 和 Path，动态对象同步 NetGUID、Archetype 以及 Location、Rotation 等）</li>
+<li>循环从 Bunch 中读出 ContentBlock</li>
+<li>根据 ContentBlockHeader 的状态位或 FNetworkGUID，找到对应的 Object（也许是创建 SubObject，那么就是 Actor 的子对象进行了复制操作）</li>
+<li>根据找到的 Object 在 ActorChannel 中获取对应的 FObjectReplicator</li>
+<li>调用 Replicator-&gt;ReceivedBunch 进行数据的反序列化</li>
+<li>反序列化过程依赖反射信息</li>
+<li>属性同步则先将旧的属性复制出来，执行反序列化去更新属性，再比较是否有变化，有变化则将该 Property 加入 RepNotifies 数组</li>
+<li>是 RPC 则走 Replicator::ReceivedRPC，最终通过 Object-&gt;ProcessEvent(Function, Parms);执行 RPC</li>
+<li>统一调用 RepNotifies 数组中的属性 <code>OnRep_XXX</code> 函数</li>
+<li>Actor 是新创建就调用 BeginPlay</li>
+</ol>
+</li>
+</ol>
+</li>
+<li>结束</li>
+</ol>
+<p>另外：</p>
+<ol>
+<li>属性回调执行的前提是当前值与同步过来的值有差异</li>
+<li>如果 Client 先修改一个值，然后服务器同步过来的与当前值相同，那么是不会触发回调的</li>
+<li>可以采用如下宏来强制客户端执行 OnRep 回调： <code>DOREPLIFETIME_CONDITION_NOTIFY</code>( AActor, XXX, <code>COND_Custom</code>, <code>REPNOTIFY_Always</code> );</li>
+<li>对于一个配置了 OnRep 函数的结构体，只要结构体中有一个字段被更新，该 OnRep 就会被调用，因此，可能在一次同步操作中触发多次 OnRep 调用，具体取决于结构体字段的更新时机（比如遇到 Unmapped 的对象，则会延迟调用 OnRep 回调）</li>
+<li>多个 OnRep 回调的顺序为对应属性的 Offset，其实就是类定义中属性字段的顺序</li>
+</ol>
+<h3>创建 Actor 的 3 种情况</h3>
+<p>总的来说，Spawn 一个 Actor 可以划分为如下 3 种情况：</p>
+<ol>
+<li>GetWorld()-&gt;SpawnActor(Class, FActorSpawnParameters);</li>
+<li>GetWorld()-&gt;SpawnActorDeferred(...); + Actor-&gt;FinishSpawning(SpawnTransform);</li>
+<li>⽹络同步过来的 Actor: World-&gt;SpawnActorAbsolute(...);</li>
+</ol>
+<p>这 3 种情况对应的 BeginPlay 接口执行顺序如下：</p>
+<ol>
+<li>第一种情况：SpawnActor 调⽤返回的时候 BeginPlay 已经执行过了</li>
+<li>第二种情况：BeginPlay 在 FinishSpawning 中调⽤，我们可以在 SpawnActor 和 FinishSpawning 之间修改属性值</li>
+<li>第三种情况：Spawn ⼀个 Actor，也走 FinishSpawning，但不调⽤ BeginPlay，等待后续接收完所有属性之后再调⽤ BeginPlay。UE 在调用 BeginPlay 之前会判断是否为网络同步过来的 Actor，如果是，则不走 BeginPlay</li>
+</ol>
+<p>网络同步 SapwnActor 不立刻走 BeginPlay 图：（图）</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220407-2220-11.png" alt=""></p>
+<h3>3 个同步参数</h3>
+<p>开发过程中用到的 3 个同步控制参数如下：</p>
+<ol>
+<li>属性变量 UProperty 标记为 Replicated</li>
+<li>Actor ⾃⼰标记 bReplicates</li>
+<li>⼿动在 ReplicatedSubOjbect 函数中将 UObject 写⼊ Bunch</li>
+</ol>
+<p>对应的功能：</p>
+<ol>
+<li>UProperty 配置 Replicated 和 GetLifetimeReplicatedProps 是搭配使⽤的，共同实现值复制和引⽤关系的复制（只复制引用关系，不复制引用的 UObject）</li>
+<li>Actor 设置 bReplicates 之后在 TickFlush 阶段会被考虑进同步列表（Channel-&gt;ReplicateActor），此时会复制 Actor 自己以及 SubObject</li>
+<li>ReplicateSubobjects 接口⽤于⽀持同步⾮ Actor 的 UObject</li>
+</ol>
+<p>针对 UProperty 配置，只配置 Replicated 没效果，只实现 GetLifetimeReplicatedProps 会编译报错<br>
+另外，被 Actor 管理同步的 UObject 也可以有自己的 RPC。</p>
+<h2>Replicate 一个 Actor</h2>
+<p>ReplicateActor 图：（图）<br>
+<img src="../vender/image/img_loading.gif" data-src="../file/image/20220407-2220-12.png" alt=""></p>
+<p>其中：</p>
+<ol>
+<li>第一步创建一个全新的 Bunch</li>
+<li>首次同步则需要写入重建 Actor 需要的信息（静态 Actor 写入路径，动态 Actor 写入 Spawn 参数）</li>
+<li>序列化该 Actor 需要同步的属性<ol>
+<li>用当前属性值与 staticbuff 记录的缓存值进行比对，得到发生变化的属性列表</li>
+<li>讲属性变化列表记录到属性变化记录管理器中，并 Merge 属性历史中需要 Resend 的属性</li>
+<li>序列化这些属性</li>
+</ol>
+</li>
+<li>序列化 UnreliableMulticastRPC</li>
+<li>调用 Actor 的 ReplicateSubobjects 接口<ol>
+<li>针对每一个 UObject 进行序列化</li>
+<li>首先找到 UObject 对应的 FObjectReplicator</li>
+<li>序列化 UObject 需要同步的属性（这一步与序列化 Actor 需要同步的属性类似，也有属性变化历史记录）</li>
+<li>序列化 UnreliableMulticastRPC</li>
+<li>讲 ContentBlock 写入 Bunch 中，这样多个 SubObject 会有多个 ContentBlock</li>
+</ol>
+</li>
+<li>记录需要删除的 SubObject 到 Bunch</li>
+<li>SendBunch</li>
+</ol>
+<p>另外：</p>
+<ol>
+<li>创建 Actor 默认使用 CDO 作为 Template</li>
+<li>一个对象的 Archetype 就是创建该对象时的 Template</li>
+<li>第一次创建 FObjectReplicator 的时候固定用该 Object 的 Archetype 对象的属性值来填充 staticbuff</li>
+<li>查找变化的属性时，是直接用备份的 staticbuff 跟该属性对比，有差异则说明有变化，同时更新 staticbuff</li>
+<li>综上，首次同步 Actor 不会序列化所有参数，仅被标记了 UPROPERTY 并且与 CDO 值不一致的情况下才会序列化</li>
+<li>属性不变的情况下，DS 还是会消耗 CPU 去算当前属性是否发生了变化（遍历 Actor 中标有 Replicated 的属性）</li>
+<li>需要同步的属性采用了 Class 中对应属性的顺序（属性在内存中的 Offset）</li>
+</ol>
+<h2>触发一个 RPC</h2>
+<p>RPC 发包图：（图）<br>
+<img src="../vender/image/img_loading.gif" data-src="../file/image/20220407-2220-13.png" alt=""></p>
+<p>其中：</p>
+<ol>
+<li>首先，是 MultiCast 的 RPC 则需要遍历所有相关的 Connection 进行发包</li>
+<li>是该 ActorChannel 的首次发包，则先触发 Actor 的同步（Actor 的同步是独立的 Bunch）</li>
+<li>创建一个全新的 Bunch</li>
+<li>获取该 RPC 的参数类型信息</li>
+<li>讲 RPC 的实际参数序列化到缓冲中</li>
+<li>如果是 UnreliableMulticastRPC，则将相关数据缓存起来，等待后续 Actor 同步时一块发出去</li>
+<li>其他情况则构造全新的 ContentBlock，并立刻发包</li>
+</ol>
+<p>另外：</p>
+<ol>
+<li>Reliable 的 Bunch 是一定会保证按顺序送达，发生丢包会使得后续的包处于一个等待的状态，此时便会有明显的延迟现象</li>
+<li>使用 ReliableBunch 有两种情况，一是首次同步一个 Actor 或 UObject，二是使用 ReliableRPC</li>
+<li>因此，建议少用 ReliableRPC，特别是 ReliableMulticastRPC</li>
+</ol>
+<p>可靠的先后顺序：</p>
+<ol>
+<li>服务端：新建 Actor 立刻设置属性，然后触发 RPC，对应客户端顺序固定为：OnRep_XXX =&gt; Actor 的 BeginPlay =&gt; RPC</li>
+<li>服务端调用多个 ReliableRPC，对应客户端上会按顺序执行，反之亦然</li>
+<li>同一个 UObject，同时赋值多个 Replicated 属性，在某个值属性 OnRep 被调用时，其他值属性也已经获得最新值（引用属性则不一定）</li>
+<li>同一个 UObject，多个 OnRep 回调同时有数值改变的情况下，被调用的顺序是按照对应字段在内存中的 offset 来排序的，offset 小的先调用（不是 GetLifetimeReplicatedProps 中的顺序）</li>
+</ol>
+<p>还有，Actor 已同步到客户端的情况下，同时设置属性和调用非 UM 的 RPC 以及 UMRPC，一般顺序为：</p>
+<p>非 UnreliableMulticast 的 <code>RPC =&gt; OnRep_XXX =&gt; UnreliableMulticast</code> 的 RPC（此执行顺序受网络环境影响，写代码不可依赖此顺序）</p>
+<h2>可靠 UDP 原理</h2>
+<h3>ReliableBunch</h3>
+<p>可靠 UDP 的整体实现可大致分为两层：Packet 层通过 Ack 进行确认、Packet 层之上的具体功能层则根据 Ack 结果决定响应</p>
+<p>数据包 PacketID 图：（图）</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20220407-2220-14.png" alt=""></p>
+<p>Packet 层：</p>
+<ol>
+<li>每个发出去的 Packet 都带唯一的 PacketID，此 ID 依序只增不减</li>
+<li>收到新包后，依序报告每一个 Packet 是 Ack 或 Nak</li>
+<li>心跳包保证客户端和服务端一定会发包（即使是只带有 Ack 的空 Packet）</li>
+<li>通信对方在一段时间内没响应就判断为掉线</li>
+<li>没有超时重传</li>
+</ol>
+<p>Bunch 层：</p>
+<ol>
+<li>每个 Bunch 都有唯一的 BunchID</li>
+<li>发送 ReliableBunch 时记录该 Bunch 对应的 PacketID 并缓存起来</li>
+<li>收到 PacketID 的 Ack 则可解除对应 Bunch 的缓存（可能有多个 Bunch）</li>
+<li>收到 PacketID 的 Nak 则重发对应的 Bunch（BunchID 不变，会构成新的 Packet 用新的 PacketID）</li>
+</ol>
+<p>举例说明 Bunch 可靠性保证：</p>
+<ol>
+<li>客户端发送 1 号到 5 号包给 DS</li>
+<li>DS 只收到 1 号、3 号、5 号，并根据需求给客户端回复 100 号和 101 号包</li>
+<li>客户端收到 100 号包，通过包头的 Ack 知道了服务端的收包情况，向上层按顺序报告 1 号 Ack，2 号 Nak，3 号 Ack，4 号 Nak，5 号 Ack</li>
+<li>客户端 Bunch 层收到 Ack 报告，将原本 2 号包的 Bunch 封装成 6 号包，4 号包的 bunch 封装成 7 号包，发出去（6 号包和 7 号包包含了 100 号包的 Ack）</li>
+<li>DS 收到 6 号包和 7 号包，再向客户端发新的 102 号包</li>
+<li>在这个过程中，客户端发给 DS 的 PacketID 序列与 DS 发给客户端的 PacketID 序列完全独立，互不影响</li>
+</ol>
+<p>心跳包的超时判断逻辑：</p>
+<ol>
+<li>Client 和 DS 都有心跳包，在 Connection 的 Tick 中每帧执行，超过 KeepAlive 时间就发心跳包，KeepAlive 数值为 3，记录的是 Tick 的 DeltaTime 积分差</li>
+<li>Client 和 DS 都有超时掉线判断，在 Connection 的 Tick 中每帧执行，超过 Timeout 时间就认为掉线，直接 Close 该 Connection（Timeout 默认为真实的 3.4 秒）</li>
+<li>简单的说：如果服务端一直没有收到包，那么 3.4 秒之后就关闭该 Connection</li>
+<li>超时后 Connection 的 State 会被设置为 CLOSE</li>
+<li>在 NetDriver 的 TickDispatch 中会检查 Connection 的 State，发现 CLOSE 则进行 Cleanup</li>
+<li>Connection 的 Cleanup 会触发 APlayerController 的 OnNetCleanup</li>
+<li>APlayerController 的 OnNetCleanup 中就直接 Destroy 自己，Destroy 一个 AController 就触发 GameMode 的 Logout 以及销毁 APlayerState</li>
+<li>整体结论就是：Connection 超时关闭导致 GameMode-&gt;Logout 和 APlayerController、APlayerState 的销毁</li>
+</ol>
+<h3>属性同步可靠传输</h3>
+<p>属性同步：</p>
+<ol>
+<li>每次检测到属性发生变化，就进行属性同步并将该属性的索引和 PacketID 记录到 FRepChangedHistory 中</li>
+<li>FObjectReplicator 收到 PacketID 的 Nak 则遍历对应 FRepChangedHistory 将相关属性的 Resend 标志位置 true</li>
+<li>等待下一次同步该 Object 的时候一并同步</li>
+</ol>
+<h3>Ack 可靠原理</h3>
+<p>Ack 采用冗余传输：</p>
+<ol>
+<li>每次收到 Packet 都会更新 InAckSeq（收到 Packet 并响应 Ack 的最大 PacketID）</li>
+<li>每次收到 Ack 都会更新 InAckSeqAck（确认对方收到我响应 Ack 的最大 PacketID）</li>
+<li>每个 Packet 发送前，都会在头部写入 InAckSeqAck 到 InAckSeq 之间的 Packet 的 Ack</li>
+<li>相邻发出的 Packet 很可能头部的 Ack 数据是一样的</li>
+<li>Packet 层必须收到 Ack 才算确认，否则都认为丢包了</li>
+</ol>
+<h2>其他</h2>
+<p>易混淆点：</p>
+<ol>
+<li>&lt;&lt;操作符可能是读也可能是写，具体看数据类型（对于 FBitReader &lt;&lt;操作符和 Serializa 函数都是读的意思，FBitWriter 反之）</li>
+<li>以太网 byte 序为大端序，bit 序为小端序</li>
+</ol>
+<p>可用委托：</p>
+<ol>
+<li>UNetConnection-&gt;ReceivedRawPacketDel // 收到的是 RawPacket</li>
+<li>UNetConnection-&gt;LowLevelSendDel // 发送的是 RawPacket</li>
+<li>UNetDriver-&gt;SendRPCDel // 发送 RPC 前回调</li>
+<li>Actor-&gt;OnSubobjectCreatedFromReplication</li>
+<li>Actor-&gt;OnSubobjectDestroyFromReplication</li>
+</ol>
+<h2>参考资料</h2>
+<ol>
+<li>UE4 源码</li>
+<li><a href="https://docs.unrealengine.com/4.26/en-US/InteractiveExperiences/Networking/Actors/">UE4 文档</a></li>
+<li>《网络多人游戏架构与编程》</li>
+<li><a href="https://zhuanlan.zhihu.com/p/372375535">UE4 UDP 是如何进行可靠传输的</a></li>
+<li><a href="https://zhuanlan.zhihu.com/p/34723199">《Exploring in UE4》网络同步原理深入（上）</a></li>
+<li><a href="https://zhuanlan.zhihu.com/p/55596030">《Exploring in UE4》网络同步原理深入（下）</a></li>
+<li><a href="https://blog.csdn.net/u012999985/article/details/78244492">理解同步规则</a></li>
+<li><a href="https://blog.csdn.net/u012999985/article/details/78384199">深入同步细节</a></li>
+<li><a href="http://news.16p.com/869660.html">使用虚幻引擎 4 年，再谈 UE 的网络架构</a></li>
+</ol>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "UE4网络模块.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

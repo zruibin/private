@@ -1,0 +1,395 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>usbmux协议分析 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="usbmux协议分析,网络,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="usbmux协议分析" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>usbmux协议分析</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2024-08-02 11:43
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_wang_luo.html' class='article_tag'>网络</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://zyqhi.github.io/2019/08/20/usbmuxd-protocol.html' target='blank'>usbmux协议分析</a></p></h4>
+<h2>usbmux协议介绍</h2>
+<p>初闻usbmux协议时，可能会让人感觉比较陌生，但其实如果你是MAC用户的话，你可能每天都在和它打交道，只是不知道而已。当通过USB将iPhone连接到MAC时，usbmux协议已经在背后为你默默工作了。</p>
+<p>usbmux是苹果的私有协议，苹果设计该协议的原因是为了自家的macOS APP能够和iDevice进行通信，从而实现诸如iTunes备份iPhone、Xcode真机调试等功能。只是后来该协议被开发者破解了，于是为众人所知。</p>
+<p>usbmuxd是对usbmux协议在macOS平台的上实现，也是macOS系统上的一个守护进程（Daemon），它随着系统的启动而启动。在macOS上，与usbmuxd相关的文件主要有3个：</p>
+<ol>
+<li>/System/Library/PrivateFrameworks/MobileDevice.framework/Versions/A/Resources/usbmuxd</li>
+<li>/System/Library/LaunchDaemons/com.apple.usbmuxd.plist</li>
+<li>/var/run/usbmuxd</li>
+</ol>
+<p>其中<strong>/System/Library/PrivateFrameworks/MobileDevice.framework/Versions/A/Resources/usbmuxd</strong>为可执行文件。</p>
+<p><strong>/System/Library/LaunchDaemons/com.apple.usbmuxd.plist</strong>为usbmuxd服务的开机启动配置文件，如图所示。launchd在系统启动时会根据该文件的配置信息，启动usbmuxd服务，创建对应的socket（也即/var/run/usbmuxd）。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/image-20190820203643037.png" alt="image-20190820203643037"><strong>/var/run/usbmuxd</strong>在开机启动时创建，该文件其实是一个<a href="https://en.wikipedia.org/wiki/Unix_domain_socket">Unix Domain Socket</a>，用于usbmuxd进程和其他进程——比如Xcode、iTunes等——之间的进程间通信（IPC）。</p>
+<div class="highlight"><pre><code><span></span>➜<span class="w">  </span>zyqhi.github.io<span class="w"> </span>git:<span class="o">(</span>master<span class="o">)</span><span class="w"> </span>✗<span class="w"> </span>file<span class="w"> </span>/var/run/usbmuxd
+/var/run/usbmuxd:<span class="w"> </span>socket
+</code></pre></div>
+<h2>基于usbmux协议的设备间通信</h2>
+<p>前文也提到，苹果设计usbmux协议是为了解决macOS APP和iOS设备之间的通信问题。如果只是普通的协议的话，倒也没什么可说的，只是该协议呢，提供了一种类似TCP socket的API，使得macOS和iOS设备之间的通信，如同是网络上的两个主机之间的通信。</p>
+<blockquote><p>During normal operations, <a href="https://www.theiphonewiki.com/wiki/ITunes">iTunes</a> communicates with the <a href="https://www.theiphonewiki.com/wiki/List_of_iPhones">iPhone</a> using something called “usbmux” – this is a system for multiplexing several “connections” over one USB pipe. Conceptually, it provides a TCP-like system – processes on the host machine open up connections to specific, numbered ports on the mobile device. (This resemblance is more than superficial – on the mobile device, usbmuxd actually makes TCP connections to localhost using the port number you give it.)</p>
+<p>FROM: <a href="https://www.theiphonewiki.com/wiki/Usbmux">https://www.theiphonewiki.com/wiki/Usbmux</a></p>
+</blockquote>
+<p>说完usbmux协议的用途，我们再来看看usbmux协议是怎样工作的。这里以iTunes和iOS通信为例，来看下整个通信架构，如图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/image-20190902163407986.png" alt="image-20190902163407986"></p>
+<p>从图中可以看出，整个通信架构和经典的C/S架构非常类似。其中iOS端的服务（lockdown）的角色是服务端，macOS端的程序（iTunes）则为客户端。</p>
+<p>{:.warning}</p>
+<p>因为没有源码，所以此处的通信架构图只是根据网上前人的工作，结合个人的测试，推测得出的。如有错误，还请指正。</p>
+<h3>lockdown服务</h3>
+<p>先来看下iOS端：</p>
+<p>图中的lockdown是iOS端的系统服务，它在iOS系统启动时，由launchd进程启动。lockdown服务对应的启动配置文件在iOS系统上的完整路径为：<strong>/System/Library/LaunchDaemons/com.apple.mobile.lockdown.plist</strong>。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/image-20190821135906471.png" alt="image-20190821135906471"></p>
+<p>lockdown作为一个网关，用于协调macOS进程和iOS其他服务之间的通信。像我们平时用到的iTunes备份iPhone，Xcode真机调试等功能，在iOS侧，都是需要lockdown服务进行中转处理的。举个例子，Xcode若要执行真机调试，首先需要和lockdown服务通信，发出启动调试请求，lockdown收到请求以后，启动iOS端对应的调试服务（debugserver），然后Xcode便与debugserver之间建立了通信连接。</p>
+<p>lockdown服务启动以后，会创建一个TCP listen socket，端口号为62078，地址为本机地址：127.0.0.1。这一点我们可以在越狱机器上得到验证：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/image-20190821141233973.png" alt="image-20190821141233973"></p>
+<p>如果从TCP/IP网络编程的角度来看lockdown的话，会发现它和普通的TCP Server没有差别。</p>
+<blockquote><p>关于lockdown服务的更多内容，可以参考这篇文章：<a href="https://medium.com/@jon.gabilondo.angulo_7635/understanding-usbmux-and-the-ios-lockdown-service-7f2a1dfd07ae">Understanding usbmux and the iOS lockdown service</a></p>
+</blockquote>
+<h3>usbmuxd服务</h3>
+<p>再来看macOS端：</p>
+<p>前文讲过，usbmuxd是macOS的系统服务，该服务为macOS端的通信代理，当其他应用——比如iTunes——需要与iOS设备通信时，只需要与usbmuxd服务通信即可，usbmuxd负责将iTunes的通信请求转发到iOS端。usbmuxd服务与iOS设备通信基于USB通信协议。</p>
+<p>iTunes与usbmuxd服务之间通过<a href="https://en.wikipedia.org/wiki/Unix_domain_socket">Unix Domain Socket</a>进行通信，Unix Domain Socket的API和TCP Socket非常类似。来看下与usbmuxd协议之间建立连接的代码：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">connect_to_usbmuxd</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Create Unix domain socket</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">fd</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">socket</span><span class="p">(</span><span class="n">AF_UNIX</span><span class="p">,</span><span class="w"> </span><span class="n">SOCK_STREAM</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// prevent SIGPIPE</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">on</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">    </span><span class="n">setsockopt</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span><span class="w"> </span><span class="n">SOL_SOCKET</span><span class="p">,</span><span class="w"> </span><span class="n">SO_NOSIGPIPE</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">on</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">on</span><span class="p">));</span>
+
+<span class="w">    </span><span class="c1">// Connect socket</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr_un</span><span class="w"> </span><span class="n">addr</span><span class="p">;</span>
+<span class="w">    </span><span class="n">addr</span><span class="p">.</span><span class="n">sun_family</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">AF_UNIX</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// 这个路径就相当于ip地址，为了理解这个过程，可以和TCP进行对比</span>
+<span class="w">    </span><span class="n">strcpy</span><span class="p">(</span><span class="n">addr</span><span class="p">.</span><span class="n">sun_path</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;/var/run/usbmuxd&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="kt">socklen_t</span><span class="w"> </span><span class="n">socklen</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">addr</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">connect</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">addr</span><span class="p">,</span><span class="w"> </span><span class="n">socklen</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Connect failure, fd is: %d.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">fd</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Connect successifully, fd is: %d.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">fd</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">fd</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>和TCP的差别有以下几点：</p>
+<ol>
+<li>domian参数为<code>AF_UNIX</code>，而非熟悉的<code>AF_NET</code>；</li>
+<li>通信地址不是IP地址，而是路径<code>/var/run/usbmuxd</code>；</li>
+<li>不需要指定端口。</li>
+</ol>
+<p>除此之外，整个API的使用方式则几乎一样。iTunes在建立和usbmuxd之间的连接时，应该使用了类似的代码。</p>
+<h3>从一端到另一端</h3>
+<p>前文中提到，对于macOS端的进程而言，如果要与iOS上的进程通信，只需要和usbmuxd服务通信即可。而在上一节我们介绍了进程和usbmuxd服务建立连接的方式，那么假设iTunes通过上述方式建立了与usbmuxd之间的连接，那么接下来iTunes是不是就可以直接与位于iOS端的lockdown服务通信了呢？</p>
+<p>答案是NO。</p>
+<p>在回答为什么是NO之前，先来回忆一下基于socket的TCP通信过程。我们知道在TCP/IP通信协议体系里，IP抽象了网络上两台主机之间的通信，而TCP抽象了两台主机上的进程之间的通信。IP地址标识了网络中的一台主机，而端口号则标识了一台主机上的特定进程。</p>
+<p>而在上一节，在建立进程（iTunes）与代理（usbmuxd）之间的连接时，并未指定端口号。未指定端口号，那么usbmuxd服务便不知道进程要和iOS端的哪个进程进行通信。</p>
+<p>比如iTunes要和lockdown服务建立连接，lockdown服务的端口号是62078，而iTunes在建立连接时并未指定该端口号，因此对于usbmuxd而言，根本不知道iTunes要和lockdown服务通信。建立连接所需的信息是不完备的。</p>
+<p>其实，如果用上一节中的提到的建立连接，只是建立了macOS进程与代理之间的通信连接，该连接建立以后，进程能够和代理进行通信，但若要和iOS上的目标进程通信的话，我们还需要对代理进行配置，<strong>让代理和iOS端的进程也建立连接</strong>，整个通信链路才算打通。</p>
+<p>下面我们便来看下如何『配置』代理，从而打通整个通信链路。</p>
+<h4>Listen</h4>
+<p>在讲具体的连接过程之前，我们先来想下，从通信的角度讲，如果要usbmuxd服务和iOS端进程之间建立连接，必须要满足哪些条件：</p>
+<ol>
+<li>一台Mac可以连接多台iOS设备，连接时需要知道和哪一台iOS设备建立连接，因此需要device id来唯一标识一台设备；</li>
+<li>建立连接时必须要知道当前Mac是否连接到iOS设备，也即需要监听iOS设备的插拔；</li>
+<li>usbmuxd不会主动去连接iOS端上的进程，必须macOS进程驱使其完成，也即对其进行配置，此时macOS进程和usbmuxd之间需要一套通信协议；</li>
+<li>必须指定需要连接到的目标进程的端口号，这样才能唯一标识一个进程。</li>
+</ol>
+<p>先看问题3，苹果定义了一套配置协议，该协议的数据传输格式为plist，并被破解，协议的具体细节会在下文中阐释数据收发过程中讲到。而对于4，后文中会给出解答，现在先忽略。</p>
+<p>而对于问题1和2，usbmuxd已经具备该功能，但是如果要『看到』该功能，我们需要向usbmuxd发送命令，这便是本节中要讲的<strong>Listen</strong>命令。</p>
+<p>所谓发送Listen命令，便是macOS进程调用上一节中提到的<code>connect_to_usbmuxd</code>函数，创建的socket，然后向对应的socket文件描述符中写入一段数据（控制命令），然后读一段数据（usbmuxd的返回值）。发送逻辑的代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">send_listen_packet</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">listen_channel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">connect_to_usbmuxd_channel</span><span class="p">();</span><span class="w"> </span><span class="c1">// 该函数调用 connect_to_usbmuxd 创建socket，并根据socket文件描述符创建一个dispatch I/O对象</span>
+
+<span class="w">    </span><span class="c1">// 1. Listen指令对应的键值对</span>
+<span class="w">    </span><span class="bp">NSDictionary</span><span class="w"> </span><span class="o">*</span><span class="n">packet</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="l">@{</span>
+<span class="w">                             </span><span class="s">@&quot;ClientVersionString&quot;</span><span class="o">:</span><span class="w"> </span><span class="s">@&quot;1&quot;</span><span class="p">,</span>
+<span class="w">                             </span><span class="s">@&quot;MessageType&quot;</span><span class="o">:</span><span class="w"> </span><span class="s">@&quot;Listen&quot;</span><span class="p">,</span>
+<span class="w">                             </span><span class="s">@&quot;ProgName&quot;</span><span class="o">:</span><span class="w"> </span><span class="s">@&quot;Peertalk Example&quot;</span>
+<span class="w">                             </span><span class="l">}</span><span class="p">;</span>
+<span class="w">    </span><span class="n">NSLog</span><span class="p">(</span><span class="s">@&quot;send listen packet: %@&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">packet</span><span class="p">);</span>
+<span class="w">    </span><span class="n">send_packet</span><span class="p">(</span><span class="n">packet</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">listen_channel</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">send_packet</span><span class="p">(</span><span class="bp">NSDictionary</span><span class="w"> </span><span class="o">*</span><span class="n">packetDict</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">tag</span><span class="p">,</span><span class="w"> </span><span class="n">dispatch_io_t</span><span class="w"> </span><span class="n">channel</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="bp">NSData</span><span class="w"> </span><span class="o">*</span><span class="n">plistData</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="bp">NSPropertyListSerialization</span><span class="w"> </span><span class="n">dataWithPropertyList</span><span class="o">:</span><span class="n">packetDict</span><span class="w"> </span><span class="n">format</span><span class="o">:</span><span class="n">NSPropertyListXMLFormat_v1_0</span><span class="w"> </span><span class="n">options</span><span class="o">:</span><span class="mi">0</span><span class="w"> </span><span class="n">error</span><span class="o">:</span><span class="nb">NULL</span><span class="p">];</span>
+
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">protocol</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">USBMuxPacketProtocolPlist</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">USBMuxPacketTypePlistPayload</span><span class="p">;</span>
+
+<span class="w">    </span><span class="c1">// 2. 封装成usbmux协议要求的格式</span>
+<span class="w">    </span><span class="n">usbmux_packet_t</span><span class="w"> </span><span class="o">*</span><span class="n">upacket</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">usbmux_packet_create</span><span class="p">(</span>
+<span class="w">                                                    </span><span class="n">protocol</span><span class="p">,</span>
+<span class="w">                                                    </span><span class="n">type</span><span class="p">,</span>
+<span class="w">                                                    </span><span class="n">tag</span><span class="p">,</span>
+<span class="w">                                                    </span><span class="n">plistData</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">plistData</span><span class="p">.</span><span class="n">bytes</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="nb">nil</span><span class="p">,</span>
+<span class="w">                                                    </span><span class="p">(</span><span class="kt">uint32_t</span><span class="p">)(</span><span class="n">plistData</span><span class="p">.</span><span class="n">length</span><span class="p">)</span>
+<span class="w">                                                    </span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">dispatch_data_t</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">dispatch_data_create</span><span class="p">((</span><span class="k">const</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="n">upacket</span><span class="p">,</span><span class="w"> </span><span class="n">upacket</span><span class="o">-&gt;</span><span class="n">size</span><span class="p">,</span><span class="w"> </span><span class="n">usbmuxd_io_queue</span><span class="p">,</span><span class="w"> </span><span class="o">^</span><span class="p">{</span>
+<span class="w">        </span><span class="n">usbmux_packet_free</span><span class="p">(</span><span class="n">upacket</span><span class="p">);</span>
+<span class="w">    </span><span class="p">});</span>
+
+<span class="w">    </span><span class="n">dispatch_io_write</span><span class="p">(</span><span class="n">channel</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="n">usbmuxd_io_queue</span><span class="p">,</span><span class="w"> </span><span class="o">^</span><span class="p">(</span><span class="kt">bool</span><span class="w"> </span><span class="n">done</span><span class="p">,</span><span class="w"> </span><span class="n">dispatch_data_t</span><span class="w"> </span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">_errno</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">NSLog</span><span class="p">(</span><span class="s">@&quot;dispatch_io_write: done=%d data=%p error=%d&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">done</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="n">_errno</span><span class="p">);</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">done</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<blockquote><p>此处的listen_channel是一个dispatch I/O对象，所谓的dispatch I/O对象，就是一个封装了文件描述符，以及作用于该文件描述符上的异步I/O策略。本文中可以将其和文件描述符作为等价的概念来理解。</p>
+</blockquote>
+<p>这部分代码核心就2处，代码中已标出：</p>
+<ol>
+<li>以plist格式封装Listen指令；</li>
+<li>是将封装后的Listen报文发送到usbmuxd。</li>
+</ol>
+<p>对应的报文格式如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/image-20190821164908991.png" alt="image-20190821164908991"></p>
+<p>Listen命令发送成功以后，每当有iOS设备插拔，便会收到usbmuxd服务返回的数据。读取逻辑如下：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">read_packet_on_channle</span><span class="p">(</span><span class="n">dispatch_io_t</span><span class="w"> </span><span class="n">channel</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// 1. Read the header</span>
+<span class="w">    </span><span class="n">usbmux_packet_t</span><span class="w"> </span><span class="n">ref_upacket</span><span class="p">;</span>
+<span class="w">    </span><span class="n">dispatch_io_read</span><span class="p">(</span><span class="n">channel</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">ref_upacket</span><span class="p">.</span><span class="n">size</span><span class="p">),</span><span class="w"> </span><span class="n">usbmuxd_io_queue</span><span class="p">,</span><span class="w"> </span><span class="o">^</span><span class="p">(</span><span class="kt">bool</span><span class="w"> </span><span class="n">done</span><span class="p">,</span><span class="w"> </span><span class="n">dispatch_data_t</span><span class="w">  </span><span class="n">_Nullable</span><span class="w"> </span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">done</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+
+<span class="w">        </span><span class="c1">// Read size of incoming usbmux_packet_t</span>
+<span class="w">        </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">upacket_len</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">        </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">buffer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">        </span><span class="kt">size_t</span><span class="w"> </span><span class="n">buffer_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">        </span><span class="c1">// data 是读取到的数据，这一步获取到读取到的data的长度，并将buffer指向对应的缓冲区</span>
+<span class="w">        </span><span class="n">dispatch_data_t</span><span class="w"> </span><span class="n">map_data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">dispatch_data_create_map</span><span class="p">(</span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">**</span><span class="p">)</span><span class="o">&amp;</span><span class="n">buffer</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">buffer_size</span><span class="p">);</span>
+<span class="w">        </span><span class="n">memcpy</span><span class="p">((</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="p">(</span><span class="n">upacket_len</span><span class="p">),</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">buffer</span><span class="p">,</span><span class="w"> </span><span class="n">buffer_size</span><span class="p">);</span>
+
+<span class="w">        </span><span class="c1">// Allocate a new usbmux_packet_t for the expected size</span>
+<span class="w">        </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">payloadLength</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">upacket_len</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">uint32_t</span><span class="p">)</span><span class="k">sizeof</span><span class="p">(</span><span class="n">usbmux_packet_t</span><span class="p">);</span>
+<span class="w">        </span><span class="n">usbmux_packet_t</span><span class="w"> </span><span class="o">*</span><span class="n">upacket</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">usbmux_packet_alloc</span><span class="p">(</span><span class="n">payloadLength</span><span class="p">);</span>
+
+<span class="w">        </span><span class="c1">// 2. Read rest of the incoming usbmux_packet_t</span>
+<span class="w">        </span><span class="kt">off_t</span><span class="w"> </span><span class="n">offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">ref_upacket</span><span class="p">.</span><span class="n">size</span><span class="p">);</span>
+<span class="w">        </span><span class="n">dispatch_io_read</span><span class="p">(</span><span class="n">channel</span><span class="p">,</span><span class="w"> </span><span class="n">offset</span><span class="p">,</span><span class="w"> </span><span class="n">upacket</span><span class="o">-&gt;</span><span class="n">size</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">offset</span><span class="p">,</span><span class="w"> </span><span class="n">usbmuxd_io_queue</span><span class="p">,</span><span class="w"> </span><span class="o">^</span><span class="p">(</span><span class="kt">bool</span><span class="w"> </span><span class="n">done</span><span class="p">,</span><span class="w"> </span><span class="n">dispatch_data_t</span><span class="w"> </span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">NSLog</span><span class="p">(</span><span class="s">@&quot;dispatch_io_read %lld,%lld: done=%d data=%p error=%d&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">offset</span><span class="p">,</span><span class="w"> </span><span class="n">upacket</span><span class="o">-&gt;</span><span class="n">size</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">offset</span><span class="p">,</span><span class="w"> </span><span class="n">done</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="n">error</span><span class="p">);</span>
+
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">done</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+
+<span class="w">            </span><span class="c1">// Copy read bytes onto our usbmux_packet_t</span>
+<span class="w">            </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">buffer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">            </span><span class="kt">size_t</span><span class="w"> </span><span class="n">buffer_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">            </span><span class="n">dispatch_data_t</span><span class="w"> </span><span class="n">map_data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">dispatch_data_create_map</span><span class="p">(</span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">**</span><span class="p">)</span><span class="o">&amp;</span><span class="n">buffer</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">buffer_size</span><span class="p">);</span>
+<span class="w">            </span><span class="n">memcpy</span><span class="p">(((</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="p">)(</span><span class="n">upacket</span><span class="p">))</span><span class="o">+</span><span class="n">offset</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">buffer</span><span class="p">,</span><span class="w"> </span><span class="n">buffer_size</span><span class="p">);</span>
+<span class="w">            </span><span class="n">NSLog</span><span class="p">(</span><span class="s">@&quot;package protocol is: %u, type is: %u&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">upacket</span><span class="o">-&gt;</span><span class="n">protocol</span><span class="p">,</span><span class="w"> </span><span class="n">upacket</span><span class="o">-&gt;</span><span class="n">type</span><span class="p">);</span>
+
+<span class="w">            </span><span class="c1">// 3. Try to decode any payload as plist</span>
+<span class="w">            </span><span class="bp">NSError</span><span class="w"> </span><span class="o">*</span><span class="n">err</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">nil</span><span class="p">;</span>
+<span class="w">            </span><span class="bp">NSDictionary</span><span class="w"> </span><span class="o">*</span><span class="n">dict</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">nil</span><span class="p">;</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">usbmux_packet_payload_size</span><span class="p">(</span><span class="n">upacket</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">dict</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="bp">NSPropertyListSerialization</span><span class="w"> </span><span class="n">propertyListWithData</span><span class="o">:</span><span class="p">[</span><span class="bp">NSData</span><span class="w"> </span><span class="n">dataWithBytesNoCopy</span><span class="o">:</span><span class="n">usbmux_packet_payload</span><span class="p">(</span><span class="n">upacket</span><span class="p">)</span><span class="w"> </span><span class="n">length</span><span class="o">:</span><span class="n">usbmux_packet_payload_size</span><span class="p">(</span><span class="n">upacket</span><span class="p">)</span><span class="w"> </span><span class="n">freeWhenDone</span><span class="o">:</span><span class="nb">NO</span><span class="p">]</span><span class="w"> </span><span class="n">options</span><span class="o">:</span><span class="n">NSPropertyListImmutable</span><span class="w"> </span><span class="n">format</span><span class="o">:</span><span class="nb">NULL</span><span class="w"> </span><span class="n">error</span><span class="o">:&amp;</span><span class="n">err</span><span class="p">];</span>
+<span class="w">            </span><span class="p">}</span>
+
+<span class="w">            </span><span class="c1">// 4. Read next</span>
+<span class="w">            </span><span class="n">read_packet_on_channle</span><span class="p">(</span><span class="n">channel</span><span class="p">);</span>
+
+<span class="w">            </span><span class="n">usbmux_packet_free</span><span class="p">(</span><span class="n">upacket</span><span class="p">);</span>
+<span class="w">        </span><span class="p">});</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>读逻辑中我删除了校验和容错逻辑，只保留了比较关键的部分，Listen命令的读操作说明如下：</p>
+<ol>
+<li>先读取报文头，usbmuxd返回的报文格式也遵循usbmux协议，<strong>头部中记录了报文载荷的长度</strong>，所以必须先读出报文头之后，才能知道载荷的边界到哪里；</li>
+<li>从头部解析出载荷长度之后，读取报文载荷数据；</li>
+<li>头部和载荷读取完成之后，构成一个完整的报文，此时以plist格式解析载荷，获取返回内容；</li>
+<li>读取下一个报文，读操作采用的I/O模式是阻塞模式，一直监听是否有数据，当有数据时便进行读取解析。</li>
+</ol>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/image-20190821171830735.png" alt="image-20190821171830735"></p>
+<p>如图所示，是当iOS设备通过USB连接到（Attached）Mac时，usbmuxd服务返回的数据。其中比较关键的字段有两个：</p>
+<ol>
+<li><code>MessageType</code>: Attached表明有设备连接的Mac，而Detached则表明断开连接；</li>
+<li><code>DeviceID</code>: 唯一标识当前插入的设备，后续与设备建立连接时会用到。</li>
+</ol>
+<p>iTunes监听设备插拔时，便是通过类似的方式。</p>
+<h4>Connect</h4>
+<p>说完Listen，再来看下Connect。在上一节中，我们抛出了usbmuxd服务和iOS端进程之间建立连接的4点要求，其中前3个在上一节都已经得到解决，而第4个问题——端口号——其实在lockdown的启动配置文件时就已经知道了。此时我们已经具备建立连接的所有条件：</p>
+<ol>
+<li>Listen时得到DeviceID；</li>
+<li>lockdown启动配置文件中得知lockdown的端口号。</li>
+</ol>
+<p>在讲Listen时，我们知道可以通过向usbmuxd服务发送Listen命令监听iOS设备插拔，类似地，也可以通过向usbmuxd服务发送Connect命令对其配置，使其建立和iOS端应用程序的连接。</p>
+<p>整个过程如下，我们需要再调用<code>connect_to_usbmuxd</code>函数再创建一个socket，用作Connect命令，和Listen命令的发送方式一样，发送Connect命令也是向socket文件描述符中写入数据：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">send_connect_usb_packet</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">print_empty_lines</span><span class="p">();</span>
+
+<span class="w">    </span><span class="n">connect_channel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">connect_to_usbmuxd_channel</span><span class="p">();</span>
+
+
+<span class="w">    </span><span class="n">port</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">((</span><span class="n">port</span><span class="o">&lt;&lt;</span><span class="mi">8</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mh">0xFF00</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="p">(</span><span class="n">port</span><span class="o">&gt;&gt;</span><span class="mi">8</span><span class="p">);</span>
+<span class="w">    </span><span class="bp">NSDictionary</span><span class="w"> </span><span class="o">*</span><span class="n">packet</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="l">@{</span>
+<span class="w">                             </span><span class="s">@&quot;ClientVersionString&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">@&quot;1&quot;</span><span class="p">,</span>
+<span class="w">                             </span><span class="s">@&quot;DeviceID&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">deviceID</span><span class="p">,</span>
+<span class="w">                             </span><span class="s">@&quot;MessageType&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">@&quot;Connect&quot;</span><span class="p">,</span>
+<span class="w">                             </span><span class="s">@&quot;PortNumber&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="bp">NSNumber</span><span class="w"> </span><span class="n">numberWithInt</span><span class="o">:</span><span class="n">port</span><span class="p">],</span>
+<span class="w">                             </span><span class="s">@&quot;ProgName&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">@&quot;Peertalk Example&quot;</span>
+<span class="w">                             </span><span class="l">}</span><span class="p">;</span>
+
+<span class="w">    </span><span class="n">NSLog</span><span class="p">(</span><span class="s">@&quot;send connect to usb packet: %@&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">packet</span><span class="p">);</span>
+<span class="w">    </span><span class="n">send_packet</span><span class="p">(</span><span class="n">packet</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">connect_channel</span><span class="p">);</span>
+<span class="w">    </span><span class="n">read_packet_on_channle</span><span class="p">(</span><span class="n">connect_channel</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>其中关键的字段有：</p>
+<ol>
+<li><code>DeviceID</code>: 设备id，在Linten时获得；</li>
+<li><code>MessageType</code>: 消息类型，Connect表示需要建立连接；</li>
+<li><code>PortNumber</code>: 端口号，对应iOS端目标连接服务的端口，以lockdown为例，为62078。</li>
+</ol>
+<p>对应的报文格式为：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/image-20190821193559069.png" alt="image-20190821193559069"></p>
+<blockquote><p>注：实际发送过程中此处的PortNumber会以网络字节序的形式传输。</p>
+</blockquote>
+<p>发送Connect命令之后，如果连接成功，此时便会收到usbmuxd返回的数据（读取Connect返回的数据和之前的读取Listen命令返回的数据方式相同）：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/image-20190821193827916.png" alt="image-20190821193827916"></p>
+<p>Number为0表示连接成功。</p>
+<p>为了容易理解，我们来和标准的TCP通信做个对比，其中右侧的lockdown，就是标准的TCP Server，而左侧的iTunes，建立与lockdown的连接时不是像标准的TCP Client一样，调用connect函数，而是向usbmuxd服务发送Connect命令。然而，虽然方法不同，但是二者在通信意义上是等价的。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/image-20190902163830106.png" alt="image-20190902163830106"></p>
+<p>并且，当在Connect命令发送后，在iOS侧，lockdown的accept方法会执行，随后双方便可以像标准的TCP通信一样发送和接收数据。</p>
+<p>iTunes发送数据的方式如下：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">send_msg</span><span class="p">(</span><span class="bp">NSString</span><span class="w"> </span><span class="o">*</span><span class="n">msg</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">dispatch_data_t</span><span class="w"> </span><span class="n">payload</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">create_payload</span><span class="p">(</span><span class="n">msg</span><span class="p">);</span>
+<span class="w">    </span><span class="n">dispatch_data_t</span><span class="w"> </span><span class="n">frame</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">create_frame</span><span class="p">(</span><span class="mi">101</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">payload</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// send through connect channel, not tcp_channel</span>
+<span class="w">    </span><span class="n">dispatch_io_write</span><span class="p">(</span><span class="n">connect_channel</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">frame</span><span class="p">,</span><span class="w"> </span><span class="n">usbmuxd_io_queue</span><span class="p">,</span><span class="w"> </span><span class="o">^</span><span class="p">(</span><span class="kt">bool</span><span class="w"> </span><span class="n">done</span><span class="p">,</span><span class="w"> </span><span class="n">dispatch_data_t</span><span class="w">  </span><span class="n">_Nullable</span><span class="w"> </span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">NSLog</span><span class="p">(</span><span class="s">@&quot;error is: %d&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">error</span><span class="p">);</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>其中connect_channel是我们在发送Connect命令时创建的文件描述符。</p>
+<p>注意Listen和Connect使用不同的文件描述符。
+{:.warning}</p>
+<p>经历以上过程，macOS程序便实现了通过usbmuxd和iOS通信。总结下来：</p>
+<ol>
+<li>macOS端进程通过Unix Domain Socket以类似TCP的方式和usbmuxd服务进行通信；</li>
+<li>macOS端进程通过向usbmuxd服务发送Connect命令，建立与iOS端目标进程之间的通信连接，端到端的通信基于端口号；</li>
+<li>iOS端进程以标准的TCP Server形式存在；</li>
+<li>usbmuxd作为中间代理，封装了USB协议的通信细节，对上提供类TCP的接口；</li>
+<li>基于usbmux协议和usbmuxd服务，实现了macOS进程和iOS端进程之间简单、高效的通信。</li>
+</ol>
+<blockquote><p>简单在于协议的API基于socket，为大众熟知，而在通信效率方面，基于USB协议的通信效率显然比基于TCP/IP网络要快得多。</p>
+</blockquote>
+<h2>usbmux应用</h2>
+<p>如果是单纯分析macOS进程和iOS进程之间的通信原理的话，那大可不必如此大费周章，usbmuxd的魔力不仅在于它可以用于苹果自带应用和iOS程序之间的通信，而且，我是说而且，它可以用于为我们所用，基于usbmuxd服务，我们可以利用usbmux协议构建我们自己的应用。</p>
+<p>{:.success}</p>
+<p>我们可以基于usbmuxd服务，利用usbmux协议构建我们自己的应用。</p>
+<h3>重新审视lockdown</h3>
+<p>我们回过头来，重新看下lockdown做了哪些事情，从前文中lockdown的启动配置文件可以看出，它在开机时创建了一个listen socket，监听本地端口：62078，然后像普通的TCP Server那样，bind、accept阻塞等待客户端的连接。而当macOS端向usbmuxd发送Connect命令时，lockdown的accept结束阻塞，连接建立。</p>
+<blockquote><p>lookdown的源码没有，但是从启动配置文件和nc端口测试，结合网络知识，我们基本可以确认lockdown的内在逻辑。</p>
+</blockquote>
+<p>那么，如果我们模拟lockdown，新建一个iOS APP，指定端口号，比如2345，然后通过调用socket、bind、listen、accept建立我们自己的TCP Server监听127.0.0.1:2345。</p>
+<p>同时新建一个macOS应用，像iTunes一样连接usbmuxd服务，以端口号2345向其发送Connect命令，那么会发生什么呢？</p>
+<p>答案是，如我们所愿，利用usbmuxd协议，我们建立了自己的macOS应用和iOS APP之间的通信连接，随后便可在此协议的基础之上，实现自建iOS APP和macOS应用程序之间的高效通信。整个通信框架如下：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/image-20190902163853436.png" alt="image-20190902163853436"></p>
+<p>前文中花了大量的篇幅来阐述usbmux协议的原理，最终的目的就是这么简单，我们想在自己的产品中应用usbmux协议。</p>
+<h3>usbmux应用举例</h3>
+<p>usbmux协议由于通信效率较高，在数据量较大的通信场景中，体验非常突出，毕竟当传输的数据量较大时，效率就是体验。目前基于usbmux有非常多的有意思的应用，常见的有：</p>
+<ul>
+<li><a href="https://github.com/rsms/peertalk">PeerTalk</a>: PeerTalk基于usbmux实现了一个简单的IM，可用于macOS端和和iOS端之间聊天。本文的代码就是参照PeerTalk，如果你想基于usbmux协议构建自己的应用，而又不想深入了解usbmux协议的的话，可以直接搬运PeerTalk的代码。</li>
+<li><a href="https://lookin.work">lookin</a>: 腾讯开发的iOS界面调试利器，简直比Reveal还好用，而且免费。 </li>
+</ul>
+<h2>参考</h2>
+<ul>
+<li><a href="https://github.com/zyqhi/usbmux_demo">usbmux_demo</a>:  本文中的示例代码。</li>
+<li><a href="https://github.com/libimobiledevice/libimobiledevice">libimobiledevice</a>: 跨平台的协议库，用于iOS设备通信</li>
+<li><a href="https://www.theiphonewiki.com/wiki/Usbmux">usbmux</a></li>
+<li><a href="https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html">launchd</a></li>
+<li><a href="https://medium.com/@jon.gabilondo.angulo_7635/understanding-usbmux-and-the-ios-lockdown-service-7f2a1dfd07ae">Understanding usbmux and the iOS lockdown service</a></li>
+<li><a href="https://www.cnblogs.com/sparkdev/p/8359028.html">Unix domain socket 简介</a></li>
+<li><a href="https://developer.apple.com/documentation/dispatch/dispatch_i_o?language=objc">Dispath I/O</a></li>
+<li><a href="https://github.com/rsms/peertalk">peertalk</a></li>
+<li><a href="https://github.com/hughkli/KKConnector/tree/Develop">KKConnector</a></li>
+</ul>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "usbmux协议分析.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

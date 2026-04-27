@@ -1,0 +1,843 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>FBRetainCycleDetector与FBAllocationTracker源码解析 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="FBRetainCycleDetector与FBAllocationTracker源码解析,iOS,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="FBRetainCycleDetector与FBAllocationTracker源码解析<br/>FBAllocationTracker源码阅读" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>FBRetainCycleDetector与FBAllocationTracker源码解析</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2022-02-23 13:10
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_ios.html' class='article_tag'>iOS</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://tbfungeek.github.io/2019/11/26/FBRetainCycleDetector-FBAllocationTracker-FBMemoryProfiler-%E6%BA%90%E7%A0%81%E8%A7%A3%E6%9E%90/' target='blank'>FBRetainCycleDetector与FBAllocationTracker源码解析</a></p></h4>
+<h2>开篇叨叨</h2>
+<p><a href="https://github.com/facebook/FBRetainCycleDetector">FBRetainCycleDetector</a>是FaceBook推出的用于检测对象是否有循环引用的一个开源库.下面是一个简单的用法：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#import &lt;FBRetainCycleDetector/FBRetainCycleDetector.h&gt;  </span>
+<span class="n">FBRetainCycleDetector</span><span class="w"> </span><span class="o">*</span><span class="n">detector</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">FBRetainCycleDetector</span><span class="w"> </span><span class="n">new</span><span class="p">];</span><span class="w">  </span>
+<span class="p">[</span><span class="n">detector</span><span class="w"> </span><span class="n">addCandidate</span><span class="o">:</span><span class="n">myObject</span><span class="p">];</span><span class="w">  </span>
+<span class="bp">NSSet</span><span class="w"> </span><span class="o">*</span><span class="n">retainCycles</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">detector</span><span class="w"> </span><span class="n">findRetainCycles</span><span class="p">];</span><span class="w">  </span>
+<span class="n">NSLog</span><span class="p">(</span><span class="s">@&quot;%@&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">retainCycles</span><span class="p">);</span>
+</code></pre></div>
+<p>它先创建一个FBRetainCycleDetector循环引用检测器，然后将待检查循环引用关系的对象通过addCandidate传入，检测器通过findRetainCycles查找这个对象中的循环引用。它能通过添加Filters对某些进行过滤，并且支持检测Block,Timmer,Associations这些对象的内存泄漏。但是它不能单独在项目中使用必须借助其他工具比如FBAllocationTracker,MLeaksFinders 查找Candidates，下面这篇博客主要是对FBRetainCycleDetector源码进行分析，不对使用做过多介绍，具体使用可以在GitHub主页查看。</p>
+<h2>FBRetainCycleDetector</h2>
+<h3>项目结构</h3>
+<p>下图是FBRetainCycleDetector目录结构：</p>
+<ul>
+<li><img src="../vender/image/img_loading.gif" data-src="../file/image/20220223-131000-0.png" alt=""></li>
+</ul>
+<h3>源码解析</h3>
+<p>FBRetainCycleDetector主要任务有两个：</p>
+<ol>
+<li><p>找出<strong>Object</strong>，<strong>Timer类型Object</strong>，<strong>Object associate类型Object</strong>,<strong>Block类型Object</strong> 这几种类型的 Strong Reference。</p>
+</li>
+<li><p>最开始把Self作为根节点，沿着找出的各个Reference进行深度遍历，如果形成了环，则存在循环依赖。</p>
+</li>
+</ol>
+<p>OK 我们现在开始FBRetainCycleDetector的解析：</p>
+<p><strong>FBRetainCycleDetector 对象初始化</strong></p>
+<p>首先我们来看下FBRetainCycleDetector：</p>
+<div class="highlight"><pre><code><span></span><span class="k">@implementation</span> <span class="nc">FBRetainCycleDetector</span> <span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="bp">NSMutableArray</span><span class="w"> </span><span class="o">*</span><span class="n">_candidates</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">FBObjectGraphConfiguration</span><span class="w"> </span><span class="o">*</span><span class="n">_configuration</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="bp">NSMutableSet</span><span class="w"> </span><span class="o">*</span><span class="n">_objectSet</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这里最重要有两个对象，<code>_candidates</code>是一系列待检测的对象，<code>_configuration</code>为配置对象，在这里可以配置需要过滤的对象，检测属性的配置等等。</p>
+<p>为了简化代码的分析过程，我们以最简单的初始化形式入手看下初始化过程我们做了什么:</p>
+<div class="highlight"><pre><code><span></span><span class="p">-</span> <span class="p">(</span><span class="kt">instancetype</span><span class="p">)</span><span class="nf">init</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">[</span><span class="nb">self</span><span class="w"> </span><span class="n">initWithConfiguration</span><span class="o">:</span><span class="w">  </span>
+<span class="w">          </span><span class="p">[[</span><span class="n">FBObjectGraphConfiguration</span><span class="w"> </span><span class="n">alloc</span><span class="p">]</span><span class="w"> </span><span class="n">initWithFilterBlocks</span><span class="o">:</span><span class="n">FBGetStandardGraphEdgeFilters</span><span class="p">()</span><span class="w">  </span>
+<span class="w">                                               </span><span class="nl">shouldInspectTimers</span><span class="p">:</span><span class="nb">YES</span><span class="p">]];</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+
+<span class="p">-</span> <span class="p">(</span><span class="kt">instancetype</span><span class="p">)</span><span class="nf">initWithConfiguration:</span><span class="p">(</span><span class="n">FBObjectGraphConfiguration</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nv">configuration</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nb">self</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="nb">super</span><span class="w"> </span><span class="n">init</span><span class="p">])</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">_configuration</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">configuration</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">_candidates</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="bp">NSMutableArray</span><span class="w"> </span><span class="n">new</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="n">_objectSet</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="bp">NSMutableSet</span><span class="w"> </span><span class="n">new</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nb">self</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在初始化过程中FBRetainCycleDetector调用了initWithConfiguration:初始化了一个标准的过滤器，过滤器过滤了引用循环中的一些类和方法，并检查NSTimer循环引用情况。</p>
+<p><strong>添加检测对象</strong></p>
+<p>待检测的对象在addCandidate方法中被封装为FBObjectiveCGraphElement对象，然后添加到<code>_candidates</code>中。</p>
+<div class="highlight"><pre><code><span></span><span class="p">-</span> <span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="nf">addCandidate:</span><span class="p">(</span><span class="kt">id</span><span class="p">)</span><span class="nv">candidate</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*</span><span class="n">graphElement</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FBWrapObjectGraphElement</span><span class="p">(</span><span class="nb">nil</span><span class="p">,</span><span class="w"> </span><span class="n">candidate</span><span class="p">,</span><span class="w"> </span><span class="n">_configuration</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">graphElement</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="p">[</span><span class="n">_candidates</span><span class="w"> </span><span class="n">addObject</span><span class="o">:</span><span class="n">graphElement</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>查找循环引用</strong></p>
+<p>FBRetainCycleDetector 通过调用findRetainCycles开始查找循环引用，如果某个对象比较复杂可能检测时间会比较久，所以在FBRetainCycleDetector中默认设置了一个检测深度，默认情况下为10.可以通过</p>
+<div class="highlight"><pre><code><span></span><span class="p">-</span> <span class="p">(</span><span class="bp">NSSet</span><span class="o">&lt;</span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nf">findRetainCyclesWithMaxCycleLength:</span><span class="p">(</span><span class="n">NSUInteger</span><span class="p">)</span><span class="nv">length</span>
+</code></pre></div>
+<p>来指定更深的层级。我们继续看findRetainCycles，findRetainCycles内部只是简单得转调了findRetainCyclesWithMaxCycleLength方法。</p>
+<div class="highlight"><pre><code><span></span><span class="p">-</span> <span class="p">(</span><span class="bp">NSSet</span><span class="o">&lt;</span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nf">findRetainCycles</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">[</span><span class="nb">self</span><span class="w"> </span><span class="n">findRetainCyclesWithMaxCycleLength</span><span class="o">:</span><span class="n">kFBRetainCycleDetectorDefaultStackDepth</span><span class="p">];</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>我们继续跟进findRetainCyclesWithMaxCycleLength方法：</p>
+<div class="highlight"><pre><code><span></span><span class="p">-</span> <span class="p">(</span><span class="bp">NSSet</span><span class="o">&lt;</span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nf">findRetainCyclesWithMaxCycleLength:</span><span class="p">(</span><span class="n">NSUInteger</span><span class="p">)</span><span class="nv">length</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="bp">NSMutableSet</span><span class="o">&lt;</span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">allRetainCycles</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="bp">NSMutableSet</span><span class="w"> </span><span class="n">new</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*</span><span class="n">graphElement</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">_candidates</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="bp">NSSet</span><span class="o">&lt;</span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">retainCycles</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="nb">self</span><span class="w"> </span><span class="n">_findRetainCyclesInObject</span><span class="o">:</span><span class="n">graphElement</span><span class="w">  </span>
+<span class="w">                                                                                      </span><span class="nl">stackDepth</span><span class="p">:</span><span class="n">length</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="p">[</span><span class="n">allRetainCycles</span><span class="w"> </span><span class="n">unionSet</span><span class="o">:</span><span class="n">retainCycles</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="p">[</span><span class="n">_candidates</span><span class="w"> </span><span class="n">removeAllObjects</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="p">[</span><span class="n">_objectSet</span><span class="w"> </span><span class="n">removeAllObjects</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// Filter cycles that have been broken down since we found them.  </span>
+<span class="w">  </span><span class="c1">// These are false-positive that were picked-up and are transient cycles.  </span>
+<span class="w">  </span><span class="bp">NSMutableSet</span><span class="o">&lt;</span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">brokenCycles</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="bp">NSMutableSet</span><span class="w"> </span><span class="n">set</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">itemCycle</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">allRetainCycles</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*</span><span class="n">element</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">itemCycle</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">element</span><span class="p">.</span><span class="n">object</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nb">nil</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="c1">// At least one element of the cycle has been removed, thus breaking  </span>
+<span class="w">        </span><span class="c1">// the cycle.  </span>
+<span class="w">        </span><span class="p">[</span><span class="n">brokenCycles</span><span class="w"> </span><span class="n">addObject</span><span class="o">:</span><span class="n">itemCycle</span><span class="p">];</span><span class="w">  </span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span><span class="w">  </span>
+<span class="w">      </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="p">[</span><span class="n">allRetainCycles</span><span class="w"> </span><span class="n">minusSet</span><span class="o">:</span><span class="n">brokenCycles</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">allRetainCycles</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>findRetainCyclesWithMaxCycleLength方法中主要可以分成两个阶段，第一个阶段通过<code>_findRetainCyclesInObject</code>查找被加入到<code>_candidates</code>中对象的循环引用放到allRetainCycles集合中，第二阶段是查看这些元素中哪些是已经释放了的从allRetainCycles中移除。</p>
+<p>对于对象的相互引用情况可以看做一个有向图，对象之间的引用就是图的的连线，每一个对象就是有向图的顶点，查找循环引用的过程就是在整个有向图中查找闭环的过程，FBRetainCycleDetector是通过DFS深度遍历的方式遍历整个对象有向图的，整个遍历查找过程真正的实现位于 <code>_findRetainCyclesInObject</code>方法中，在分析<code>_findRetainCyclesInObject</code>实现之前我们先通过下面的视频看下整个算法的</p>
+<p>大概流程：</p>
+<div class="highlight"><pre><code><span></span><span class="p">-</span> <span class="p">(</span><span class="bp">NSSet</span><span class="o">&lt;</span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nf">_findRetainCyclesInObject:</span><span class="p">(</span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nv">graphElement</span><span class="w">  </span>
+<span class="w">                                                                 </span><span class="nl">stackDepth</span><span class="p">:(</span><span class="n">NSUInteger</span><span class="p">)</span><span class="nv">stackDepth</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="bp">NSMutableSet</span><span class="o">&lt;</span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">retainCycles</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="bp">NSMutableSet</span><span class="w"> </span><span class="n">new</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// 查找循环引用是通过深度遍历整个对象图来实现的  </span>
+<span class="w">  </span><span class="c1">// 首先初始化深度搜索树中的一个节点  </span>
+<span class="w">  </span><span class="n">FBNodeEnumerator</span><span class="w"> </span><span class="o">*</span><span class="n">wrappedObject</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[[</span><span class="n">FBNodeEnumerator</span><span class="w"> </span><span class="n">alloc</span><span class="p">]</span><span class="w"> </span><span class="n">initWithObject</span><span class="o">:</span><span class="n">graphElement</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// stack 用于保存当前DFS搜索树中的搜索路径  </span>
+<span class="w">  </span><span class="bp">NSMutableArray</span><span class="o">&lt;</span><span class="n">FBNodeEnumerator</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">stack</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="bp">NSMutableArray</span><span class="w"> </span><span class="n">new</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// objectsOnPath 保存搜索路径中访问过的对象  </span>
+<span class="w">  </span><span class="bp">NSMutableSet</span><span class="o">&lt;</span><span class="n">FBNodeEnumerator</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">objectsOnPath</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="bp">NSMutableSet</span><span class="w"> </span><span class="n">new</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// 增加根节点，从根节点开始搜索  </span>
+<span class="w">  </span><span class="p">[</span><span class="n">stack</span><span class="w"> </span><span class="n">addObject</span><span class="o">:</span><span class="n">wrappedObject</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">//判断是否已经搜索完毕  </span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">([</span><span class="n">stack</span><span class="w"> </span><span class="n">count</span><span class="p">]</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// 算法会创建许多生命周期非常短的对象，这个会造成很大的内存抖动，所以这里使用了自动释放池来缓解这个问题。  </span>
+<span class="w">    </span><span class="k">@autoreleasepool</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="c1">// 取出stack中的最上面的节点，并标记该节点已读  </span>
+<span class="w">      </span><span class="n">FBNodeEnumerator</span><span class="w"> </span><span class="o">*</span><span class="n">top</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">stack</span><span class="w"> </span><span class="n">lastObject</span><span class="p">];</span><span class="w">  </span>
+<span class="w">      </span><span class="c1">// 这里不重复便利同样的子树  </span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="p">[</span><span class="n">objectsOnPath</span><span class="w"> </span><span class="n">containsObject</span><span class="o">:</span><span class="n">top</span><span class="p">])</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">([</span><span class="n">_objectSet</span><span class="w"> </span><span class="n">containsObject</span><span class="o">:</span><span class="l">@(</span><span class="p">[</span><span class="n">top</span><span class="p">.</span><span class="n">object</span><span class="w"> </span><span class="n">objectAddress</span><span class="p">]</span><span class="l">)</span><span class="p">])</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">          </span><span class="p">[</span><span class="n">stack</span><span class="w"> </span><span class="n">removeLastObject</span><span class="p">];</span><span class="w">  </span>
+<span class="w">          </span><span class="k">continue</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="p">}</span><span class="w">  </span>
+<span class="w">        </span><span class="c1">// 这里之所以只保留对象的地址是为了避免不必要的对象持有  </span>
+<span class="w">        </span><span class="p">[</span><span class="n">_objectSet</span><span class="w"> </span><span class="n">addObject</span><span class="o">:</span><span class="l">@(</span><span class="p">[</span><span class="n">top</span><span class="p">.</span><span class="n">object</span><span class="w"> </span><span class="n">objectAddress</span><span class="p">]</span><span class="l">)</span><span class="p">];</span><span class="w">  </span>
+<span class="w">      </span><span class="p">}</span><span class="w">  </span>
+<span class="w">      </span><span class="c1">// 记录已经访问过的节点  </span>
+<span class="w">      </span><span class="p">[</span><span class="n">objectsOnPath</span><span class="w"> </span><span class="n">addObject</span><span class="o">:</span><span class="n">top</span><span class="p">];</span><span class="w">  </span>
+<span class="w">      </span><span class="c1">// Take next adjecent node to that child. Wrapper object can  </span>
+<span class="w">      </span><span class="c1">// persist iteration state. If we see that node again, it will  </span>
+<span class="w">      </span><span class="c1">// give us new adjacent node unless it runs out of them  </span>
+<span class="w">      </span><span class="c1">//取top节点的next节点，也就是这个object可能持有的对象。  </span>
+<span class="w">      </span><span class="n">FBNodeEnumerator</span><span class="w"> </span><span class="o">*</span><span class="n">firstAdjacent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">top</span><span class="w"> </span><span class="n">nextObject</span><span class="p">];</span><span class="w">  </span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">firstAdjacent</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="c1">//如果存在未访问到的节点  </span>
+<span class="w">        </span><span class="c1">// Current node still has some adjacent not-visited nodes  </span>
+<span class="w">        </span><span class="kt">BOOL</span><span class="w"> </span><span class="n">shouldPushToStack</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NO</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="c1">// 检查是否已经访问过了  </span>
+<span class="w">        </span><span class="c1">// Check if child was already seen in that path  </span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">([</span><span class="n">objectsOnPath</span><span class="w"> </span><span class="n">containsObject</span><span class="o">:</span><span class="n">firstAdjacent</span><span class="p">])</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">          </span><span class="c1">// We have caught a retain cycle  </span>
+<span class="w">          </span><span class="c1">//如果该节点已经存在被访问过的对象中，说明构成了retain cycle  </span>
+<span class="w">          </span><span class="c1">// Ignore the first element which is equal to firstAdjacent, use firstAdjacent  </span>
+<span class="w">          </span><span class="c1">// we&#39;re doing that because firstAdjacent has set all contexts, while its  </span>
+<span class="w">          </span><span class="c1">// first occurence could be a root without any context  </span>
+<span class="w">          </span><span class="n">NSUInteger</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">stack</span><span class="w"> </span><span class="n">indexOfObject</span><span class="o">:</span><span class="n">firstAdjacent</span><span class="p">];</span><span class="w">  </span>
+<span class="w">          </span><span class="n">NSInteger</span><span class="w"> </span><span class="n">length</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">stack</span><span class="w"> </span><span class="n">count</span><span class="p">]</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">index</span><span class="p">;</span><span class="w">  </span>
+<span class="w">          </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">index</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">NSNotFound</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">            </span><span class="c1">// Object got deallocated between checking if it exists and grabbing its index  </span>
+<span class="w">            </span><span class="n">shouldPushToStack</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">YES</span><span class="p">;</span><span class="w">  </span>
+<span class="w">          </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">            </span><span class="c1">//计算出firstAdj出现的位置，同时计算出路径的长度，将这一系列的节点（object），也就是环，存放在array里面。  </span>
+<span class="w">            </span><span class="c1">//将这个array存放到retainCycles集合中。  </span>
+<span class="w">            </span><span class="n">NSRange</span><span class="w"> </span><span class="n">cycleRange</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">NSMakeRange</span><span class="p">(</span><span class="n">index</span><span class="p">,</span><span class="w"> </span><span class="n">length</span><span class="p">);</span><span class="w">  </span>
+<span class="w">            </span><span class="bp">NSMutableArray</span><span class="o">&lt;</span><span class="n">FBNodeEnumerator</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">cycle</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[[</span><span class="n">stack</span><span class="w"> </span><span class="n">subarrayWithRange</span><span class="o">:</span><span class="n">cycleRange</span><span class="p">]</span><span class="w"> </span><span class="n">mutableCopy</span><span class="p">];</span><span class="w">  </span>
+<span class="w">            </span><span class="p">[</span><span class="n">cycle</span><span class="w"> </span><span class="n">replaceObjectAtIndex</span><span class="o">:</span><span class="mi">0</span><span class="w"> </span><span class="n">withObject</span><span class="o">:</span><span class="n">firstAdjacent</span><span class="p">];</span><span class="w">  </span>
+<span class="w">            </span><span class="c1">// 1. Unwrap the cycle  </span>
+<span class="w">            </span><span class="c1">// 2. Shift to lowest address (if we omit that, and the cycle is created by same class,  </span>
+<span class="w">            </span><span class="c1">//    we might have duplicates)  </span>
+<span class="w">            </span><span class="c1">// 3. Shift by class (lexicographically)  </span>
+<span class="w">            </span><span class="p">[</span><span class="n">retainCycles</span><span class="w"> </span><span class="n">addObject</span><span class="o">:</span><span class="p">[</span><span class="nb">self</span><span class="w"> </span><span class="n">_shiftToUnifiedCycle</span><span class="o">:</span><span class="p">[</span><span class="nb">self</span><span class="w"> </span><span class="n">_unwrapCycle</span><span class="o">:</span><span class="n">cycle</span><span class="p">]]];</span><span class="w">  </span>
+<span class="w">          </span><span class="p">}</span><span class="w">  </span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">          </span><span class="c1">// Node is clear to check, add it to stack and continue  </span>
+<span class="w">          </span><span class="n">shouldPushToStack</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">YES</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="p">}</span><span class="w">  </span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">shouldPushToStack</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">          </span><span class="k">if</span><span class="w"> </span><span class="p">([</span><span class="n">stack</span><span class="w"> </span><span class="n">count</span><span class="p">]</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">stackDepth</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">            </span><span class="p">[</span><span class="n">stack</span><span class="w"> </span><span class="n">addObject</span><span class="o">:</span><span class="n">firstAdjacent</span><span class="p">];</span><span class="w">  </span>
+<span class="w">          </span><span class="p">}</span><span class="w">  </span>
+<span class="w">        </span><span class="p">}</span><span class="w">  </span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="c1">// Node has no more adjacent nodes, it itself is done, move on  </span>
+<span class="w">        </span><span class="p">[</span><span class="n">stack</span><span class="w"> </span><span class="n">removeLastObject</span><span class="p">];</span><span class="w">  </span>
+<span class="w">        </span><span class="p">[</span><span class="n">objectsOnPath</span><span class="w"> </span><span class="n">removeObject</span><span class="o">:</span><span class="n">top</span><span class="p">];</span><span class="w">  </span>
+<span class="w">      </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">retainCycles</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>_findRetainCyclesInObject</code>方法中有四个比较重要的对象：</p>
+<div class="highlight"><pre><code><span></span><span class="o">*</span><span class="w"> </span><span class="n">retainCycles用于存放循环引用环的集合</span><span class="err">；</span><span class="w">  </span>
+<span class="o">*</span><span class="w"> </span><span class="n">wrappedObject图的根起点</span><span class="w">  </span>
+<span class="o">*</span><span class="w"> </span><span class="n">stack是在图中当前的路径</span><span class="w">  </span>
+<span class="o">*</span><span class="w"> </span><span class="n">objectsOnPath用于记录以前访问过的节点</span><span class="err">。</span>
+</code></pre></div>
+<p>在遍历开始前首先用传进来的graphElement来初始化FBNodeEnumerator对象，FBNodeEnumerator 是整个遍历的关键，但是这里我们先注重整个流程，开始遍历之前会将用当前graphElement初始化的FBNodeEnumerator添加到stack，然后通过FBNodeEnumerator 的 nextObject 取出下一个节点，通过 <strong>[objectsOnPath containsObject:firstAdjacent]</strong>来判断该节点是否已经被访问过了，如果该节点已经存在被访问过的对象中，说明构成了retain cycle，这时候计算出firstAdj出现的位置，同时计算出路径的长度，将这一系列的节点组成的环，存放在array里面。将这个array存放到retainCycles集合中。</p>
+<p>这里还有两个比较重要的方法_unwrapCycle和_shiftToUnifiedCycle：</p>
+<ul>
+<li><code>_unwrapCycle</code>: 的作用是将数组中的每一个 FBNodeEnumerator 实例解压成 FBObjectiveCGraphElement</li>
+<li><code>_shiftToUnifiedCycle</code>: 方法用于将每一个环中的元素按照地址递增以及字母顺序来排序，来避免把相同环的不同表示方式当作两个不同的环。</li>
+</ul>
+<p><strong>获取强引用对象</strong></p>
+<p>我们上面介绍addCandidate方法的时候看到FBRetainCycleDetector会把所有的对象封装在FBObjectiveCGraphElement中，FBObjectiveCGraphElement类中有个十分重要的方法allRetainedObjects，它用于返回某个对象所持有的全部强引用对象数组。获取数组之后，再把其中的对象包装成新的FBNodeEnumerator实例，作为下一个有向图的顶点。</p>
+<div class="highlight"><pre><code><span></span><span class="p">-</span> <span class="p">(</span><span class="bp">NSSet</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nf">allRetainedObjects</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="bp">NSArray</span><span class="w"> </span><span class="o">*</span><span class="n">retainedObjectsNotWrapped</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">FBAssociationManager</span><span class="w"> </span><span class="n">associationsForObject</span><span class="o">:</span><span class="n">_object</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="bp">NSMutableSet</span><span class="w"> </span><span class="o">*</span><span class="n">retainedObjects</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="bp">NSMutableSet</span><span class="w"> </span><span class="n">new</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">id</span><span class="w"> </span><span class="n">obj</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">retainedObjectsNotWrapped</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*</span><span class="n">element</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FBWrapObjectGraphElementWithContext</span><span class="p">(</span><span class="nb">self</span><span class="p">,</span><span class="w">  </span>
+<span class="w">                                                                            </span><span class="n">obj</span><span class="p">,</span><span class="w">  </span>
+<span class="w">                                                                            </span><span class="n">_configuration</span><span class="p">,</span><span class="w">  </span>
+<span class="w">                                                                            </span><span class="l">@[</span><span class="s">@&quot;__associated_object&quot;</span><span class="l">]</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">element</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="p">[</span><span class="n">retainedObjects</span><span class="w"> </span><span class="n">addObject</span><span class="o">:</span><span class="n">element</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">retainedObjects</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在最开始我们会通过[FBAssociationManager associationsForObject:]获取该对象所有通过<code>objc_setAssociatedObject</code>关联的对象。FBAssociationManager 是 object
+associations的一个跟踪器，通过指定对象它能够返回该指定对象通过<code>objc_setAssociatedObjectretain</code>策略添加的关联对象。它只有三个方法：</p>
+<div class="highlight"><pre><code><span></span><span class="cm">/**  </span>
+<span class="cm"> 开始跟踪 object associations，这里使用的是fishhook来hook objc_(set/remove)AssociatedObject 这些C方法,并插入一些跟踪代码  </span>
+<span class="cm"> */</span><span class="w">  </span>
+<span class="p">+</span> <span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="nf">hook</span><span class="p">;</span><span class="w">  </span>
+<span class="cm">/**  </span>
+<span class="cm"> 停止跟踪 object associations  </span>
+<span class="cm"> */</span><span class="w">  </span>
+<span class="p">+</span> <span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="nf">unhook</span><span class="p">;</span><span class="w">  </span>
+<span class="cm">/**  </span>
+<span class="cm"> 返回指定对象的 objects associated  </span>
+<span class="cm"> */</span><span class="w">  </span>
+<span class="p">+</span> <span class="p">(</span><span class="n">nullable</span><span class="w"> </span><span class="bp">NSArray</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nf">associationsForObject:</span><span class="p">(</span><span class="n">nullable</span><span class="w"> </span><span class="kt">id</span><span class="p">)</span><span class="nv">object</span><span class="p">;</span>
+</code></pre></div>
+<p>要跟踪关联对象必须在main.m中调用[FBAssociationManager hook]通过fishhook Hook 对应方法。</p>
+<p>我们接下来继续看下allRetainedObjects方法。allRetainedObjects方法中会遍历FBAssociationManager获取到的<code>_object</code>关联的对象。然后通过FBWrapObjectGraphElementWithContext创建FBObjectiveCGraphElement。并添加到retainedObjects数组返回。</p>
+<div class="highlight"><pre><code><span></span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*</span><span class="nf">FBWrapObjectGraphElementWithContext</span><span class="p">(</span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*</span><span class="n">sourceElement</span><span class="p">,</span><span class="w">  </span>
+<span class="w">                                                              </span><span class="kt">id</span><span class="w"> </span><span class="n">object</span><span class="p">,</span><span class="w">  </span>
+<span class="w">                                                              </span><span class="n">FBObjectGraphConfiguration</span><span class="w"> </span><span class="o">*</span><span class="n">configuration</span><span class="p">,</span><span class="w">  </span>
+<span class="w">                                                              </span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="bp">NSString</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">namePath</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">//通过FBObjectGraphConfiguration中添加的过滤器对当前的object进行一次过滤  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">_ShouldBreakGraphEdge</span><span class="p">(</span><span class="n">configuration</span><span class="p">,</span><span class="w"> </span><span class="n">sourceElement</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">namePath</span><span class="w"> </span><span class="n">firstObject</span><span class="p">],</span><span class="w"> </span><span class="n">object_getClass</span><span class="p">(</span><span class="n">object</span><span class="p">)))</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">nil</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="n">FBObjectiveCBlock</span><span class="w"> </span><span class="o">*</span><span class="n">newElement</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">//如果是Block类型则返回FBObjectiveCBlock  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">FBObjectIsBlock</span><span class="p">((</span><span class="k">__bridge</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">object</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">newElement</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[[</span><span class="n">FBObjectiveCBlock</span><span class="w"> </span><span class="n">alloc</span><span class="p">]</span><span class="w"> </span><span class="n">initWithObject</span><span class="o">:</span><span class="n">object</span><span class="w">  </span>
+<span class="w">                                             </span><span class="nl">configuration</span><span class="p">:</span><span class="n">configuration</span><span class="w">  </span>
+<span class="w">                                                  </span><span class="nl">namePath</span><span class="p">:</span><span class="n">namePath</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">//如果是NSTimer的子类并且配置类中shouldInspectTimers 为 YES 返回FBObjectiveCNSCFTimer  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">([</span><span class="n">object_getClass</span><span class="p">(</span><span class="n">object</span><span class="p">)</span><span class="w"> </span><span class="n">isSubclassOfClass</span><span class="o">:</span><span class="p">[</span><span class="bp">NSTimer</span><span class="w"> </span><span class="k">class</span><span class="p">]]</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w">  </span>
+<span class="w">        </span><span class="n">configuration</span><span class="p">.</span><span class="n">shouldInspectTimers</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="n">newElement</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[[</span><span class="n">FBObjectiveCNSCFTimer</span><span class="w"> </span><span class="n">alloc</span><span class="p">]</span><span class="w"> </span><span class="n">initWithObject</span><span class="o">:</span><span class="n">object</span><span class="w">  </span>
+<span class="w">                                                   </span><span class="nl">configuration</span><span class="p">:</span><span class="n">configuration</span><span class="w">  </span>
+<span class="w">                                                        </span><span class="nl">namePath</span><span class="p">:</span><span class="n">namePath</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="c1">//否则返回FBObjectiveCObject  </span>
+<span class="w">      </span><span class="n">newElement</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[[</span><span class="n">FBObjectiveCObject</span><span class="w"> </span><span class="n">alloc</span><span class="p">]</span><span class="w"> </span><span class="n">initWithObject</span><span class="o">:</span><span class="n">object</span><span class="w">  </span>
+<span class="w">                                                </span><span class="nl">configuration</span><span class="p">:</span><span class="n">configuration</span><span class="w">  </span>
+<span class="w">                                                     </span><span class="nl">namePath</span><span class="p">:</span><span class="n">namePath</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="n">configuration</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">configuration</span><span class="p">.</span><span class="n">transformerBlock</span><span class="p">)</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">configuration</span><span class="p">.</span><span class="n">transformerBlock</span><span class="p">(</span><span class="n">newElement</span><span class="p">)</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">newElement</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>FBWrapObjectGraphElementWithContext会根据传入的object的对象判断，如果是Block类型则返回FBObjectiveCBlock，如果是NSTimer的子类并且配置类中shouldInspectTimers 为 YES 返回FBObjectiveCNSCFTimer，如果其他类型返回FBObjectiveCObject。</p>
+<p>FBObjectiveCBlock，FBObjectiveCNSCFTimer，FBObjectiveCObject都是FBObjectiveCGraphElement的子类，都是一种对象图元素。</p>
+<p>我们回到FBNodeEnumerator类，我们上面提到深度遍历对象树靠的就是FBNodeEnumerator的nextObject方法。我们看下nextObject方法：</p>
+<div class="highlight"><pre><code><span></span><span class="p">-</span> <span class="p">(</span><span class="n">FBNodeEnumerator</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nf">nextObject</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">_object</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">nil</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">_retainedObjectsSnapshot</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">_retainedObjectsSnapshot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">_object</span><span class="w"> </span><span class="n">allRetainedObjects</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="n">_enumerator</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">_retainedObjectsSnapshot</span><span class="w"> </span><span class="n">objectEnumerator</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*</span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">_enumerator</span><span class="w"> </span><span class="n">nextObject</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">next</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">[[</span><span class="n">FBNodeEnumerator</span><span class="w"> </span><span class="n">alloc</span><span class="p">]</span><span class="w"> </span><span class="n">initWithObject</span><span class="o">:</span><span class="n">next</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nb">nil</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在这里最关键的就是调用了上面提到的allRetainedObjects方法。也就是说通过allRetainedObjects可以对当前节点进行展开递归。</p>
+<p>我们针对上面提到的三种对象图元素一一看下怎么获取到某个对象的全部强引用属性：</p>
+<p><strong>FBObjectiveCBlock</strong></p>
+<div class="highlight"><pre><code><span></span><span class="p">-</span> <span class="p">(</span><span class="bp">NSSet</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nf">allRetainedObjects</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// ......  </span>
+<span class="w">  </span><span class="c1">//获取一个对象的所有强引用属性  </span>
+<span class="w">  </span><span class="bp">NSArray</span><span class="w"> </span><span class="o">*</span><span class="n">strongIvars</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FBGetObjectStrongReferences</span><span class="p">(</span><span class="nb">self</span><span class="p">.</span><span class="n">object</span><span class="p">,</span><span class="w"> </span><span class="nb">self</span><span class="p">.</span><span class="n">configuration</span><span class="p">.</span><span class="n">layoutCache</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">//通过super方法获取当前类的关联对象属性  </span>
+<span class="w">  </span><span class="bp">NSMutableArray</span><span class="w"> </span><span class="o">*</span><span class="n">retainedObjects</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[[[</span><span class="nb">super</span><span class="w"> </span><span class="n">allRetainedObjects</span><span class="p">]</span><span class="w"> </span><span class="n">allObjects</span><span class="p">]</span><span class="w"> </span><span class="n">mutableCopy</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">//将全部的强引用对象封装成FBObjectiveCGraphElement  </span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">id</span><span class="o">&lt;</span><span class="n">FBObjectReference</span><span class="o">&gt;</span><span class="w"> </span><span class="n">ref</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">strongIvars</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">id</span><span class="w"> </span><span class="n">referencedObject</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">ref</span><span class="w"> </span><span class="n">objectReferenceFromObject</span><span class="o">:</span><span class="nb">self</span><span class="p">.</span><span class="n">object</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">referencedObject</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="bp">NSString</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">namePath</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">ref</span><span class="w"> </span><span class="n">namePath</span><span class="p">];</span><span class="w">  </span>
+<span class="w">      </span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*</span><span class="n">element</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FBWrapObjectGraphElementWithContext</span><span class="p">(</span><span class="nb">self</span><span class="p">,</span><span class="w">  </span>
+<span class="w">                                                                              </span><span class="n">referencedObject</span><span class="p">,</span><span class="w">  </span>
+<span class="w">                                                                              </span><span class="nb">self</span><span class="p">.</span><span class="n">configuration</span><span class="p">,</span><span class="w">  </span>
+<span class="w">                                                                              </span><span class="n">namePath</span><span class="p">);</span><span class="w">  </span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">element</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="p">[</span><span class="n">retainedObjects</span><span class="w"> </span><span class="n">addObject</span><span class="o">:</span><span class="n">element</span><span class="p">];</span><span class="w">  </span>
+<span class="w">      </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">([</span><span class="n">NSStringFromClass</span><span class="p">(</span><span class="n">aCls</span><span class="p">)</span><span class="w"> </span><span class="n">hasPrefix</span><span class="o">:</span><span class="s">@&quot;__NSCF&quot;</span><span class="p">])</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="cm">/**  </span>
+<span class="cm">     If we are dealing with toll-free bridged collections, we are not guaranteed that the collection  </span>
+<span class="cm">     will hold only Objective-C objects. We are not able to check in runtime what callbacks it uses to  </span>
+<span class="cm">     retain/release (if any) and we could easily crash here.  </span>
+<span class="cm">     */</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">[</span><span class="bp">NSSet</span><span class="w"> </span><span class="n">setWithArray</span><span class="o">:</span><span class="n">retainedObjects</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">class_isMetaClass</span><span class="p">(</span><span class="n">aCls</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// If it&#39;s a meta-class it can conform to following protocols,  </span>
+<span class="w">    </span><span class="c1">// but it would crash when trying enumerating  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">nil</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">//获取集合类的引用  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">([</span><span class="n">aCls</span><span class="w"> </span><span class="n">conformsToProtocol</span><span class="o">:</span><span class="p">@</span><span class="n">protocol</span><span class="p">(</span><span class="bp">NSFastEnumeration</span><span class="p">)])</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">BOOL</span><span class="w"> </span><span class="n">retainsKeys</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="nb">self</span><span class="w"> </span><span class="n">_objectRetainsEnumerableKeys</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">BOOL</span><span class="w"> </span><span class="n">retainsValues</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="nb">self</span><span class="w"> </span><span class="n">_objectRetainsEnumerableValues</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">BOOL</span><span class="w"> </span><span class="n">isKeyValued</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NO</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">([</span><span class="n">aCls</span><span class="w"> </span><span class="n">instancesRespondToSelector</span><span class="o">:</span><span class="k">@selector</span><span class="p">(</span><span class="n">objectForKey</span><span class="o">:</span><span class="p">)])</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="n">isKeyValued</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">YES</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="cm">/**  </span>
+<span class="cm">     This codepath is prone to errors. When you enumerate a collection that can be mutated while enumeration  </span>
+<span class="cm">     we fall into risk of crash. To save ourselves from that we will catch such exception and try again.  </span>
+<span class="cm">     We should not try this endlessly, so at some point we will simply give up.  </span>
+<span class="cm">     */</span><span class="w">  </span>
+<span class="w">    </span><span class="n">NSInteger</span><span class="w"> </span><span class="n">tries</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">NSInteger</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">tries</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="c1">// If collection is mutated we want to rollback and try again - let&#39;s keep refs in temporary set  </span>
+<span class="w">      </span><span class="bp">NSMutableSet</span><span class="w"> </span><span class="o">*</span><span class="n">temporaryRetainedObjects</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="bp">NSMutableSet</span><span class="w"> </span><span class="n">new</span><span class="p">];</span><span class="w">  </span>
+<span class="w">      </span><span class="k">@try</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">id</span><span class="w"> </span><span class="n">subobject</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="nb">self</span><span class="p">.</span><span class="n">object</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">          </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">retainsKeys</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">            </span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*</span><span class="n">element</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FBWrapObjectGraphElement</span><span class="p">(</span><span class="nb">self</span><span class="p">,</span><span class="w"> </span><span class="n">subobject</span><span class="p">,</span><span class="w"> </span><span class="nb">self</span><span class="p">.</span><span class="n">configuration</span><span class="p">);</span><span class="w">  </span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">element</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">              </span><span class="p">[</span><span class="n">temporaryRetainedObjects</span><span class="w"> </span><span class="n">addObject</span><span class="o">:</span><span class="n">element</span><span class="p">];</span><span class="w">  </span>
+<span class="w">            </span><span class="p">}</span><span class="w">  </span>
+<span class="w">          </span><span class="p">}</span><span class="w">  </span>
+<span class="w">          </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">isKeyValued</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">retainsValues</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">            </span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*</span><span class="n">element</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FBWrapObjectGraphElement</span><span class="p">(</span><span class="nb">self</span><span class="p">,</span><span class="w">  </span>
+<span class="w">                                                                         </span><span class="p">[</span><span class="nb">self</span><span class="p">.</span><span class="n">object</span><span class="w"> </span><span class="n">objectForKey</span><span class="o">:</span><span class="n">subobject</span><span class="p">],</span><span class="w">  </span>
+<span class="w">                                                                         </span><span class="nb">self</span><span class="p">.</span><span class="n">configuration</span><span class="p">);</span><span class="w">  </span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">element</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">              </span><span class="p">[</span><span class="n">temporaryRetainedObjects</span><span class="w"> </span><span class="n">addObject</span><span class="o">:</span><span class="n">element</span><span class="p">];</span><span class="w">  </span>
+<span class="w">            </span><span class="p">}</span><span class="w">  </span>
+<span class="w">          </span><span class="p">}</span><span class="w">  </span>
+<span class="w">        </span><span class="p">}</span><span class="w">  </span>
+<span class="w">      </span><span class="p">}</span><span class="w">  </span>
+<span class="w">      </span><span class="k">@catch</span><span class="w"> </span><span class="p">(</span><span class="bp">NSException</span><span class="w"> </span><span class="o">*</span><span class="n">exception</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="c1">// mutation happened, we want to try enumerating again  </span>
+<span class="w">        </span><span class="k">continue</span><span class="p">;</span><span class="w">  </span>
+<span class="w">      </span><span class="p">}</span><span class="w">  </span>
+<span class="w">      </span><span class="c1">// If we are here it means no exception happened and we want to break outer loop  </span>
+<span class="w">      </span><span class="p">[</span><span class="n">retainedObjects</span><span class="w"> </span><span class="n">addObjectsFromArray</span><span class="o">:</span><span class="p">[</span><span class="n">temporaryRetainedObjects</span><span class="w"> </span><span class="n">allObjects</span><span class="p">]];</span><span class="w">  </span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">[</span><span class="bp">NSSet</span><span class="w"> </span><span class="n">setWithArray</span><span class="o">:</span><span class="n">retainedObjects</span><span class="p">];</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这里最关键的就是FBGetObjectStrongReferences方法：它能从类中获取它的所有引用，无论是强引用或者是弱引用。</p>
+<div class="highlight"><pre><code><span></span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="kt">id</span><span class="o">&lt;</span><span class="n">FBObjectReference</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">FBGetObjectStrongReferences</span><span class="p">(</span><span class="kt">id</span><span class="w"> </span><span class="n">obj</span><span class="p">,</span><span class="w">  </span>
+<span class="w">                                                            </span><span class="bp">NSMutableDictionary</span><span class="o">&lt;</span><span class="kt">Class</span><span class="p">,</span><span class="w"> </span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="kt">id</span><span class="o">&lt;</span><span class="n">FBObjectReference</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">layoutCache</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="bp">NSMutableArray</span><span class="o">&lt;</span><span class="kt">id</span><span class="o">&lt;</span><span class="n">FBObjectReference</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">array</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="bp">NSMutableArray</span><span class="w"> </span><span class="n">new</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="n">__unsafe_unretained</span><span class="w"> </span><span class="kt">Class</span><span class="w"> </span><span class="n">previousClass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">nil</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">__unsafe_unretained</span><span class="w"> </span><span class="kt">Class</span><span class="w"> </span><span class="n">currentClass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">object_getClass</span><span class="p">(</span><span class="n">obj</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">previousClass</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">currentClass</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="kt">id</span><span class="o">&lt;</span><span class="n">FBObjectReference</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">ivars</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">layoutCache</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">currentClass</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="n">ivars</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">layoutCache</span><span class="p">[</span><span class="n">currentClass</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">ivars</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="n">ivars</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FBGetStrongReferencesForClass</span><span class="p">(</span><span class="n">currentClass</span><span class="p">);</span><span class="w">  </span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">layoutCache</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">currentClass</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="n">layoutCache</span><span class="p">[</span><span class="n">currentClass</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ivars</span><span class="p">;</span><span class="w">  </span>
+<span class="w">      </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="p">[</span><span class="n">array</span><span class="w"> </span><span class="n">addObjectsFromArray</span><span class="o">:</span><span class="n">ivars</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="n">previousClass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">currentClass</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="n">currentClass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">class_getSuperclass</span><span class="p">(</span><span class="n">currentClass</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">[</span><span class="n">array</span><span class="w"> </span><span class="k">copy</span><span class="p">];</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在FBGetObjectStrongReferences方法中遍历本类以及所有父指针强引用，并且加入了缓存以加速查找强引用的过程，在这里会对所有遍历的类调用FBGetStrongReferencesForClass获取ivars，同时过滤弱引用。</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="kt">id</span><span class="o">&lt;</span><span class="n">FBObjectReference</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">FBGetStrongReferencesForClass</span><span class="p">(</span><span class="kt">Class</span><span class="w"> </span><span class="n">aCls</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="kt">id</span><span class="o">&lt;</span><span class="n">FBObjectReference</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">ivars</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">FBGetClassReferences</span><span class="p">(</span><span class="n">aCls</span><span class="p">)</span><span class="w"> </span><span class="n">filteredArrayUsingPredicate</span><span class="o">:</span><span class="p">[</span><span class="bp">NSPredicate</span><span class="w"> </span><span class="n">predicateWithBlock</span><span class="o">:^</span><span class="kt">BOOL</span><span class="p">(</span><span class="kt">id</span><span class="w"> </span><span class="n">evaluatedObject</span><span class="p">,</span><span class="w"> </span><span class="bp">NSDictionary</span><span class="w"> </span><span class="o">*</span><span class="n">bindings</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">([</span><span class="n">evaluatedObject</span><span class="w"> </span><span class="n">isKindOfClass</span><span class="o">:</span><span class="p">[</span><span class="n">FBIvarReference</span><span class="w"> </span><span class="k">class</span><span class="p">]])</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="n">FBIvarReference</span><span class="w"> </span><span class="o">*</span><span class="n">wrapper</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">evaluatedObject</span><span class="p">;</span><span class="w">  </span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">wrapper</span><span class="p">.</span><span class="n">type</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">FBUnknownType</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">YES</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}]];</span><span class="w">  </span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">uint8_t</span><span class="w"> </span><span class="o">*</span><span class="n">fullLayout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">class_getIvarLayout</span><span class="p">(</span><span class="n">aCls</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">fullLayout</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="l">@[]</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="n">NSUInteger</span><span class="w"> </span><span class="n">minimumIndex</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FBGetMinimumIvarIndex</span><span class="p">(</span><span class="n">aCls</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="bp">NSIndexSet</span><span class="w"> </span><span class="o">*</span><span class="n">parsedLayout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FBGetLayoutAsIndexesForDescription</span><span class="p">(</span><span class="n">minimumIndex</span><span class="p">,</span><span class="w"> </span><span class="n">fullLayout</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="kt">id</span><span class="o">&lt;</span><span class="n">FBObjectReference</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">filteredIvars</span><span class="w"> </span><span class="o">=</span><span class="w">  </span>
+<span class="w">  </span><span class="p">[</span><span class="n">ivars</span><span class="w"> </span><span class="n">filteredArrayUsingPredicate</span><span class="o">:</span><span class="p">[</span><span class="bp">NSPredicate</span><span class="w"> </span><span class="n">predicateWithBlock</span><span class="o">:^</span><span class="kt">BOOL</span><span class="p">(</span><span class="kt">id</span><span class="o">&lt;</span><span class="n">FBObjectReference</span><span class="o">&gt;</span><span class="w"> </span><span class="n">evaluatedObject</span><span class="p">,</span><span class="w">  </span>
+<span class="w">                                                                           </span><span class="bp">NSDictionary</span><span class="w"> </span><span class="o">*</span><span class="n">bindings</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">[</span><span class="n">parsedLayout</span><span class="w"> </span><span class="n">containsIndex</span><span class="o">:</span><span class="p">[</span><span class="n">evaluatedObject</span><span class="w"> </span><span class="n">indexInIvarLayout</span><span class="p">]];</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}]];</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">filteredIvars</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>我们来看下FBGetClassReferences方法：</p>
+<div class="highlight"><pre><code><span></span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="kt">id</span><span class="o">&lt;</span><span class="n">FBObjectReference</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">FBGetClassReferences</span><span class="p">(</span><span class="kt">Class</span><span class="w"> </span><span class="n">aCls</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="bp">NSMutableArray</span><span class="o">&lt;</span><span class="kt">id</span><span class="o">&lt;</span><span class="n">FBObjectReference</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="bp">NSMutableArray</span><span class="w"> </span><span class="n">new</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">count</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="n">Ivar</span><span class="w"> </span><span class="o">*</span><span class="n">ivars</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">class_copyIvarList</span><span class="p">(</span><span class="n">aCls</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">count</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">count</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">Ivar</span><span class="w"> </span><span class="n">ivar</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ivars</span><span class="p">[</span><span class="n">i</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="n">FBIvarReference</span><span class="w"> </span><span class="o">*</span><span class="n">wrapper</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[[</span><span class="n">FBIvarReference</span><span class="w"> </span><span class="n">alloc</span><span class="p">]</span><span class="w"> </span><span class="n">initWithIvar</span><span class="o">:</span><span class="n">ivar</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">wrapper</span><span class="p">.</span><span class="n">type</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">FBStructType</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">encoding</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="p">(</span><span class="n">ivar_getTypeEncoding</span><span class="p">(</span><span class="n">wrapper</span><span class="p">.</span><span class="n">ivar</span><span class="p">));</span><span class="w">  </span>
+<span class="w">      </span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="n">FBObjectInStructReference</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">references</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FBGetReferencesForObjectsInStructEncoding</span><span class="p">(</span><span class="n">wrapper</span><span class="p">,</span><span class="w"> </span><span class="n">encoding</span><span class="p">);</span><span class="w">  </span>
+<span class="w">      </span><span class="p">[</span><span class="n">result</span><span class="w"> </span><span class="n">addObjectsFromArray</span><span class="o">:</span><span class="n">references</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="p">[</span><span class="n">result</span><span class="w"> </span><span class="n">addObject</span><span class="o">:</span><span class="n">wrapper</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="n">free</span><span class="p">(</span><span class="n">ivars</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">[</span><span class="n">result</span><span class="w"> </span><span class="k">copy</span><span class="p">];</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这里主要通过<code>class_copyIvarList</code>方法获取到Ivar然后将所有的Ivar封装到FBIvarReference对象。FBIvarReference对象其实是Ivar的面向对象封装，包括属性的名称、类型、偏移量以及索引。</p>
+<div class="highlight"><pre><code><span></span><span class="k">@interface</span> <span class="nc">FBIvarReference</span> : <span class="bp">NSObject</span><span class="w"> </span><span class="o">&lt;</span><span class="n">FBObjectReference</span><span class="o">&gt;</span><span class="w">  </span>
+<span class="k">@property</span><span class="w"> </span><span class="p">(</span><span class="k">nonatomic</span><span class="p">,</span><span class="w"> </span><span class="k">copy</span><span class="p">,</span><span class="w"> </span><span class="k">readonly</span><span class="p">,</span><span class="w"> </span><span class="n">nullable</span><span class="p">)</span><span class="w"> </span><span class="bp">NSString</span><span class="w"> </span><span class="o">*</span><span class="n">name</span><span class="p">;</span><span class="w">  </span>
+<span class="k">@property</span><span class="w"> </span><span class="p">(</span><span class="k">nonatomic</span><span class="p">,</span><span class="w"> </span><span class="k">readonly</span><span class="p">)</span><span class="w"> </span><span class="n">FBType</span><span class="w"> </span><span class="n">type</span><span class="p">;</span><span class="w">  </span>
+<span class="k">@property</span><span class="w"> </span><span class="p">(</span><span class="k">nonatomic</span><span class="p">,</span><span class="w"> </span><span class="k">readonly</span><span class="p">)</span><span class="w"> </span><span class="kt">ptrdiff_t</span><span class="w"> </span><span class="n">offset</span><span class="p">;</span><span class="w">  </span>
+<span class="k">@property</span><span class="w"> </span><span class="p">(</span><span class="k">nonatomic</span><span class="p">,</span><span class="w"> </span><span class="k">readonly</span><span class="p">)</span><span class="w"> </span><span class="n">NSUInteger</span><span class="w"> </span><span class="n">index</span><span class="p">;</span><span class="w">  </span>
+<span class="k">@property</span><span class="w"> </span><span class="p">(</span><span class="k">nonatomic</span><span class="p">,</span><span class="w"> </span><span class="k">readonly</span><span class="p">,</span><span class="w"> </span><span class="n">nonnull</span><span class="p">)</span><span class="w"> </span><span class="n">Ivar</span><span class="w"> </span><span class="n">ivar</span><span class="p">;</span><span class="w">  </span>
+<span class="p">-</span> <span class="p">(</span><span class="n">nonnull</span><span class="w"> </span><span class="kt">instancetype</span><span class="p">)</span><span class="nf">initWithIvar:</span><span class="p">(</span><span class="n">nonnull</span><span class="w"> </span><span class="n">Ivar</span><span class="p">)</span><span class="nv">ivar</span><span class="p">;</span><span class="w">  </span>
+<span class="k">@end</span>
+</code></pre></div>
+<p>到目前为止我们直到了如何获取到某个对象的全部属性，这里包括强引用和弱引用，下面我们还要知道如何过滤弱引用。</p>
+<p>为了弄明白怎么过滤弱引用，我们要先了解Ivar Layout，获取Ivar Layout 是通过 FBGetLayoutAsIndexesForDescription方法获取的。</p>
+<p>Ivar Layout 是一系列的字符，每两个一组，比如\xmn，每一组 Ivar Layout 中第一位表示有m个非强属性，第二位表示接下来有n个强属性。</p>
+<p>FBGetLayoutAsIndexesForDescription 返回的就是所有强引用的Ivar Layout。</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="bp">NSIndexSet</span><span class="w"> </span><span class="o">*</span><span class="nf">FBGetLayoutAsIndexesForDescription</span><span class="p">(</span><span class="n">NSUInteger</span><span class="w"> </span><span class="n">minimumIndex</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">uint8_t</span><span class="w"> </span><span class="o">*</span><span class="n">layoutDescription</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="bp">NSMutableIndexSet</span><span class="w"> </span><span class="o">*</span><span class="n">interestingIndexes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="bp">NSMutableIndexSet</span><span class="w"> </span><span class="n">new</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="n">NSUInteger</span><span class="w"> </span><span class="n">currentIndex</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">minimumIndex</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">layoutDescription</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="sc">&#39;\x00&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">upperNibble</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">layoutDescription</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mh">0xf0</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">lowerNibble</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">layoutDescription</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mh">0xf</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="n">currentIndex</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">upperNibble</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="p">[</span><span class="n">interestingIndexes</span><span class="w"> </span><span class="n">addIndexesInRange</span><span class="o">:</span><span class="n">NSMakeRange</span><span class="p">(</span><span class="n">currentIndex</span><span class="p">,</span><span class="w"> </span><span class="n">lowerNibble</span><span class="p">)];</span><span class="w">  </span>
+<span class="w">        </span><span class="n">currentIndex</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">lowerNibble</span><span class="p">;</span><span class="w">  </span>
+<span class="w">        </span><span class="o">++</span><span class="n">layoutDescription</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">interestingIndexes</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>接下来我们就可以拿着上面找到的parsedLayout对ivars进行过滤，留下所有强引用的ivars。</p>
+<div class="highlight"><pre><code><span></span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="kt">id</span><span class="o">&lt;</span><span class="n">FBObjectReference</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">filteredIvars</span><span class="w"> </span><span class="o">=</span><span class="w">  </span>
+<span class="p">[</span><span class="n">ivars</span><span class="w"> </span><span class="n">filteredArrayUsingPredicate</span><span class="o">:</span><span class="p">[</span><span class="bp">NSPredicate</span><span class="w"> </span><span class="n">predicateWithBlock</span><span class="o">:^</span><span class="kt">BOOL</span><span class="p">(</span><span class="kt">id</span><span class="o">&lt;</span><span class="n">FBObjectReference</span><span class="o">&gt;</span><span class="w"> </span><span class="n">evaluatedObject</span><span class="p">,</span><span class="w">  </span>
+<span class="w">                                                                         </span><span class="bp">NSDictionary</span><span class="w"> </span><span class="o">*</span><span class="n">bindings</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">[</span><span class="n">parsedLayout</span><span class="w"> </span><span class="n">containsIndex</span><span class="o">:</span><span class="p">[</span><span class="n">evaluatedObject</span><span class="w"> </span><span class="n">indexInIvarLayout</span><span class="p">]];</span><span class="w">  </span>
+<span class="p">}]];</span>
+</code></pre></div>
+<p><strong>FBObjectiveCBlock</strong></p>
+<p>我们来看下Block对象对应的图节点FBObjectiveCBlock：</p>
+<div class="highlight"><pre><code><span></span><span class="p">-</span> <span class="p">(</span><span class="bp">NSSet</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nf">allRetainedObjects</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">//获取关联对象的全部强引用  </span>
+<span class="w">  </span><span class="bp">NSMutableArray</span><span class="w"> </span><span class="o">*</span><span class="n">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[[[</span><span class="nb">super</span><span class="w"> </span><span class="n">allRetainedObjects</span><span class="p">]</span><span class="w"> </span><span class="n">allObjects</span><span class="p">]</span><span class="w"> </span><span class="n">mutableCopy</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// Grab a strong reference to the object, otherwise it can crash while doing  </span>
+<span class="w">  </span><span class="c1">// nasty stuff on deallocation  </span>
+<span class="w">  </span><span class="bp">__attribute__</span><span class="p">((</span><span class="n">objc_precise_lifetime</span><span class="p">))</span><span class="w"> </span><span class="kt">id</span><span class="w"> </span><span class="n">anObject</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">self</span><span class="p">.</span><span class="n">object</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">blockObjectReference</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="k">__bridge</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">anObject</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="bp">NSArray</span><span class="w"> </span><span class="o">*</span><span class="n">allRetainedReferences</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FBGetBlockStrongReferences</span><span class="p">(</span><span class="n">blockObjectReference</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">id</span><span class="w"> </span><span class="n">object</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">allRetainedReferences</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*</span><span class="n">element</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FBWrapObjectGraphElement</span><span class="p">(</span><span class="nb">self</span><span class="p">,</span><span class="w"> </span><span class="n">object</span><span class="p">,</span><span class="w"> </span><span class="nb">self</span><span class="p">.</span><span class="n">configuration</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">element</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="p">[</span><span class="n">results</span><span class="w"> </span><span class="n">addObject</span><span class="o">:</span><span class="n">element</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">[</span><span class="bp">NSSet</span><span class="w"> </span><span class="n">setWithArray</span><span class="o">:</span><span class="n">results</span><span class="p">];</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这里最重要的是FBGetBlockStrongReferences方法：</p>
+<div class="highlight"><pre><code><span></span><span class="bp">NSArray</span><span class="w"> </span><span class="o">*</span><span class="nf">FBGetBlockStrongReferences</span><span class="p">(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">block</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">FBObjectIsBlock</span><span class="p">(</span><span class="n">block</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nb">nil</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="bp">NSMutableArray</span><span class="w"> </span><span class="o">*</span><span class="n">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="bp">NSMutableArray</span><span class="w"> </span><span class="n">new</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="o">**</span><span class="n">blockReference</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">block</span><span class="p">;</span><span class="w">  </span>
+<span class="w">    </span><span class="bp">NSIndexSet</span><span class="w"> </span><span class="o">*</span><span class="n">strongLayout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_GetBlockStrongLayout</span><span class="p">(</span><span class="n">block</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="p">[</span><span class="n">strongLayout</span><span class="w"> </span><span class="n">enumerateIndexesUsingBlock</span><span class="o">:^</span><span class="p">(</span><span class="n">NSUInteger</span><span class="w"> </span><span class="n">idx</span><span class="p">,</span><span class="w"> </span><span class="kt">BOOL</span><span class="w"> </span><span class="o">*</span><span class="n">stop</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="kt">void</span><span class="w"> </span><span class="o">**</span><span class="n">reference</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">blockReference</span><span class="p">[</span><span class="n">idx</span><span class="p">];</span><span class="w">  </span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">reference</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">reference</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">            </span><span class="kt">id</span><span class="w"> </span><span class="n">object</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">id</span><span class="p">)(</span><span class="o">*</span><span class="n">reference</span><span class="p">);</span><span class="w">  </span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">object</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">                </span><span class="p">[</span><span class="n">results</span><span class="w"> </span><span class="n">addObject</span><span class="o">:</span><span class="n">object</span><span class="p">];</span><span class="w">  </span>
+<span class="w">            </span><span class="p">}</span><span class="w">  </span>
+<span class="w">        </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}];</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">[</span><span class="n">results</span><span class="w"> </span><span class="n">autorelease</span><span class="p">];</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在FBGetBlockStrongReferences方法中通过<code>_GetBlockStrongLayout</code>获得Block所持有的强引用。在理解如何Block强引用之前我们先来回顾下Block的一些基础知识：</p>
+<div class="highlight"><pre><code><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">BlockLiteral</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="n">_isa</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">flags</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">reserved</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="n">_invoke</span><span class="p">)(</span><span class="kt">void</span><span class="w"> </span><span class="n">_</span><span class="p">,</span><span class="w"> </span><span class="err">…</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="k">struct</span><span class="w"> </span><span class="nc">BlockDescriptor</span><span class="w"> </span><span class="n">_descriptor</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// imported variables  </span>
+<span class="p">};</span>
+</code></pre></div>
+<p>首先Block对于它所捕获的Objective-C对象实例，都会在block结构体的下面存放这些持有的对象，并且会将强引用的对象排放在弱引用对象的前面。当Block将要释放时，会调用dispose<em>helper函数，该函数会调用所有需要进行内存管理的所捕获的对象，如Block、<strong>block变量、</strong>`attribute_</em>((NSObject))<code>变量或有constructor/destructor的C++ const对象。所以我们可以创建一系列的fake对象来模拟捕获的Objective-C对象实例，然后主动调用Block的</code>dispose_helper`方法，该方法会调用对象实例的release方法，我们只需要在fake对象中实现release方法，如果release方法被调用，所以该fake对象对应的真实变量为Objective-C对象实例。</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="bp">NSIndexSet</span><span class="w"> </span><span class="o">*</span><span class="nf">_GetBlockStrongLayout</span><span class="p">(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">block</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="k">struct</span><span class="w"> </span><span class="nc">BlockLiteral</span><span class="w"> </span><span class="o">*</span><span class="n">blockLiteral</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">block</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="cm">/**  </span>
+<span class="cm">   BLOCK_HAS_CTOR - Block has a C++ constructor/destructor, which gives us a good chance it retains  </span>
+<span class="cm">   objects that are not pointer aligned, so omit them.  </span>
+<span class="cm">   !BLOCK_HAS_COPY_DISPOSE - Block doesn&#39;t have a dispose function, so it does not retain objects and  </span>
+<span class="cm">   we are not able to blackbox it.  </span>
+<span class="cm">   */</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">blockLiteral</span><span class="o">-&gt;</span><span class="n">flags</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">BLOCK_HAS_CTOR</span><span class="p">)</span><span class="w">  </span>
+<span class="w">      </span><span class="o">||</span><span class="w"> </span><span class="o">!</span><span class="p">(</span><span class="n">blockLiteral</span><span class="o">-&gt;</span><span class="n">flags</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">BLOCK_HAS_COPY_DISPOSE</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">nil</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">//获取当前Block的dispose_helper方法  </span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">dispose_helper</span><span class="p">)(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">src</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">blockLiteral</span><span class="o">-&gt;</span><span class="n">descriptor</span><span class="o">-&gt;</span><span class="n">dispose_helper</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">//指针大小  </span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">ptrSize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">//计算出需要填充的fake对象数量  </span>
+<span class="w">  </span><span class="c1">// Figure out the number of pointers it takes to fill out the object, rounding up.  </span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">elements</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">blockLiteral</span><span class="o">-&gt;</span><span class="n">descriptor</span><span class="o">-&gt;</span><span class="n">size</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">ptrSize</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">ptrSize</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// 创建fack对象  </span>
+<span class="w">  </span><span class="c1">// Create a fake object of the appropriate length.  </span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">obj</span><span class="p">[</span><span class="n">elements</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">detectors</span><span class="p">[</span><span class="n">elements</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">elements</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">FBBlockStrongRelationDetector</span><span class="w"> </span><span class="o">*</span><span class="n">detector</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">FBBlockStrongRelationDetector</span><span class="w"> </span><span class="n">new</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="n">obj</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">detectors</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">detector</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">//调用dispose_helper，这时候会调用每个FBBlockStrongRelationDetector的release方法，这时候会将strong设置为YES  </span>
+<span class="w">  </span><span class="k">@autoreleasepool</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">dispose_helper</span><span class="p">(</span><span class="n">obj</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// Run through the release detectors and add each one that got released to the object&#39;s  </span>
+<span class="w">  </span><span class="c1">// strong ivar layout.  </span>
+<span class="w">  </span><span class="bp">NSMutableIndexSet</span><span class="w"> </span><span class="o">*</span><span class="n">layout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="bp">NSMutableIndexSet</span><span class="w"> </span><span class="n">indexSet</span><span class="p">];</span><span class="w">  </span>
+<span class="w"> </span><span class="c1">//判断strong是否为YES,如果为YES表示为强引用，则将其添加到layout  </span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">elements</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">FBBlockStrongRelationDetector</span><span class="w"> </span><span class="o">*</span><span class="n">detector</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">FBBlockStrongRelationDetector</span><span class="w"> </span><span class="o">*</span><span class="p">)(</span><span class="n">detectors</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">detector</span><span class="p">.</span><span class="n">isStrong</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="p">[</span><span class="n">layout</span><span class="w"> </span><span class="n">addIndex</span><span class="o">:</span><span class="n">i</span><span class="p">];</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="c1">// Destroy detectors  </span>
+<span class="w">    </span><span class="p">[</span><span class="n">detector</span><span class="w"> </span><span class="n">trueRelease</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">layout</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>FBObjectiveCNSCFTimer*</strong></p>
+<p>FBObjectiveCNSCFTimer比较简单它会通过runloop去获取CFRunLoopTimerGetContext，然后通过context查看是否有target或者，userInfo如果有假设它强持有这些对象的引用。</p>
+<div class="highlight"><pre><code><span></span><span class="p">-</span> <span class="p">(</span><span class="bp">NSSet</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nf">allRetainedObjects</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// Let&#39;s retain our timer  </span>
+<span class="w">  </span><span class="bp">__attribute__</span><span class="p">((</span><span class="n">objc_precise_lifetime</span><span class="p">))</span><span class="w"> </span><span class="bp">NSTimer</span><span class="w"> </span><span class="o">*</span><span class="n">timer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">self</span><span class="p">.</span><span class="n">object</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">timer</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">nil</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="bp">NSMutableSet</span><span class="w"> </span><span class="o">*</span><span class="n">retained</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[[</span><span class="nb">super</span><span class="w"> </span><span class="n">allRetainedObjects</span><span class="p">]</span><span class="w"> </span><span class="n">mutableCopy</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="n">CFRunLoopTimerContext</span><span class="w"> </span><span class="n">context</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">//通过runloop去获取CFRunLoopTimerGetContext  </span>
+<span class="w">  </span><span class="n">CFRunLoopTimerGetContext</span><span class="p">((</span><span class="n">CFRunLoopTimerRef</span><span class="p">)</span><span class="n">timer</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">context</span><span class="p">);</span><span class="w">  </span>
+<span class="w">  </span><span class="c1">// If it has a retain function, let&#39;s assume it retains strongly  </span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">context</span><span class="p">.</span><span class="n">info</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">context</span><span class="p">.</span><span class="k">retain</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="n">_FBNSCFTimerInfoStruct</span><span class="w"> </span><span class="n">infoStruct</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="p">(</span><span class="n">_FBNSCFTimerInfoStruct</span><span class="w"> </span><span class="o">*</span><span class="p">)(</span><span class="n">context</span><span class="p">.</span><span class="n">info</span><span class="p">);</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">infoStruct</span><span class="p">.</span><span class="n">target</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*</span><span class="n">element</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FBWrapObjectGraphElementWithContext</span><span class="p">(</span><span class="nb">self</span><span class="p">,</span><span class="w"> </span><span class="n">infoStruct</span><span class="p">.</span><span class="n">target</span><span class="p">,</span><span class="w"> </span><span class="nb">self</span><span class="p">.</span><span class="n">configuration</span><span class="p">,</span><span class="w"> </span><span class="l">@[</span><span class="s">@&quot;target&quot;</span><span class="l">]</span><span class="p">);</span><span class="w">  </span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">element</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="p">[</span><span class="n">retained</span><span class="w"> </span><span class="n">addObject</span><span class="o">:</span><span class="n">element</span><span class="p">];</span><span class="w">  </span>
+<span class="w">      </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">infoStruct</span><span class="p">.</span><span class="n">userInfo</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="n">FBObjectiveCGraphElement</span><span class="w"> </span><span class="o">*</span><span class="n">element</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FBWrapObjectGraphElementWithContext</span><span class="p">(</span><span class="nb">self</span><span class="p">,</span><span class="w"> </span><span class="n">infoStruct</span><span class="p">.</span><span class="n">userInfo</span><span class="p">,</span><span class="w"> </span><span class="nb">self</span><span class="p">.</span><span class="n">configuration</span><span class="p">,</span><span class="w"> </span><span class="l">@[</span><span class="s">@&quot;userInfo&quot;</span><span class="l">]</span><span class="p">);</span><span class="w">  </span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">element</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">        </span><span class="p">[</span><span class="n">retained</span><span class="w"> </span><span class="n">addObject</span><span class="o">:</span><span class="n">element</span><span class="p">];</span><span class="w">  </span>
+<span class="w">      </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">retained</span><span class="p">;</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<h2>FBAllocationTracker</h2>
+<p><a href="https://github.com/facebook/FBAllocationTracker">FBAllocationTracker</a>我们上面给大家分析了<a href="https://tbfungeek.github.io/2019/11/26/FBRetainCycleDetector-FBAllocationTracker-FBMemoryProfiler-%E6%BA%90%E7%A0%81%E8%A7%A3%E6%9E%90/">FBRetainCycleDetector</a>，它主要的功能是查找到待检测对象的全部强引用对象，这些强引用对象便是搜索循环引用的有向图节点， FBRetainCycleDetector通过深度优先原则遍历整个对象图，如果在整个路径中发现有存在重复访问的情况，便认为是一个循环引用，FBRetainCycleDetector一般先通过MLeaksFinder或者FBAllocationTracker这些开源库找到可疑的对象，然后再通过FBRetainCycleDetector对这个对象进行检查是否存在循环引用。</p>
+<p>接下来我们给大家介绍下FBAllocationTracker，下面是它的最基本用法：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">#import &lt;FBAllocationTracker/FBAllocationTrackerManager.h&gt;  </span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">argv</span><span class="p">[])</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="p">[[</span><span class="n">FBAllocationTrackerManager</span><span class="w"> </span><span class="n">sharedManager</span><span class="p">]</span><span class="w"> </span><span class="n">startTrackingAllocations</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="p">[[</span><span class="n">FBAllocationTrackerManager</span><span class="w"> </span><span class="n">sharedManager</span><span class="p">]</span><span class="w"> </span><span class="n">enableGenerations</span><span class="p">];</span><span class="w">  </span>
+<span class="w">  </span><span class="k">@autoreleasepool</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">UIApplicationMain</span><span class="p">(</span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="n">argv</span><span class="p">,</span><span class="w"> </span><span class="nb">nil</span><span class="p">,</span><span class="w"> </span><span class="n">NSStringFromClass</span><span class="p">([</span><span class="n">AppDelegate</span><span class="w"> </span><span class="k">class</span><span class="p">]));</span><span class="w">  </span>
+<span class="w">  </span><span class="p">}</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<div class="highlight"><pre><code><span></span><span class="p">-</span> <span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="nf">startTrackingAllocations</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">FB</span><span class="o">::</span><span class="n">AllocationTracker</span><span class="o">::</span><span class="n">beginTracking</span><span class="p">();</span><span class="w">  </span>
+<span class="p">}</span><span class="w">  </span>
+<span class="p">-</span> <span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="nf">enableGenerations</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">  </span><span class="n">dispatch_sync</span><span class="p">(</span><span class="n">_queue</span><span class="p">,</span><span class="w"> </span><span class="o">^</span><span class="p">{</span><span class="w">  </span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nb">self</span><span class="o">-&gt;</span><span class="n">_generationsClients</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span>
+<span class="w">      </span><span class="n">FB</span><span class="o">::</span><span class="n">AllocationTracker</span><span class="o">::</span><span class="n">enableGenerations</span><span class="p">();</span><span class="w">  </span>
+<span class="w">      </span><span class="n">FB</span><span class="o">::</span><span class="n">AllocationTracker</span><span class="o">::</span><span class="n">markGeneration</span><span class="p">();</span><span class="w">  </span>
+<span class="w">    </span><span class="p">}</span><span class="w">  </span>
+<span class="w">    </span><span class="nb">self</span><span class="o">-&gt;</span><span class="n">_generationsClients</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w">  </span>
+<span class="w">  </span><span class="p">});</span><span class="w">  </span>
+<span class="p">}</span>
+</code></pre></div>
+<hr>
+
+<h4><p>原文出处：<a href='https://meng03.github.io/2019/08/01/FBAllocationTracker%E6%BA%90%E7%A0%81%E9%98%85%E8%AF%BB/' target='blank'>FBAllocationTracker源码阅读</a></p></h4>
+<p><code>FBAllocationTracker</code>有两种模式，跟踪对象，基数allocs/deallocs。</p>
+<h2>主要类分析</h2>
+<h3>FBAllocationTrackerManager</h3>
+<p>本类是提供给使用者的最外层包装。</p>
+<div class="highlight"><pre><code><span></span><span class="k">@interface</span> <span class="nc">FBAllocationTrackerManager</span> : <span class="bp">NSObject</span>
+
+<span class="p">+</span> <span class="p">(</span><span class="n">nullable</span><span class="w"> </span><span class="kt">instancetype</span><span class="p">)</span><span class="nf">sharedManager</span><span class="p">;</span>
+<span class="c1">//启动track</span>
+<span class="p">-</span> <span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="nf">startTrackingAllocations</span><span class="p">;</span>
+<span class="p">-</span> <span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="nf">stopTrackingAllocations</span><span class="p">;</span>
+<span class="p">-</span> <span class="p">(</span><span class="kt">BOOL</span><span class="p">)</span><span class="nf">isAllocationTrackerEnabled</span><span class="p">;</span>
+
+<span class="p">-</span> <span class="p">(</span><span class="n">nullable</span><span class="w"> </span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="n">FBAllocationTrackerSummary</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nf">currentAllocationSummary</span><span class="p">;</span>
+<span class="c1">//使用tracking对象模式</span>
+<span class="p">-</span> <span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="nf">enableGenerations</span><span class="p">;</span>
+<span class="p">-</span> <span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="nf">disableGenerations</span><span class="p">;</span>
+<span class="c1">//类似Instruments中allocation提供的mark功能</span>
+<span class="p">-</span> <span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="nf">markGeneration</span><span class="p">;</span>
+
+<span class="p">-</span> <span class="p">(</span><span class="n">nullable</span><span class="w"> </span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="bp">NSArray</span><span class="o">&lt;</span><span class="n">FBAllocationTrackerSummary</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nf">currentSummaryForGenerations</span><span class="p">;</span>
+<span class="p">-</span> <span class="p">(</span><span class="n">nullable</span><span class="w"> </span><span class="bp">NSArray</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nf">instancesForClass:</span><span class="p">(</span><span class="n">nonnull</span><span class="w"> </span><span class="n">__unsafe_unretained</span><span class="w"> </span><span class="kt">Class</span><span class="p">)</span><span class="nv">aCls</span>
+<span class="w">                           </span><span class="nl">inGeneration</span><span class="p">:(</span><span class="n">NSInteger</span><span class="p">)</span><span class="nv">generation</span><span class="p">;</span>
+<span class="p">-</span> <span class="p">(</span><span class="n">nullable</span><span class="w"> </span><span class="bp">NSArray</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nf">instancesOfClasses:</span><span class="p">(</span><span class="n">nonnull</span><span class="w"> </span><span class="bp">NSArray</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nv">classes</span><span class="p">;</span>
+<span class="p">-</span> <span class="p">(</span><span class="n">nullable</span><span class="w"> </span><span class="bp">NSSet</span><span class="o">&lt;</span><span class="kt">Class</span><span class="o">&gt;</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="nf">trackedClasses</span><span class="p">;</span>
+<span class="k">@end</span>
+</code></pre></div>
+<p>实现中，多是通过<code>FBAllocationTrackerImpl</code>来完成。</p>
+<h3>FBAllocationTrackerImpl</h3>
+<div class="highlight"><pre><code><span></span><span class="n">AllocationSummary</span><span class="w"> </span><span class="nf">allocationTrackerSummary</span><span class="p">();</span>
+<span class="c1">//启动&amp;关闭track</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">beginTracking</span><span class="p">();</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">endTracking</span><span class="p">();</span>
+<span class="kt">bool</span><span class="w"> </span><span class="nf">isTracking</span><span class="p">();</span>
+<span class="c1">//启动&amp;关闭generation</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">enableGenerations</span><span class="p">();</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">disableGenerations</span><span class="p">();</span>
+<span class="c1">//mark</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">markGeneration</span><span class="p">();</span>
+
+<span class="n">FullGenerationSummary</span><span class="w"> </span><span class="nf">generationSummary</span><span class="p">();</span>
+</code></pre></div>
+<p>这个类本身实现了allocs和deallocs计数，通过<code>Generation</code>类实现track对象功能，后者下面会说到。</p>
+<p>与其他内存监控相关库类似，首先需要 hook <code>alloc</code> 和 <code>dealloc</code>。这部分逻辑大同小异。</p>
+<p><strong>准备 - 将 <code>allocWithZone</code>与 <code>dealloc</code> 的函数实现，复制到准备好的空方法上</strong></p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">prepareOriginalMethods</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">_didCopyOriginalMethods</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">// prepareOriginalMethods called from turnOn/Off which is synced by</span>
+<span class="w">    </span><span class="c1">// _lock, this is thread-safe</span>
+<span class="w">    </span><span class="n">_didCopyOriginalMethods</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+
+<span class="w">      </span><span class="c1">//copy方法的实现到fb_originalAllocWithZone和fb_originalDealloc</span>
+<span class="w">      </span><span class="c1">//使用_didCopyOriginalMethods保证只copy一次</span>
+<span class="w">    </span><span class="n">replaceSelectorWithSelector</span><span class="p">([</span><span class="bp">NSObject</span><span class="w"> </span><span class="k">class</span><span class="p">],</span>
+<span class="w">                                </span><span class="k">@selector</span><span class="p">(</span><span class="n">fb_originalAllocWithZone</span><span class="o">:</span><span class="p">),</span>
+<span class="w">                                </span><span class="k">@selector</span><span class="p">(</span><span class="n">allocWithZone</span><span class="o">:</span><span class="p">),</span>
+<span class="w">                                </span><span class="n">FBClassMethod</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">replaceSelectorWithSelector</span><span class="p">([</span><span class="bp">NSObject</span><span class="w"> </span><span class="k">class</span><span class="p">],</span>
+<span class="w">                                </span><span class="k">@selector</span><span class="p">(</span><span class="n">fb_originalDealloc</span><span class="p">),</span>
+<span class="w">                                </span><span class="n">sel_registerName</span><span class="p">(</span><span class="s">&quot;dealloc&quot;</span><span class="p">),</span>
+<span class="w">                                </span><span class="n">FBInstanceMethod</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+</code></pre></div>
+<p><strong>开始 - 用自己的alloc和dealloc替换系统的</strong></p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">turnOnTracking</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="n">prepareOriginalMethods</span><span class="p">();</span>
+<span class="n">replaceSelectorWithSelector</span><span class="p">([</span><span class="bp">NSObject</span><span class="w"> </span><span class="k">class</span><span class="p">],</span>
+<span class="w">                            </span><span class="k">@selector</span><span class="p">(</span><span class="n">allocWithZone</span><span class="o">:</span><span class="p">),</span>
+<span class="w">                            </span><span class="k">@selector</span><span class="p">(</span><span class="n">fb_newAllocWithZone</span><span class="o">:</span><span class="p">),</span>
+<span class="w">                            </span><span class="n">FBClassMethod</span><span class="p">);</span>
+<span class="n">replaceSelectorWithSelector</span><span class="p">([</span><span class="bp">NSObject</span><span class="w"> </span><span class="k">class</span><span class="p">],</span>
+<span class="w">                            </span><span class="n">sel_registerName</span><span class="p">(</span><span class="s">&quot;dealloc&quot;</span><span class="p">),</span>
+<span class="w">                            </span><span class="k">@selector</span><span class="p">(</span><span class="n">fb_newDealloc</span><span class="p">),</span>
+<span class="w">                            </span><span class="n">FBInstanceMethod</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>关闭 - 用一开始保存的系统方法，再替换回去</strong></p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">turnOffTracking</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">prepareOriginalMethods</span><span class="p">();</span>
+
+<span class="w">    </span><span class="n">replaceSelectorWithSelector</span><span class="p">([</span><span class="bp">NSObject</span><span class="w"> </span><span class="k">class</span><span class="p">],</span>
+<span class="w">                                </span><span class="k">@selector</span><span class="p">(</span><span class="n">allocWithZone</span><span class="o">:</span><span class="p">),</span>
+<span class="w">                                </span><span class="k">@selector</span><span class="p">(</span><span class="n">fb_originalAllocWithZone</span><span class="o">:</span><span class="p">),</span>
+<span class="w">                                </span><span class="n">FBClassMethod</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">replaceSelectorWithSelector</span><span class="p">([</span><span class="bp">NSObject</span><span class="w"> </span><span class="k">class</span><span class="p">],</span>
+<span class="w">                                </span><span class="n">sel_registerName</span><span class="p">(</span><span class="s">&quot;dealloc&quot;</span><span class="p">),</span>
+<span class="w">                                </span><span class="k">@selector</span><span class="p">(</span><span class="n">fb_originalDealloc</span><span class="p">),</span>
+<span class="w">                                </span><span class="n">FBInstanceMethod</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>自定义的<code>alloc</code>和<code>dealloc</code>方法除了调用系统实现外，额外调用了记录该类的方法。</p>
+<div class="highlight"><pre><code><span></span><span class="o">+</span><span class="w"> </span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="n">fb_newAllocWithZone</span><span class="o">:</span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="n">zone</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">id</span><span class="w"> </span><span class="n">object</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">self</span><span class="w"> </span><span class="n">fb_originalAllocWithZone</span><span class="o">:</span><span class="n">zone</span><span class="p">];</span>
+<span class="w">  </span><span class="n">FB</span><span class="o">::</span><span class="n">AllocationTracker</span><span class="o">::</span><span class="n">incrementAllocations</span><span class="p">(</span><span class="n">object</span><span class="p">);</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">object</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">fb_newDealloc</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="n">FB</span><span class="o">::</span><span class="n">AllocationTracker</span><span class="o">::</span><span class="n">incrementDeallocations</span><span class="p">(</span><span class="n">self</span><span class="p">);</span>
+<span class="w">  </span><span class="p">[</span><span class="n">self</span><span class="w"> </span><span class="n">fb_originalDealloc</span><span class="p">];</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>incrementAllocations</code>做两件事，将该对象的allocs记数+1。如果启用了<code>generation</code>，就将对象记录到<code>generation</code>中。<code>incrementDeallocations</code>是相反的步骤。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">incrementAllocations</span><span class="p">(</span><span class="n">__unsafe_unretained</span><span class="w"> </span><span class="kt">id</span><span class="w"> </span><span class="n">obj</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">Class</span><span class="w"> </span><span class="n">aCls</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">obj</span><span class="w"> </span><span class="k">class</span><span class="p">];</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">_shouldTrackClass</span><span class="p">(</span><span class="n">aCls</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">lock_guard</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="o">&gt;</span><span class="w"> </span><span class="n">l</span><span class="p">(</span><span class="o">*</span><span class="n">_lock</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">_trackingInProgress</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="p">(</span><span class="o">*</span><span class="n">_allocations</span><span class="p">)[</span><span class="n">aCls</span><span class="p">]</span><span class="o">++</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">_generationManager</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="n">_generationManager</span><span class="o">-&gt;</span><span class="n">addObject</span><span class="p">(</span><span class="n">obj</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>Generation</h3>
+<p>generation主要是用来记录对象。因为可以分代记录。所以generation中有两个集合对象。每一代的对象，记录在同一个<code>GenerationMap</code>中。所有的<code>GenerationMap</code>都存在<code>GenerationList</code>中。<code>markGeneration</code>会创建一个新的<code>GenerationMap</code>。</p>
+<h2>总结</h2>
+<p><code>FBAllocationTracker</code>通过对<code>alloc</code>和<code>dealloc</code>的hook。记录创建和销毁的对象。这部分和其他内存相关的监控类似。此外借鉴了 instruments 工具中 allocation 部分的 markgeneration，提供了分代记录的功能。实现也比较容易，通过集合来存储generation。每次记录对象，就从集合中取最后一个generation来添加即可。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "FBRetainCycleDetector与FBAllocationTracker源码解析.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

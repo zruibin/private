@@ -1,0 +1,470 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>iOS管理对象内存的数据结构以及操作算法--SideTables、RefcountMap、weak_table_t - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="iOS管理对象内存的数据结构以及操作算法--SideTables、RefcountMap、weak_table_t,iOS,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="iOS管理对象内存的数据结构以及操作算法--SideTables、RefcountMap、weak_table_t" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>iOS管理对象内存的数据结构以及操作算法--SideTables、RefcountMap、weak_table_t</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2017-03-21 13:32
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_ios.html' class='article_tag'>iOS</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='http://www.jianshu.com/p/ef6d9bf8fe59' target='blank'>iOS管理对象内存的数据结构以及操作算法--SideTables、RefcountMap、weak_table_t-一</a></p></h4>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/dfb08365-0002-4ef1-a30f-71e2553e1ed7.png" alt="144"></p>
+<p>第一次写文章语言表达能力太差。如果有哪里表达的不够清晰可以直接评论回复我,我来加以修改。这篇文章力求脱离语言的特性，咱们多讲结构和算法。即使你不懂iOS开发，不懂Objective-C语言也可以看这篇文章。</p>
+<p><strong>通过阅读本文你可以了解iOS管理对象内存的数据结构是什么样的，以及操作逻辑。对象的reatin、release、dealloc操作是该通过怎样的算法实现的，weak指针是如何自动变nil的。</strong></p>
+<p><em>本文所阐述的内容代码部分在苹果的开源项目<a href="https://opensource.apple.com/tarballs/objc4/objc4-706.tar.gz">objc4-706</a>中。</em></p>
+<p><strong> 本文流程:</strong></p>
+<p>一、引用计数的概念<br>
+二、抛出问题<br>
+三、数据结构分析(<em> SideTables、RefcountMap、weak_table_t</em>)</p>
+<h2>一、引用计数的概念</h2>
+<p>    <strong>这一部分是写给非iOS工程师的，便于大家了解引用计数、循环引用、弱引用的概念。如果已经了解相关概念可以直接跳过第一部分。</strong></p>
+<p>    大家都知道想要占用一块内存很容易，咱们 new 一个对象就完事儿了。但是什么时候回收？不回收自然是不成的，内存再大也不能完全不回收利用。回收早了的话
+,真正用到的时候会出现<a href="http://baike.baidu.com/link?url=izpSQGxQwYzBBe8OD686QlTHVKsUzRScek12RwXJmwaXrv_lPEhDN6a_slk5ykaxdkw-0Hi1AdW_VYuitO6aSJMovKaq8Cd86sD2lvLv-X2mf-FDzzjRSUi8ftcmvLGb">野指针</a>问题。回收晚了又浪费宝贵的内存资源。咱们得拿出一套管理内存的方法才成。本文只讨论iOS管理对象内存的<a href="http://baike.baidu.com/link?url=t_cX2bswGvuy2ayE-9wSuZY97xAsoD-5bfMAWz6AiOg1UdA6y94mlAYI9l3b3N2Gs1iMOIWaKzFDPYYQumuVHzbpwfHsJUDwxuNrQHZaHq5Yp_02-2Fb4QxsXF-t4w5H">引用计数</a>法。</p>
+<p>内存中每一个对象都有一个属于自己的引用计数器。当某个对象A被另一个家伙引用时，A的引用计数器就+1,如果再有一个家伙引用到A，那么A的引用计数器就再+1。当其中某个家伙不再引用A了，A的引用计数器会-1。直到A的引用计数减到了0,那么就没有人再需要它了，就是时候把它释放掉了。</p>
+<blockquote><p>在引用计数中，每一个对象负责维护对象所有引用的计数值。当一个新的引用指向对象时，引用计数器就递增，当去掉一个引用时，引用计数就递减。当引用计数到零时，该对象就将释放占有的资源。</p>
+</blockquote>
+<p>    采用上述机制看似就可以知道对象在内存中应该何时释放了，但是还有一个<strong>循环引用</strong>的问题需要我们解决。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/1834534-860c94fd8092579f.png" alt=""></p>
+<p>现在内存中有两个对象，A和B。</p>
+<div class="highlight"><pre><code><span></span><span class="n">A</span><span class="p">.</span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">B</span><span class="p">;</span>
+<span class="n">B</span><span class="p">.</span><span class="n">y</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">A</span><span class="p">;</span>
+</code></pre></div>
+<ul>
+<li>假如A是做视频处理的，B是处理音频的。</li>
+<li>现在A的引用计数是1(被B.y引用)。</li>
+<li>现在B的引用计数也是1(被A.x引用)。</li>
+<li>那么当A处理完它的视频工作以后,发现自己的引用计数是1不是0,他心里想"哦还有人需要我，我还不能被释放。"</li>
+<li>当B处理完音频操作以后他发现他的引用计数也是1，他心里也觉得"我还不能被释放还有人需要我。"</li>
+</ul>
+<p>    这样两个对象互相循环引用着对方谁都不会被释放就造成了内存泄露。为了解决这个问题我们来引入<strong>弱引用</strong>的概念。<br>
+    弱引用指向要引用的对象，但是不会增加那个对象的引用计数。就像下面这个图这样。<em>虚线为弱引用</em> (艾玛我画图画的真丑)</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/1834534-ad3f7fa366892ae0.png" alt=""></p>
+<p>EFDCA2C8-4E42-48EF-AE5F-3D4607B6CF68.png</p>
+<div class="highlight"><pre><code><span></span><span class="n">A</span><span class="p">.</span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">B</span><span class="p">;</span>
+<span class="w"> </span><span class="n">__weak</span><span class="w"> </span><span class="n">B</span><span class="p">.</span><span class="n">y</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">A</span><span class="p">;</span>
+</code></pre></div>
+<p>    这里我们让B的y是一个弱引用，它还可以指向A但是不增加A的引用计数。</p>
+<ul>
+<li>所以A的引用计数是0，B的引用计数是1(被A.x引用)。</li>
+<li>当A处理完他的视频操作以后，发现自己的引用计数是0了，ok他可以释放了。</li>
+<li>随之A.x也被释放了。(<em>A.x是对象A内部的一个变量</em>)</li>
+<li>A.x被释放了以后B的引用计数就也变成0了。</li>
+<li>然后B处理完他的音频操作以后也可以释放了。</li>
+</ul>
+<p>循环引用的问题解决了。我们不妨思考一下，这套方案还会不会有其它的问题？<br>
+思考中...<br>
+还有一个<a href="http://baike.baidu.com/link?url=bfnt4PdZJjVq6t63YtFnJpG8ib__HRD8NWVxhSJK5rfhJ3RRVkLdh5iHOxNmVNwtSY-COabAK53iuwmeJRuTeLtNThvDXnUPhDIGKP4OxEP0Elwj7qO3vCthHWjkXdeu">野指针</a>的问题等待我们解决。</p>
+<ul>
+<li>如果A先处理完他的视频任务之后被释放了。</li>
+<li>这时候B还在处理中。</li>
+<li>但是处理过程中B需要访问A (B.y)来获取一些数据。</li>
+<li>由于A已经被释放了,所以再访问的时候就造成了<a href="http://baike.baidu.com/link?url=_2Vb8x8HMdPRZLBVidn17g89t6rqi9Ld8foOCueYi4BuXgGX1E_LC7u57DTXTRP-SBPXLue8VJMDyeiSfjZ5aGKW3iOAHL4glOINDiJV10LGwRP9D1X-_8s7U0dsR1jw">野指针</a>错误。</li>
+</ul>
+<p>    因此我们还需要一个机制，可以让A释放之后，我再访问所有指向A的指针(<em>比如B.y</em>)的时候都可以友好的得知A已经不存在了,从而避免出错。<br>
+    我们这里假设用一个数组,把所有指向A的弱引用都存起来，然后当A被释放的时候把数组内所有的弱引用都设置成nil(<em>相当于其他语言中的NULL</em>)。这样当B再访问B.y的时候就会返回nil。通过判空的方式就可以避免野指针错误了。当然说起来简单，下面我们来看看苹果是如何实现的。</p>
+<h2>二、抛出问题</h2>
+<p>    前面絮絮叨叨说了一大堆，其实真正现在才抛出本次讨论的问题。</p>
+<ul>
+<li>1、如何实现的引用计数管理,控制加一减一和释放？</li>
+<li>2、为何维护的weak指针防止野指针错误？</li>
+</ul>
+<h2>三、数据结构分析(<em> SideTables、RefcountMap、weak_table_t</em>)</h2>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/1834534-bf215d2f442c8360.png" alt=""></p>
+<p><em>很多人反应看了这篇文章后还是对SideTables、SideTable、RefcountMap三者的关系不太清楚。可能是我这篇文章讲述的不太好。大家可以看我<a href="http://www.jianshu.com/p/8577286af88e">第二篇文章</a>中有一个大学宿舍楼的例子，结合这个例子看或许可以有助于理解三者关系。</em><br>
+咱们先来讨论最顶层的<strong>SideTables</strong></p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/1834534-622afd1fccd3417f.png" alt=""></p>
+<p>EA251BCE-F990-4CA6-B66E-8822D8089D61.png</p>
+<p>    为了管理所有对象的引用计数和weak指针，苹果创建了一个全局的SideTables，虽然名字后面有个"s"不过他其实是一个全局的<a href="http://baike.baidu.com/link?url=7FG7NJyFBiice70Ib-WBBEirge0CDvMcc_TsgKQWc5X9OMS_rLARGjoaRtVc_Bz59FwAQ31Dci_McEk1F5k-Na">Hash</a>表，里面的内容装的都是<strong>SideTable</strong>结构体而已。它使用对象的<strong>内存地址当它的key</strong>。管理引用计数和weak指针就靠它了。</p>
+<p>因为对象引用计数相关操作应该是<strong>原子性</strong>的。不然如果多个线程同时去写一个对象的引用计数，那就会造成数据错乱，失去了内存管理的意义。同时又因为内存中对象的数量是<strong>非常非常庞大</strong>的需要非常频繁的操作SideTables，所以<strong>不</strong>能对整个Hash表加锁。苹果采用了<strong>分离锁</strong>技术。</p>
+<blockquote><p>分离锁和分拆锁的区别</p>
+</blockquote>
+<p>降低锁竞争的另一种方法是降低线程请求锁的频率。分拆锁 (lock splitting) 和分离锁 (lock striping) 是达到此目的两种方式。相互独立的状态变量，应该使用独立的锁进行保护。有时开发人员会错误地使用一个锁保护所有的状态变量。这些技术减小了锁的粒度，实现了更好的可伸缩性。但是，这些锁需要仔细地分配，以降低发生死锁的危险。</p>
+<p>如果一个锁守护多个相互独立的状态变量，你可能能够通过分拆锁，使每一个锁守护不同的变量，从而改进可伸缩性。通过这样的改变，使每一个锁被请求的频率都变小
+了。分拆锁对于中等竞争强度的锁，能够有效地把它们大部分转化为非竞争的锁，使性能和可伸缩性都得到提高。</p>
+<p>分拆锁有时候可以被扩展，分成若干加锁块的集合，并且它们归属于相互独立的对象，这样的情况就是分离锁。</p>
+<p>因为是使用对象的内存地址当key所以Hash的分部也很平均。假设Hash表有n个元素，则可以将Hash的冲突减少到n分之一，支持n路的并发写操作。</p>
+<h3>SideTable</h3>
+<p>    当我们通过SideTables[key]来得到SideTable的时候，SideTable的结构如下:</p>
+<h3>1,一把自旋锁。<em>spinlock_t  slock;</em></h3>
+<blockquote><p><a href="http://baike.baidu.com/link?url=ypF8fpnendw8aEfveJ9tsIuuHLAi32jRIJcgdEniwhkLoVr8NNBejvqyNe2g6CSgteoRDZkzF5FDByZNBRXRQq3r5dUG-UDaEXiZni-NfnpnYrhnnGfvQQDdSRpRl8UZ">自旋锁</a>比较适用于锁使用者保持锁时间比较短的情况。正是由于自旋锁使用者一般保持锁时间非常短，因此选择自旋而不是睡眠是非常必要的，自旋锁的效率远高于互斥锁。信号量和读写信号量适合于保持时间较长的情况，它们会导致调用者睡眠，因此只能在进程上下文使用，而自旋锁适合于保持时间非常短的情况，它可以在任何上下文使用。</p>
+</blockquote>
+<p>    它的作用是在操作引用技术的时候对SideTable加锁，避免数据错误。<br>
+    
+    苹果在对锁的选择上可以说是精益求精。苹果知道对于引用计数的操作其实是非常快的。所以选择了虽然不是那么高级但是确实效率高的自旋锁，我在这里只能说"双击
+666，老铁们！ 没毛病！"</p>
+<h3>2,引用计数器 RefcountMap  refcnts;</h3>
+<p>    对象具体的引用计数数量是记录在这里的。<br>
+    这里注意RefcountMap其实是个C++的<a href="http://blog.sina.com.cn/s/blog_61533c9b0100fa7w.html">Map</a>。为什么Hash以后还需要个Map？其实苹果采用的是分块化的方法。<br>
+    
+    举个例子<br>
+    假设现在内存中有16个对象。<br>
+0x0000、0x0001、...... 0x000e、0x000f<br>
+    咱们创建一个SideTables[8]来存放这16个对象，那么查找的时候发生Hash冲突的概率就是八分之一。<br>
+    假设SideTables[0x0000]和SideTables[0x0x000f]冲突,映射到相同的结果。</p>
+<div class="highlight"><pre><code><span></span><span class="n">SideTables</span><span class="p">[</span><span class="mh">0x0000</span><span class="p">]</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">SideTables</span><span class="p">[</span><span class="mh">0x0</span><span class="n">x000f</span><span class="p">]</span><span class="w">  </span><span class="o">==&gt;</span><span class="w"> </span><span class="n">都指向同一个SideTable</span>
+</code></pre></div>
+<p>    苹果把两个对象的内存管理都放到里同一个SideTable中。你在这个SideTable中需要再次调用<em>table.refcnts.find(0x0000</em>)或者<em>table.refcnts.find(0x000f)_来找到他们真正的引用计数器。<br>
+    
+    这里是一个分流。内存中对象的数量实在是太庞大了我们通过第一个Hash表只是过滤了第一次，然后我们还需要再通过这个Map才能精确的定位到我们要找的对象
+的引用计数器。<br>
+_引用计数器的存储结构如下</em><br>
+<strong>注意这里讨论的是table.refcnts.find(this)得到的value的结构,至于RefcountMap是什么结构我们在<a href="http://www.jianshu.com/p/8577286af88e">下一篇文章</a>中讨论</strong></p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/1834534-743f3b95f3a107c1.png" alt=""></p>
+<p>77490066-7101-4F70-BF50-604D3658F7C4.png</p>
+<p>引用计数器的数据类型是:</p>
+<div class="highlight"><pre><code><span></span><span class="k">typedef</span><span class="w"> </span><span class="n">__darwin_size_t</span><span class="w">        </span><span class="kt">size_t</span><span class="p">;</span>
+</code></pre></div>
+<p>再进一步看它的定义其实是<code>unsigned long</code>，在32位和64位操作系统中，它分别占用32和64个bit。<br>
+苹果经常使用<a href="http://c.biancheng.net/cpp/html/1611.html">bit mask</a>技术。这里也不例外。拿32位系统为例的话，可以理解成有32个盒子排成一排横着放在你面前。盒子里可以装0或者1两个数字。我们规定最后边的盒子是低位，左边的盒子是高位。</p>
+<ul>
+<li>(1UL&lt;&lt;0)的意思是将一个"1"放到最右侧的盒子里，然后将这个"1"向左移动0位(就是原地不动):0b0000 0000 0000 0000 0000 0000 0000 0001</li>
+<li>(1UL&lt;&lt;1)的意思是将一个"1"放到最右侧的盒子里,然后将这个"1"向左移动1位:0b0000 0000 0000 0000 0000 0000 0000 0010</li>
+</ul>
+<p>下面来分析引用计数器(<em>图中右侧</em>)的结构,从低位到高位。</p>
+<ul>
+<li><p>(1UL&lt;&lt;0)    WEAKLY<em>REFERENCED<br>
+表示是否有弱引用指向这个对象，如果有的话(值为1)在对象释放的时候需要把所有指向它的弱引用都变成nil(_相当于其他语言的NULL</em>)，避免野指针错误。</p>
+</li>
+<li><p>(1UL&lt;&lt;1)    DEALLOCATING<br>
+表示对象是否正在被释放。1正在释放，0没有。</p>
+</li>
+<li><p>REAL COUNT<br>
+图中REAL COUNT的部分才是对象真正的引用计数存储区。所以咱们说的引用计数加一或者减一，实际上是对整个unsigned long加四或者减四,因为真正的计数是从2^2位开始的。</p>
+</li>
+<li><p>(1UL&lt;&lt;(WORD_BITS-1))    SIDE_TABLE_RC_PINNED<br>
+其中WORD_BITS在32位和64位系统的时候分别等于32和64。其实这一位没啥具体意义，就是随着对象的引用计数不断变大。如果这一位都变成1了，就表示引用计数已经最大了不能再增加了。</p>
+</li>
+</ul>
+<h3>3,维护weak指针的结构体 weak_table_t   weak_table;</h3>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/1834534-bf7b0cb945ff37d9.png" alt=""></p>
+<p>9BE315AE-E25E-41D1-99FD-883EDC5884F6.png</p>
+<p>    上面的RefcountMap  refcnts;是一个一层结构，可以通过key直接找到对应的value。而这里是一个两层结构。<br>
+    第一层结构体中包含两个元素。<br>
+    第一个元素<code>weak_entry_t *weak_entries;</code>是一个数组,上面的RefcountMap是要通过find(key)来找到精确的元
+素的。weak<em>entries则是通过循环遍历来找到对应的entry。  
+    </em>(上面管理引用计数器苹果使用的是Map,这里管理weak指针苹果使用的是数组,有兴趣的朋友可以思考一下为什么苹果会分别采用这两种不同的结构)_<br>
+    第二个元素num_entries是用来维护保证数组始终有一个合适的size。比如数组中元素的数量超过3/4的时候将数组的大小乘以2。</p>
+<h4>第二层weak_entry_t的结构包含3个部分</h4>
+<ul>
+<li><p>1,referent:<br>
+被指对象的地址。前面循环遍历查找的时候就是判断目标地址是否和他相等。</p>
+</li>
+<li><p>2,referrers<br>
+可变数组,里面保存着所有指向这个对象的弱引用的地址。当这个对象被释放的时候，referrers里的所有指针都会被设置成nil。</p>
+</li>
+<li><p>3,inline_referrers<br>
+只有4个元素的数组，默认情况下用它来存储弱引用的指针。当大于4个的时候使用referrers来存储指针。</p>
+</li>
+</ul>
+<h2>OK大家来看着图看着伪代码走一遍流程</h2>
+<h3>1,alloc</h3>
+<p>这时候其实并不操作SideTable，具体可以参考:</p>
+<blockquote><p><a href="http://blog.tracyone.com/2015/06/14/%E6%B7%B1%E5%85%A5%E6%B5%85%E5%87%BAARC-%E4%B8%8A/">深入浅出ARC(上)</a><br>
+Objc使用了类似散列表的结构来记录引用计数。并且在初始化的时候设为了一。</p>
+</blockquote>
+<h3>2,retain: NSObject.mm line:1402-1417</h3>
+<div class="highlight"><pre><code><span></span><span class="c1">//1、通过对象内存地址，在SideTables找到对应的SideTable</span>
+<span class="n">SideTable</span><span class="o">&amp;</span><span class="w"> </span><span class="n">table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">SideTables</span><span class="p">()[</span><span class="n">this</span><span class="p">];</span>
+<span class="c1">//2、通过对象内存地址，在refcnts中取出引用计数</span>
+<span class="c1">//这里是table是SideTable、refcnts是RefcountMap</span>
+<span class="kt">size_t</span><span class="o">&amp;</span><span class="w"> </span><span class="n">refcntStorage</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">table</span><span class="p">.</span><span class="n">refcnts</span><span class="p">[</span><span class="n">this</span><span class="p">];</span>
+<span class="c1">//3、判断PINNED位，不为1则+4</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="w"> </span><span class="p">(</span><span class="n">refcntStorage</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">PINNED</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">refcntStorage</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="p">(</span><span class="mi">1UL</span><span class="o">&lt;&lt;</span><span class="mi">2</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>3,release NSObject.mm line:1524-1551</h3>
+<div class="highlight"><pre><code><span></span><span class="n">table</span><span class="p">.</span><span class="n">lock</span><span class="p">();</span>
+<span class="n">引用计数器</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">table</span><span class="p">.</span><span class="n">refcnts</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">this</span><span class="p">);</span>
+<span class="c1">//table.refcnts.end()表示使用一个iterator迭代器到达了end()状态</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">引用计数器</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">table</span><span class="p">.</span><span class="n">refcnts</span><span class="p">.</span><span class="n">end</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">//标记对象为正在释放</span>
+<span class="w">    </span><span class="n">table</span><span class="p">.</span><span class="n">refcnts</span><span class="p">[</span><span class="n">this</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">SIDE_TABLE_DEALLOCATING</span><span class="p">;</span>
+<span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">引用计数器</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">SIDE_TABLE_DEALLOCATING</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">//这里很有意思，当出现小余(1UL&lt;&lt;1) 的情况的时候</span>
+<span class="w">    </span><span class="c1">//就是前面引用计数位都是0,后面弱引用标记位WEAKLY_REFERENCED可能有弱引用1</span>
+<span class="w">    </span><span class="c1">//或者没弱引用0</span>
+<span class="w">    </span><span class="c1">//为了不去影响WEAKLY_REFERENCED的状态</span>
+<span class="w">    </span><span class="n">引用计数器</span><span class="w"> </span><span class="o">|=</span><span class="w"> </span><span class="n">SIDE_TABLE_DEALLOCATING</span><span class="p">;</span>
+<span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="w"> </span><span class="n">SIDE_TABLE_RC_PINNED位为0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">引用计数器</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="n">SIDE_TABLE_RC_ONE</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="n">table</span><span class="p">.</span><span class="n">unlock</span><span class="p">();</span>
+<span class="n">如果做完上述操作后如果需要释放对象</span><span class="err">，</span><span class="n">则调用dealloc</span>
+</code></pre></div>
+<h3>4,dealloc NSObject.mm line:1555-1571</h3>
+<p>    dealloc操作也做了大量了逻辑判断和其它处理，咱们这里抛开那些逻辑只讨论下面部分<code>sidetable_clearDeallocating()</code></p>
+<div class="highlight"><pre><code><span></span><span class="n">SideTable</span><span class="o">&amp;</span><span class="w"> </span><span class="n">table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">SideTables</span><span class="p">()[</span><span class="n">this</span><span class="p">];</span>
+<span class="n">table</span><span class="p">.</span><span class="n">lock</span><span class="p">();</span>
+<span class="n">引用计数器</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">table</span><span class="p">.</span><span class="n">refcnts</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">this</span><span class="p">);</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">引用计数器</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">table</span><span class="p">.</span><span class="n">refcnts</span><span class="p">.</span><span class="n">end</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">引用计数器中SIDE_TABLE_WEAKLY_REFERENCED标志位为1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">weak_clear_no_lock</span><span class="p">(</span><span class="o">&amp;</span><span class="n">table</span><span class="p">.</span><span class="n">weak_table</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="n">this</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">//从refcnts中删除引用计数器</span>
+<span class="w">    </span><span class="n">table</span><span class="p">.</span><span class="n">refcnts</span><span class="p">.</span><span class="n">erase</span><span class="p">(</span><span class="n">it</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="n">table</span><span class="p">.</span><span class="n">unlock</span><span class="p">();</span>
+</code></pre></div>
+<p><code>weak_clear_no_lock()</code>是关键，它才是在对象被销毁的时候处理所有弱引用指针的方法。</p>
+<div class="highlight"><pre><code><span></span><span class="n">weak_clear_no_lock</span><span class="w"> </span><span class="n">objc</span><span class="o">-</span><span class="n">weak</span><span class="p">.</span><span class="n">mm</span><span class="w"> </span><span class="n">line</span><span class="o">:</span><span class="mi">461-504</span>
+<span class="kt">void</span><span class="w"> </span>
+<span class="n">weak_clear_no_lock</span><span class="p">(</span><span class="n">weak_table_t</span><span class="w"> </span><span class="o">*</span><span class="n">weak_table</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="n">referent_id</span><span class="p">)</span><span class="w"> </span>
+<span class="p">{</span>
+<span class="w">    </span><span class="c1">//1、拿到被销毁对象的指针</span>
+<span class="w">    </span><span class="n">objc_object</span><span class="w"> </span><span class="o">*</span><span class="n">referent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">objc_object</span><span class="w"> </span><span class="o">*</span><span class="p">)</span><span class="n">referent_id</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">//2、通过 指针 在weak_table中查找出对应的entry</span>
+<span class="w">    </span><span class="n">weak_entry_t</span><span class="w"> </span><span class="o">*</span><span class="n">entry</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">weak_entry_for_referent</span><span class="p">(</span><span class="n">weak_table</span><span class="p">,</span><span class="w"> </span><span class="n">referent</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">entry</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">nil</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">/// XXX shouldn&#39;t happen, but does with mismatched CF/objc</span>
+<span class="w">        </span><span class="c1">//printf(&quot;XXX no entry for clear deallocating %p\n&quot;, referent);</span>
+<span class="w">        </span><span class="k">return</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">//3、将所有的引用设置成nil</span>
+<span class="w">    </span><span class="n">weak_referrer_t</span><span class="w"> </span><span class="o">*</span><span class="n">referrers</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">size_t</span><span class="w"> </span><span class="n">count</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">entry</span><span class="o">-&gt;</span><span class="n">out_of_line</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">//3.1、如果弱引用超过4个则将referrers数组内的弱引用都置成nil。</span>
+<span class="w">        </span><span class="n">referrers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">entry</span><span class="o">-&gt;</span><span class="n">referrers</span><span class="p">;</span>
+<span class="w">        </span><span class="n">count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TABLE_SIZE</span><span class="p">(</span><span class="n">entry</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span>
+<span class="w">    </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">//3.2、不超过4个则将inline_referrers数组内的弱引用都置成nil</span>
+<span class="w">        </span><span class="n">referrers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">entry</span><span class="o">-&gt;</span><span class="n">inline_referrers</span><span class="p">;</span>
+<span class="w">        </span><span class="n">count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">WEAK_INLINE_COUNT</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">//循环设置所有的引用为nil</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">count</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">objc_object</span><span class="w"> </span><span class="o">**</span><span class="n">referrer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">referrers</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">referrer</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">referrer</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">referent</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="o">*</span><span class="n">referrer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nil</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">            </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">referrer</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">_objc_inform</span><span class="p">(</span><span class="s">&quot;__weak variable at %p holds %p instead of %p. &quot;</span>
+<span class="w">                             </span><span class="s">&quot;This is probably incorrect use of &quot;</span>
+<span class="w">                             </span><span class="s">&quot;objc_storeWeak() and objc_loadWeak(). &quot;</span>
+<span class="w">                             </span><span class="s">&quot;Break on objc_weak_error to debug.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span>
+<span class="w">                             </span><span class="n">referrer</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="o">*</span><span class="n">referrer</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="n">referent</span><span class="p">);</span>
+<span class="w">                </span><span class="n">objc_weak_error</span><span class="p">();</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="c1">//4、从weak_table中移除entry</span>
+<span class="w">    </span><span class="n">weak_entry_remove</span><span class="p">(</span><span class="n">weak_table</span><span class="p">,</span><span class="w"> </span><span class="n">entry</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>  讲到这里我们就已经把SideTables的操作流程过一遍了，希望大家看的开心。<br>
+  欢迎加我的微博<a href="http://weibo.com/xuyang186">http://weibo.com/xuyang186</a></p>
+<hr>
+
+
+<h4><p>原文出处：<a href='http://www.jianshu.com/p/8577286af88e' target='blank'>iOS管理对象内存的数据结构以及操作算法--SideTables、RefcountMap、weak_table_t-二</a></p></h4>
+<div class="highlight"><pre><code><span></span><span class="n">这篇文章是之前那篇文章</span><span class="p">[</span><span class="n">iOS管理对象内存的数据结构以及操作算法</span><span class="o">--</span><span class="n">SideTables</span><span class="err">、</span><span class="n">RefcountMap</span><span class="err">、</span><span class="n">weak_table_t</span><span class="p">](</span><span class="n">http</span><span class="o">:</span><span class="c1">//www.jianshu.com/p/ef6d9bf8fe59)的补充和延伸。如果没有阅读过前一篇文章请先看那一篇。  </span>
+
+<span class="n">上一篇文章中关于SideTables</span><span class="err">、</span><span class="n">SideTable和RefcountMap三者关系可能描述的不太清楚</span><span class="err">。</span><span class="n">很多朋友表示看起来晕乎乎的</span><span class="err">。</span><span class="n">当初我在研究的时候也是蒙圈了好长一段时间</span><span class="err">。</span><span class="n">所以特意写了这篇文章来补充说明一下</span><span class="err">，</span><span class="n">同时也有新的知识扩展</span><span class="err">。</span><span class="w">  </span>
+<span class="o">**</span><span class="n">刚开始写文章</span><span class="err">，</span><span class="n">思路不太清晰</span><span class="err">。</span><span class="n">如果文章中有什么错误或者问题</span><span class="err">，</span><span class="n">欢迎大家指正</span><span class="err">。</span><span class="o">**</span><span class="w">  </span>
+<span class="n">_这里特别感谢</span><span class="p">[</span><span class="n">大墙66370</span><span class="p">](</span><span class="n">http</span><span class="o">:</span><span class="c1">//www.jianshu.com/u/6266c6477c99)午夜时分挑灯夜战提出的宝贵问题。_</span>
+</code></pre></div>
+<p><strong>本文流程</strong><br>
+一、解释分离锁是什么。<br>
+二、举例阐述SideTables、SideTable、RefcountMap三者关系。<br>
+三、<a href="http://www.jianshu.com/p/ef6d9bf8fe59#">第一篇</a>文章所说的N路并发是什么意思。<br>
+四、SideTables所使用的Hash算法解密。<br>
+五、RefcountMap是什么结构。</p>
+<h3>一、分离锁</h3>
+<div class="highlight"><pre><code><span></span><span class="n">分离锁并不是一种锁</span><span class="err">，</span><span class="n">而是一种对锁的用法</span><span class="err">。</span><span class="n">_</span><span class="p">(</span><span class="n">下面继续上一张感人的手绘图</span><span class="err">。</span><span class="n">哈哈我写的字也出现了</span><span class="err">。</span><span class="n">如果比写字丑</span><span class="err">，</span><span class="n">一般很少有人能比我写的丑</span><span class="p">)</span><span class="n">_</span>
+</code></pre></div>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/1834534-61b688259ce4ba33.png" alt=""></p>
+<p>6DA5F9AD-73C5-4888-9E03-1C72D0E848F1.png</p>
+<div class="highlight"><pre><code><span></span><span class="n">图1这样对一整个表加一把锁</span><span class="err">，</span><span class="n">是我们平时比较常见的</span><span class="err">。</span><span class="n">如果我一次写操作需要操作表中多个单元格的数据</span><span class="err">，</span><span class="n">比如第一次操作0</span><span class="err">、</span><span class="mi">1</span><span class="err">、</span><span class="mi">2</span><span class="n">位置的数据</span><span class="err">，</span><span class="n">第二次操作0</span><span class="err">、</span><span class="mi">2</span><span class="err">、</span><span class="mi">3</span><span class="n">位置的数据</span><span class="err">。</span><span class="n">像这种情况锁的粒度就是以整张表为单位的</span><span class="err">，</span><span class="n">才能保证数据的安全</span><span class="err">。</span><span class="w">  </span>
+<span class="n">图2这样对表中的各个元素分别加一把锁就是我们说的分离锁</span><span class="err">。</span><span class="n">适用于表中元素相互独立</span><span class="err">，</span><span class="n">你对第一个元素做写操作的时候不需要影响到其他元素</span><span class="err">。</span><span class="w">  </span>
+<span class="n">上文中所说的结构就是SideTables这个大的Hash表中每一个小单元格</span><span class="p">(</span><span class="n">SideTable</span><span class="p">)</span><span class="n">都带有一把锁</span><span class="err">。</span><span class="n">做写操作的时候</span><span class="p">(</span><span class="n">操作对象引用计数</span><span class="p">)</span><span class="n">单元格之间相互独立</span><span class="err">，</span><span class="n">互相没影响</span><span class="err">。</span><span class="n">所以降低了锁的粒度</span><span class="err">。</span>
+</code></pre></div>
+<p><em>对比一下图1和图2的并发性。</em></p>
+<ul>
+<li>图1因为任何操作都需要锁整张表，所以写操作的时候相当于串行操作。没有并发。</li>
+<li>图2因为每一个单元格都有一把锁，所以写操作的时候有多少个单元格并发数就可以是多少。</li>
+</ul>
+<blockquote><p>这里注意区分一下<a href="http://blog.csdn.net/lconline/article/details/5982237">并发和并行的区别</a>。</p>
+<p>当有多个线程在操作时,如果系统只有一个CPU,则它根本不可能真正同时进行一个以上的线程,它只能把CPU运行时间划分成若干个时间段,再将时间段分配给各个线
+程执行,在一个时间段的线程代码运行时,其它线程处于挂起状态.这种方式我们称之为并发(Concurrent).</p>
+</blockquote>
+<p>当系统有一个以上CPU时,则线程的操作有可能非并发.当一个CPU执行一个线程时,另一个CPU可以执行另一个线程,两个线程互不抢占CPU资源,可以同时进行,这
+种方式我们称之为并行(Parallel)</p>
+<div class="highlight"><pre><code><span></span><span class="n">可以看到在单元格之间相互独立的情况下图2的方法效率更高</span><span class="err">。</span><span class="w">  </span>
+
+<span class="n">看了上面的例子有同学会有疑问</span><span class="err">。</span><span class="n">既然分离锁可以实现高并发</span><span class="err">，</span><span class="n">那么为什么不对每一个内存对象加一把锁呢</span><span class="err">？</span><span class="n">为什么还会有Hash表还会冲突呢</span><span class="err">？</span><span class="n">这个问题我在下面通</span>
+</code></pre></div>
+<p>过一个例子和RefcountMap一起解释。</p>
+<h3>二、为什么SideTables会冲突、SideTable又扮演着什么角色、RefcountMap是用来干嘛的？</h3>
+<div class="highlight"><pre><code><span></span><span class="n">_下面我用一个不太恰当的例子来说明问题_</span>
+</code></pre></div>
+<p><strong>假设有80个学生需要咱们安排住宿，同时还要保证学生们的财产安全。应该怎么安排？</strong></p>
+<div class="highlight"><pre><code><span></span><span class="n">显然不会给80个学生分别安排80间宿舍</span><span class="err">，</span><span class="n">然后给每个宿舍的大门上加一把锁</span><span class="err">。</span><span class="n">那样太浪费资源了锁也挺贵的</span><span class="err">，</span><span class="n">太多的宿舍维护起来也很费力气</span><span class="err">。</span><span class="w">  </span>
+
+<span class="n">我们一般的做法是把80个学生分配到10间宿舍里</span><span class="err">，</span><span class="n">每个宿舍住8个人</span><span class="err">。</span><span class="n">假设宿舍号分别是101</span><span class="err">、</span><span class="mi">102</span><span class="w"> </span><span class="err">、</span><span class="p">...</span><span class="w"> </span><span class="mi">110</span><span class="err">。</span><span class="n">然后再给他们分配床位</span><span class="err">，</span><span class="mo">01</span><span class="n">号床</span><span class="err">、</span>
+</code></pre></div>
+<p>02号床等。然后给每个宿舍配一把锁来保护宿舍内同学的财产安全。为什么不只给整个宿舍楼上一把锁，每次有人进出的时候都把整个宿舍楼锁上？显然这样会造成宿舍楼大门
+口阻塞。<br>
+    OK假如现在有人要找102号宿舍的2号床的人聊天。这个人会怎么做？</p>
+<ul>
+<li>1、找到宿舍楼(SideTables)的宿管，跟他说自己要找10202(内存地址当做key)。</li>
+<li>2、宿管带着他<code>SideTables[10202]</code>找到了102宿舍<code>SideTable</code>，然后把102的门一锁<code>lock</code>，在他访问102期间不再允许其他访客访问102了。<em>(这样只是阻塞了102的8个兄弟的访问，而不会影响整栋宿舍楼的访问)</em></li>
+<li>3、然后在宿舍里大喊一声:"2号床的兄弟在哪里？"_<code>table.refcnts.find(02)</code>_你就可以找到2号床的兄弟了。</li>
+<li><p>4、等这个访客离开的时候会把房门的锁打开<code>unlock</code>，这样其他需要访问102的人就可以继续进来访问了。</p>
+<div class="highlight"><pre><code><span></span><span class="n">SideTables</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">宿舍楼</span>
+<span class="n">SideTable</span><span class="w">  </span><span class="o">==</span><span class="w"> </span><span class="n">宿舍</span>
+<span class="n">RefcountMap里存放着具体的床位</span>
+</code></pre></div>
+<p><strong>苹果之所以需要创造SideTables的Hash冲突是为了把对象放到宿舍里管理，把锁的粒度缩小到一个宿舍SideTable。RefcountMap的工作是在找到宿舍以后帮助大家找到正确的床位的兄弟。</strong></p>
+</li>
+</ul>
+<h3>三、N路的并发写操作那句话是什么意思？</h3>
+<blockquote><p>上一篇文章中提到:<br>
+因为是使用对象的内存地址当key所以Hash的分部也很平均。假设Hash表有n个元素，则可以将Hash的冲突减少到n分之一，支持n路的并发写操作。</p>
+</blockquote>
+<div class="highlight"><pre><code><span></span><span class="n">我们在分配宿舍的时候是</span><span class="o">**</span><span class="n">先</span><span class="o">**</span><span class="n">给同学分配宿舍和床位</span><span class="err">，</span><span class="o">**</span><span class="n">然后</span><span class="o">**</span><span class="n">再给宿舍和床位编号</span><span class="err">。</span><span class="n">所以我们可以很</span><span class="o">**</span><span class="n">平均</span><span class="o">**</span><span class="n">的给每个宿舍分配8个人</span><span class="err">。</span><span class="w">  </span>
+
+<span class="n">那么如果我们用对象内存地址当做Hash算法的key</span><span class="err">，</span><span class="n">所得到的散列值可能会出现某些宿舍分配了4个人</span><span class="err">，</span><span class="n">某些宿舍分配了12个人的情况</span><span class="err">。</span><span class="n">这样人员分配就不平均了</span><span class="err">。</span><span class="n">如果某一时间段正好这个宿舍的12个人的访问量都特别大</span><span class="err">，</span><span class="n">那么访问起来就又会出现阻塞了</span><span class="err">。</span><span class="n">而那4人间的宿舍就会闲置</span><span class="err">，</span><span class="n">造成了资源的浪费</span><span class="err">。</span><span class="n">会不会造成这种资源浪费主</span>
+</code></pre></div>
+<p>要看两点。</p>
+<ul>
+<li>1、我们的key值分部是否平均。</li>
+<li>2、我们采用的散列算法能不能尽量把输出值平均分配。</li>
+</ul>
+<p>1、在数据量足够大的情况下我们的key值分部是平均的。因为key值是内存地址。从低位0x0000...0000到高位0xffff...ffff分配。并且操作系统的内存管理模块本身也会对内存分配做很多优化。毕业年头长了,内管管理具体的细节我也扯不出来了。赶紧贴一片文章压压惊，有兴趣的同学可以看<a href="http://blog.csdn.net/hguisu/article/details/5713164">操作系统内存管理——分区、页式、段式管理</a>。</p>
+<p>2、那么<strong>SideTables使用的Hash算法是什么</strong>呢？我们来开一个新的大标题。</p>
+<h3>四、SideTables所使用的Hash算法解密。</h3>
+<div class="highlight"><pre><code><span></span><span class="n">SideTables的定义</span><span class="err">：</span><span class="n">NSObject</span><span class="p">.</span><span class="n">mm</span><span class="w"> </span><span class="n">line</span><span class="w"> </span><span class="mi">207-209</span>
+
+
+<span class="k">static</span><span class="w"> </span><span class="n">StripedMap</span><span class="o">&lt;</span><span class="n">SideTable</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">SideTables</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="o">*</span><span class="n">reinterpret_cast</span><span class="o">&lt;</span><span class="n">StripedMap</span><span class="o">&lt;</span><span class="n">SideTable</span><span class="o">&gt;*&gt;</span><span class="p">(</span><span class="n">SideTableBuf</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="n">如果看不懂没关系</span><span class="p">,</span><span class="n">当它是一个C</span><span class="o">++</span><span class="n">的Map</span><span class="err">。</span><span class="n">咱们来看StripedMap的定义</span><span class="err">：</span><span class="n">objc</span><span class="o">-</span><span class="n">private</span><span class="p">.</span><span class="n">h</span><span class="w"> </span><span class="n">line</span><span class="w"> </span><span class="mi">867-906</span>
+</code></pre></div>
+<p>其中有用的部分是这样的</p>
+<div class="highlight"><pre><code><span></span><span class="p">...</span>
+<span class="c1">//如果是嵌入式系统StripeCount=8。我们这里StripeCount=64</span>
+<span class="k">enum</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">StripeCount</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">64</span><span class="w"> </span><span class="p">};</span>
+<span class="p">...</span>
+<span class="k">static</span><span class="w"> </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">indexForPointer</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">p</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">//这里是类型转换，不用在意</span>
+<span class="w">    </span><span class="kt">uintptr_t</span><span class="w"> </span><span class="n">addr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">reinterpret_cast</span><span class="o">&lt;</span><span class="kt">uintptr_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">p</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">//这里就是我们要找的Hash算法了</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">((</span><span class="n">addr</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">4</span><span class="p">)</span><span class="w"> </span><span class="o">^</span><span class="w"> </span><span class="p">(</span><span class="n">addr</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">9</span><span class="p">))</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">StripeCount</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>1、将对象的内存地址<code>addr</code>右移4位得到结果1</li>
+<li>2、将对象的内存地址<code>addr</code>右移9位得到结果2</li>
+<li>3、将结果1和结果2做按位<a href="https://zhidao.baidu.com/question/182060177.html">异或</a>得到结果3</li>
+<li>4、将结果3和StripeCount做模运算得到真正的Hash值。</li>
+</ul>
+<p><strong>因为最后模运算的结果范围是在0-63之间，可见SideTables一共有64个单元格。</strong></p>
+<h3>五、RefcountMap是什么结构。</h3>
+<div class="highlight"><pre><code><span></span><span class="n">前面文章中提到过</span><span class="err">`</span><span class="k">if</span><span class="p">(</span><span class="n">引用计数器</span><span class="w"> </span><span class="o">!=</span>
+</code></pre></div>
+<p>table.refcnts.end())<code>因此有同学提问</code>end()`是什么？那么咱们得研究一下<strong>RefcountMap是什么类型的</strong>。<br>
+    看定义NSObject.mm line 137</p>
+<div class="highlight"><pre><code><span></span><span class="k">typedef</span><span class="w"> </span><span class="n">objc</span><span class="o">::</span><span class="n">DenseMap</span><span class="o">&lt;</span><span class="n">DisguisedPtr</span><span class="o">&lt;</span><span class="n">objc_object</span><span class="o">&gt;</span><span class="p">,</span><span class="kt">size_t</span><span class="p">,</span><span class="nb">true</span><span class="o">&gt;</span><span class="w"> </span><span class="n">RefcountMap</span><span class="p">;</span>
+
+<span class="n">看起来好复杂</span><span class="err">，</span><span class="n">先不管它</span><span class="err">。</span><span class="n">一路顺着定义找下去</span><span class="err">。</span><span class="n">找到</span><span class="err">`</span><span class="n">DenseMap</span><span class="w"> </span><span class="o">==&gt;</span><span class="w"> </span><span class="n">DenseMapBase</span><span class="w"> </span><span class="o">==&gt;</span><span class="w"> </span><span class="kr">inline</span><span class="w"> </span><span class="n">iterator</span><span class="w"> </span><span class="n">end</span>
+</code></pre></div>
+<p>()`发现咱们当前在llvm-DenseMap.h line 77-79。艾玛吓死我了怎么看到llvm了。llvm我也不懂，所以还是不要扯的太远。赶紧打开llvm的相关文档看看<a href="http://llvm.org/docs/doxygen/html/classllvm_1_1DenseMapBase.html">DenseMapBase</a>中的公开方法有</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/1834534-718f86cbfea7d9e3.png" alt=""></p>
+<p>09719F81-A6B1-4B4E-A906-DAD8F260B052.png</p>
+<div class="highlight"><pre><code><span></span><span class="n">当然还有更多其他方法</span><span class="err">，</span><span class="n">我只是截取了一部分</span><span class="err">。</span><span class="n">通过这部分我们可以看出来我们操作的refcnts</span><span class="p">.</span><span class="n">find</span><span class="p">()</span><span class="n">和refcnts</span><span class="p">.</span><span class="n">end</span><span class="p">()</span><span class="n">其实都是对一个</span><span class="p">[</span><span class="n">C</span><span class="o">++</span><span class="n">迭代器iterator</span><span class="p">](</span><span class="n">http</span><span class="o">:</span><span class="c1">//www.cnblogs.com/yc_sunniwell/archive/2010/06/25/1764934.html)的操作。而end()的状态表示的是从头开始查找，一直找到最后都没有找到。当前指针指向的是结束位,而不是最后一个元素。</span>
+</code></pre></div>
+<p>所以 <code>if(引用计数器 == table.refcnts.end())</code>表示查找到最后都没找到<code>if(引用计数器 !=
+table.refcnts.end())</code>表示中途找到了。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "iOS管理对象内存的数据结构以及操作算法--SideTables、RefcountMap、weak_table_t.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

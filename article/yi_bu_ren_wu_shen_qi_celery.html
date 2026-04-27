@@ -1,0 +1,521 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>异步任务神器Celery - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="异步任务神器Celery,Python,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="异步任务神器Celery" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>异步任务神器Celery</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2017-08-19 10:17
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_python.html' class='article_tag'>Python</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='http://funhacks.net/2016/12/13/celery/' target='blank'>异步任务神器 Celery</a></p></h4>
+<h2>Celery</h2>
+<p>在程序的运行过程中，我们经常会碰到一些耗时耗资源的操作，为了避免它们阻塞主程序的运行，我们经常会采用多线程或异步任务。比如，在 Web 开发中，对新用户的注册，我们通常会给他发一封激活邮件，而发邮件是个 IO 阻塞式任务，如果直接把它放到应用当中，就需要等邮件发出去之后才能进行下一步操作，此时用户只能等待再等待。更好的方式是在业务逻辑中触发一个发邮件的异步任务，而主程序可以继续往下运行。</p>
+<p><a href="https://github.com/celery/celery">Celery</a>
+是一个强大的分布式任务队列，它可以让任务的执行完全脱离主程序，甚至可以被分配到其他主机上运行。我们通常使用它来实现异步任务（asynctask）和定时任务（crontab）。它的架构组成如下图：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/584bbf78e1783.png" alt="Celery_framework"></p>
+<p>可以看到，Celery 主要包含以下几个模块：</p>
+<ul>
+<li>任务模块 Task</li>
+</ul>
+<p>包含异步任务和定时任务。其中，<strong>异步任务通常在业务逻辑中被触发并发往任务队列，而定时任务由 Celery Beat 进程周期性地将任务发往任务队列</strong>。</p>
+<ul>
+<li>消息中间件 Broker</li>
+</ul>
+<p>Broker，即为任务调度队列，<strong>接收任务生产者发来的消息（即任务），将任务存入队列</strong>。Celery 本身不提供队列服务，官方推荐使用 RabbitMQ 和 Redis 等。</p>
+<ul>
+<li>任务执行单元 Worker</li>
+</ul>
+<p>Worker 是执行任务的处理单元，<strong>它实时监控消息队列，获取队列中调度的任务，并执行它</strong>。</p>
+<ul>
+<li>任务结果存储 Backend</li>
+</ul>
+<p>Backend 用于<strong>存储任务的执行结果</strong>，以供查询。同消息中间件一样，存储也可使用 RabbitMQ, Redis 和 MongoDB 等。</p>
+<h2>异步任务</h2>
+<p>使用 Celery 实现异步任务主要包含三个步骤：</p>
+<ol>
+<li>创建一个 Celery 实例</li>
+<li>启动 Celery Worker</li>
+<li>应用程序调用异步任务</li>
+</ol>
+<h3>快速入门</h3>
+<p>为了简单起见，对于 Broker 和 Backend，这里都使用 redis。在运行下面的例子之前，请确保 redis 已正确安装，并开启 redis 服务，当然，celery 也是要安装的。可以使用下面的命令来安装 celery 及相关依赖：</p>
+<div class="highlight"><pre><code><span></span><span class="n">$</span><span class="w"> </span><span class="n">pip</span><span class="w"> </span><span class="n">install</span><span class="w"> </span><span class="err">&#39;</span><span class="n">celery</span><span class="p">[</span><span class="n">redis</span><span class="p">]</span><span class="err">&#39;</span>
+</code></pre></div>
+<h4>创建 Celery 实例</h4>
+<p>将下面的代码保存为文件 <code>tasks.py</code>：</p>
+<div class="highlight"><pre><code><span></span><span class="cp"># -*- coding: utf-8 -*-</span>
+<span class="n">import</span><span class="w"> </span><span class="n">time</span>
+<span class="n">from</span><span class="w"> </span><span class="n">celery</span><span class="w"> </span><span class="n">import</span><span class="w"> </span><span class="n">Celery</span>
+<span class="n">broker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">&#39;</span><span class="n">redis</span><span class="o">:</span><span class="c1">//127.0.0.1:6379&#39;</span>
+<span class="n">backend</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">&#39;</span><span class="n">redis</span><span class="o">:</span><span class="c1">//127.0.0.1:6379/0&#39;</span>
+<span class="n">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Celery</span><span class="p">(</span><span class="err">&#39;</span><span class="n">my_task</span><span class="err">&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">broker</span><span class="o">=</span><span class="n">broker</span><span class="p">,</span><span class="w"> </span><span class="n">backend</span><span class="o">=</span><span class="n">backend</span><span class="p">)</span>
+<span class="err">@</span><span class="n">app</span><span class="p">.</span><span class="n">task</span>
+<span class="n">def</span><span class="w"> </span><span class="n">add</span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="w"> </span><span class="n">y</span><span class="p">)</span><span class="o">:</span>
+<span class="w">    </span><span class="n">time</span><span class="p">.</span><span class="n">sleep</span><span class="p">(</span><span class="mi">5</span><span class="p">)</span><span class="w">     </span><span class="err">#</span><span class="w"> </span><span class="n">模拟耗时操作</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">y</span>
+</code></pre></div>
+<p>上面的代码做了几件事：</p>
+<ul>
+<li>创建了一个 Celery 实例 app，名称为 <code>my_task</code>；</li>
+<li>指定消息中间件用 redis，URL 为 <code>redis://127.0.0.1:6379</code>；</li>
+<li>指定存储用 redis，URL 为 <code>redis://127.0.0.1:6379/0</code>；</li>
+<li>创建了一个 Celery 任务 <code>add</code>，当函数被 <code>@app.task</code> 装饰后，就成为可被 Celery 调度的任务；</li>
+</ul>
+<h4>启动 Celery Worker</h4>
+<p>在当前目录，使用如下方式启动 Celery Worker：</p>
+<div class="highlight"><pre><code><span></span><span class="n">$</span><span class="w"> </span><span class="n">celery</span><span class="w"> </span><span class="n">worker</span><span class="w"> </span><span class="o">-</span><span class="n">A</span><span class="w"> </span><span class="n">tasks</span><span class="w"> </span><span class="o">--</span><span class="n">loglevel</span><span class="o">=</span><span class="n">info</span>
+</code></pre></div>
+<p>其中：</p>
+<ul>
+<li>参数 <code>-A</code> 指定了 Celery 实例的位置，本例是在 <code>tasks.py</code> 中，Celery 会自动在该文件中寻找 Celery 对象实例，当然，我们也可以自己指定，在本例，使用 <code>-A tasks.app</code>；</li>
+<li>参数 <code>\--loglevel</code> 指定了日志级别，默认为 warning，也可以使用 <code>-l info</code> 来表示；</li>
+</ul>
+<p>在生产环境中，我们通常会使用 <a href="http://supervisord.org/">Supervisor</a> 来控制 Celery Worker 进程。</p>
+<p>启动成功后，控制台会显示如下输出：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/584b7da9f2c17.png" alt="celery"></p>
+<h4>调用任务</h4>
+<p>现在，我们可以在应用程序中使用 <code>delay()</code> 或 <code>apply_async()</code> 方法来调用任务。</p>
+<p>在当前目录打开 Python 控制台，输入以下代码：</p>
+<div class="highlight"><pre><code><span></span><span class="o">&gt;&gt;&gt;</span><span class="w"> </span><span class="n">from</span><span class="w"> </span><span class="n">tasks</span><span class="w"> </span><span class="n">import</span><span class="w"> </span><span class="n">add</span>
+
+<span class="o">&gt;&gt;&gt;</span><span class="w"> </span><span class="n">add</span><span class="p">.</span><span class="n">delay</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">8</span><span class="p">)</span>
+
+<span class="o">&lt;</span><span class="n">AsyncResult</span><span class="o">:</span><span class="w"> </span><span class="mi">2272</span><span class="n">ddce</span><span class="mi">-8</span><span class="n">be5</span><span class="mi">-493</span><span class="n">f</span><span class="o">-</span><span class="n">b5ff</span><span class="mi">-35</span><span class="n">a0d9fe600f</span><span class="o">&gt;</span>
+</code></pre></div>
+<p>在上面，我们从 <code>tasks.py</code> 文件中导入了 <code>add</code> 任务对象，然后使用 <code>delay()</code>
+方法将任务发送到消息中间件（Broker），Celery Worker 进程监控到该任务后，就会进行执行。我们将窗口切换到 Worker的启动窗口，会看到多了两条日志：</p>
+<div class="highlight"><pre><code><span></span><span class="p">[</span><span class="mi">2016-12-10</span><span class="w"> </span><span class="mi">12</span><span class="o">:</span><span class="mo">00</span><span class="o">:</span><span class="mi">50</span><span class="p">,</span><span class="mi">376</span><span class="o">:</span><span class="w"> </span><span class="n">INFO</span><span class="o">/</span><span class="n">MainProcess</span><span class="p">]</span><span class="w"> </span><span class="n">Received</span><span class="w"> </span><span class="n">task</span><span class="o">:</span><span class="w"> </span><span class="n">tasks</span><span class="p">.</span><span class="n">add</span><span class="p">[</span><span class="mi">2272</span><span class="n">ddce</span><span class="mi">-8</span><span class="n">be5</span><span class="mi">-493</span><span class="n">f</span><span class="o">-</span><span class="n">b5ff</span><span class="mi">-35</span><span class="n">a0d9fe600f</span><span class="p">]</span>
+
+<span class="p">[</span><span class="mi">2016-12-10</span><span class="w"> </span><span class="mi">12</span><span class="o">:</span><span class="mo">00</span><span class="o">:</span><span class="mi">55</span><span class="p">,</span><span class="mi">385</span><span class="o">:</span><span class="w"> </span><span class="n">INFO</span><span class="o">/</span><span class="n">PoolWorker</span><span class="mi">-4</span><span class="p">]</span><span class="w"> </span><span class="n">Task</span><span class="w"> </span><span class="n">tasks</span><span class="p">.</span><span class="n">add</span><span class="p">[</span><span class="mi">2272</span><span class="n">ddce</span><span class="mi">-8</span><span class="n">be5</span><span class="mi">-493</span><span class="n">f</span><span class="o">-</span><span class="n">b5ff</span><span class="mi">-35</span><span class="n">a0d9fe600f</span><span class="p">]</span><span class="w"> </span><span class="n">succeeded</span><span class="w"> </span><span class="n">in</span><span class="w"> </span><span class="mf">5.00642602402</span><span class="n">s</span><span class="o">:</span><span class="w"> </span><span class="mi">10</span>
+</code></pre></div>
+<p>这说明任务已经被调度并执行成功。</p>
+<p>另外，我们如果想获取执行后的结果，可以这样做：</p>
+<div class="highlight"><pre><code><span></span><span class="o">&gt;&gt;&gt;</span><span class="w"> </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="p">.</span><span class="n">delay</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">6</span><span class="p">)</span>
+
+<span class="o">&gt;&gt;&gt;</span><span class="w"> </span><span class="n">result</span><span class="p">.</span><span class="n">ready</span><span class="p">()</span><span class="w">   </span><span class="err">##</span><span class="n">使用</span><span class="w"> </span><span class="n">ready</span><span class="p">()</span><span class="w"> </span><span class="n">判断任务是否执行完毕</span>
+
+<span class="n">False</span>
+
+<span class="o">&gt;&gt;&gt;</span><span class="w"> </span><span class="n">result</span><span class="p">.</span><span class="n">ready</span><span class="p">()</span>
+
+<span class="n">False</span>
+
+<span class="o">&gt;&gt;&gt;</span><span class="w"> </span><span class="n">result</span><span class="p">.</span><span class="n">ready</span><span class="p">()</span>
+
+<span class="n">True</span>
+
+<span class="o">&gt;&gt;&gt;</span><span class="w"> </span><span class="n">result</span><span class="p">.</span><span class="n">get</span><span class="p">()</span><span class="w">     </span><span class="err">##</span><span class="n">使用</span><span class="w"> </span><span class="n">get</span><span class="p">()</span><span class="w"> </span><span class="n">获取任务结果</span>
+
+<span class="mi">8</span>
+</code></pre></div>
+<p>在上面，我们是在 Python 的环境中调用任务。事实上，我们通常在应用程序中调用任务。比如，将下面的代码保存为 <code>client.py</code>:</p>
+<div class="highlight"><pre><code><span></span><span class="cp">##-*- coding: utf-8 -*-</span>
+
+<span class="n">from</span><span class="w"> </span><span class="n">tasks</span><span class="w"> </span><span class="n">import</span><span class="w"> </span><span class="n">add</span>
+
+<span class="cp">##异步任务</span>
+
+<span class="n">add</span><span class="p">.</span><span class="n">delay</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">8</span><span class="p">)</span>
+
+<span class="n">print</span><span class="w"> </span><span class="err">&#39;</span><span class="n">hello</span><span class="w"> </span><span class="n">world</span><span class="err">&#39;</span>
+</code></pre></div>
+<p>运行命令 <code>$ python client.py</code>，可以看到，虽然任务函数 <code>add</code> 需要等待 5
+秒才返回执行结果，但由于它是一个异步任务，不会阻塞当前的主程序，因此主程序会往下执行 <code>print</code> 语句，打印出结果。</p>
+<h3>使用配置</h3>
+<p>在上面的例子中，我们直接把 Broker 和 Backend 的配置写在了程序当中，更好的做法是将配置项统一写入到一个配置文件中，通常我们将该文件命名为
+<code>celeryconfig.py</code>。Celery 的配置比较多，可以在<a href="http://docs.celeryproject.org/en/latest/userguide/configuration.html">官方文档</a>查询每个配置项的含义。</p>
+<p>下面，我们再看一个例子。项目结构如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">celery_demo</span><span class="w">                    </span><span class="err">##</span><span class="n">项目根目录</span>
+
+<span class="w">    </span><span class="err">├──</span><span class="w"> </span><span class="n">celery_app</span><span class="w">             </span><span class="err">##</span><span class="n">存放</span><span class="w"> </span><span class="n">celery</span><span class="w"> </span><span class="n">相关文件</span>
+
+<span class="w">    </span><span class="err">│</span><span class="w">   </span><span class="err">├──</span><span class="w"> </span><span class="n">__init__</span><span class="p">.</span><span class="n">py</span>
+
+<span class="w">    </span><span class="err">│</span><span class="w">   </span><span class="err">├──</span><span class="w"> </span><span class="n">celeryconfig</span><span class="p">.</span><span class="n">py</span><span class="w">    </span><span class="err">##</span><span class="n">配置文件</span>
+
+<span class="w">    </span><span class="err">│</span><span class="w">   </span><span class="err">├──</span><span class="w"> </span><span class="n">task1</span><span class="p">.</span><span class="n">py</span><span class="w">           </span><span class="err">##</span><span class="n">任务文件</span><span class="w"> </span><span class="mi">1</span>
+
+<span class="w">    </span><span class="err">│</span><span class="w">   </span><span class="err">└──</span><span class="w"> </span><span class="n">task2</span><span class="p">.</span><span class="n">py</span><span class="w">           </span><span class="err">##</span><span class="n">任务文件</span><span class="w"> </span><span class="mi">2</span>
+
+<span class="w">    </span><span class="err">└──</span><span class="w"> </span><span class="n">client</span><span class="p">.</span><span class="n">py</span><span class="w">              </span><span class="err">##</span><span class="n">应用程序</span>
+</code></pre></div>
+<p><code>__init__.py</code> 代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">##-*- coding: utf-8 -*-</span>
+
+<span class="n">from</span><span class="w"> </span><span class="n">celery</span><span class="w"> </span><span class="n">import</span><span class="w"> </span><span class="n">Celery</span>
+
+<span class="n">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Celery</span><span class="p">(</span><span class="err">&#39;</span><span class="n">demo</span><span class="err">&#39;</span><span class="p">)</span><span class="w">                                </span><span class="err">##</span><span class="n">创建</span><span class="w"> </span><span class="n">Celery</span><span class="w"> </span><span class="n">实例</span>
+
+<span class="n">app</span><span class="p">.</span><span class="n">config_from_object</span><span class="p">(</span><span class="err">&#39;</span><span class="n">celery_app</span><span class="p">.</span><span class="n">celeryconfig</span><span class="err">&#39;</span><span class="p">)</span><span class="w">   </span><span class="err">##</span><span class="n">通过</span><span class="w"> </span><span class="n">Celery</span><span class="w"> </span><span class="n">实例加载配置模块</span>
+</code></pre></div>
+<p><code>celeryconfig.py</code> 代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">BROKER_URL</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">&#39;</span><span class="n">redis</span><span class="o">:</span><span class="c1">//127.0.0.1:6379&#39;               ##指定 Broker    </span>
+<span class="n">CELERY_RESULT_BACKEND</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">&#39;</span><span class="n">redis</span><span class="o">:</span><span class="c1">//127.0.0.1:6379/0&#39;  ##指定 Backend    </span>
+<span class="n">CELERY_TIMEZONE</span><span class="o">=</span><span class="err">&#39;</span><span class="n">Asia</span><span class="o">/</span><span class="n">Shanghai</span><span class="err">&#39;</span><span class="w">                     </span><span class="err">##</span><span class="n">指定时区</span><span class="err">，</span><span class="n">默认是</span><span class="w"> </span><span class="n">UTC</span>
+
+<span class="cp">##CELERY_TIMEZONE=&#39;UTC&#39;                             </span>
+
+<span class="n">CELERY_IMPORTS</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="w">                                  </span><span class="err">##</span><span class="n">指定导入的任务模块</span><span class="w">   </span>
+<span class="w">    </span><span class="err">&#39;</span><span class="n">celery_app</span><span class="p">.</span><span class="n">task1</span><span class="err">&#39;</span><span class="p">,</span><span class="w">    </span>
+<span class="w">    </span><span class="err">&#39;</span><span class="n">celery_app</span><span class="p">.</span><span class="n">task2</span><span class="err">&#39;</span><span class="w">    </span>
+<span class="p">)</span>
+</code></pre></div>
+<p><code>task1.py</code> 代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">import</span><span class="w"> </span><span class="n">time</span>
+
+<span class="n">from</span><span class="w"> </span><span class="n">celery_app</span><span class="w"> </span><span class="n">import</span><span class="w"> </span><span class="n">app</span>
+
+<span class="err">@</span><span class="n">app</span><span class="p">.</span><span class="n">task</span><span class="w">   </span>
+<span class="n">def</span><span class="w"> </span><span class="n">add</span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="w"> </span><span class="n">y</span><span class="p">)</span><span class="o">:</span><span class="w">   </span>
+<span class="w">    </span><span class="n">time</span><span class="p">.</span><span class="n">sleep</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">y</span>
+</code></pre></div>
+<p><code>task2.py</code> 代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">import</span><span class="w"> </span><span class="n">time</span>
+
+<span class="n">from</span><span class="w"> </span><span class="n">celery_app</span><span class="w"> </span><span class="n">import</span><span class="w"> </span><span class="n">app</span>
+
+<span class="err">@</span><span class="n">app</span><span class="p">.</span><span class="n">task</span><span class="w">   </span>
+<span class="n">def</span><span class="w"> </span><span class="n">multiply</span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="w"> </span><span class="n">y</span><span class="p">)</span><span class="o">:</span><span class="w">    </span>
+<span class="w">    </span><span class="n">time</span><span class="p">.</span><span class="n">sleep</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span><span class="w">  </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">y</span>
+</code></pre></div>
+<p><code>client.py</code> 代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">##-*- coding: utf-8 -*-</span>
+
+<span class="n">from</span><span class="w"> </span><span class="n">celery_app</span><span class="w"> </span><span class="n">import</span><span class="w"> </span><span class="n">task1</span>
+
+<span class="n">from</span><span class="w"> </span><span class="n">celery_app</span><span class="w"> </span><span class="n">import</span><span class="w"> </span><span class="n">task2</span>
+
+<span class="n">task1</span><span class="p">.</span><span class="n">add</span><span class="p">.</span><span class="n">apply_async</span><span class="p">(</span><span class="n">args</span><span class="o">=</span><span class="p">[</span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">8</span><span class="p">])</span><span class="w">        </span><span class="err">##</span><span class="n">也可用</span><span class="w"> </span><span class="n">task1</span><span class="p">.</span><span class="n">add</span><span class="p">.</span><span class="n">delay</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">8</span><span class="p">)</span>
+
+<span class="n">task2</span><span class="p">.</span><span class="n">multiply</span><span class="p">.</span><span class="n">apply_async</span><span class="p">(</span><span class="n">args</span><span class="o">=</span><span class="p">[</span><span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="mi">7</span><span class="p">])</span><span class="w">   </span><span class="err">##</span><span class="n">也可用</span><span class="w"> </span><span class="n">task2</span><span class="p">.</span><span class="n">multiply</span><span class="p">.</span><span class="n">delay</span><span class="p">(</span><span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="mi">7</span><span class="p">)</span>
+
+<span class="n">print</span><span class="w"> </span><span class="err">&#39;</span><span class="n">hello</span><span class="w"> </span><span class="n">world</span><span class="err">&#39;</span>
+</code></pre></div>
+<p>现在，让我们启动 Celery Worker 进程，在项目的根目录下执行下面命令：</p>
+<div class="highlight"><pre><code><span></span><span class="n">celery_demo</span><span class="w"> </span><span class="n">$</span><span class="w"> </span><span class="n">celery</span><span class="w"> </span><span class="o">-</span><span class="n">A</span><span class="w"> </span><span class="n">celery_app</span><span class="w"> </span><span class="n">worker</span><span class="w"> </span><span class="o">--</span><span class="n">loglevel</span><span class="o">=</span><span class="n">info</span>
+</code></pre></div>
+<p>接着，运行 <code>$ python client.py</code>，它会发送两个异步任务到 Broker，在 Worker 的窗口我们可以看到如下输出：</p>
+<div class="highlight"><pre><code><span></span><span class="p">[</span><span class="mi">2016-12-10</span><span class="w"> </span><span class="mi">13</span><span class="o">:</span><span class="mi">51</span><span class="o">:</span><span class="mi">58</span><span class="p">,</span><span class="mi">939</span><span class="o">:</span><span class="w"> </span><span class="n">INFO</span><span class="o">/</span><span class="n">MainProcess</span><span class="p">]</span><span class="w"> </span><span class="n">Received</span><span class="w"> </span><span class="n">task</span><span class="o">:</span><span class="w"> </span><span class="n">celery_app</span><span class="p">.</span><span class="n">task1</span><span class="p">.</span><span class="n">add</span><span class="p">[</span><span class="mi">9</span><span class="n">ccffad0</span><span class="o">-</span><span class="n">aca4</span><span class="mi">-4875-84</span><span class="n">ce</span><span class="mi">-0</span><span class="n">ccfce5a83aa</span><span class="p">]</span>
+
+<span class="p">[</span><span class="mi">2016-12-10</span><span class="w"> </span><span class="mi">13</span><span class="o">:</span><span class="mi">51</span><span class="o">:</span><span class="mi">58</span><span class="p">,</span><span class="mi">941</span><span class="o">:</span><span class="w"> </span><span class="n">INFO</span><span class="o">/</span><span class="n">MainProcess</span><span class="p">]</span><span class="w"> </span><span class="n">Received</span><span class="w"> </span><span class="n">task</span><span class="o">:</span><span class="w"> </span><span class="n">celery_app</span><span class="p">.</span><span class="n">task2</span><span class="p">.</span><span class="n">multiply</span><span class="p">[</span><span class="mi">64</span><span class="n">b1f889</span><span class="o">-</span><span class="n">c892</span><span class="mi">-4333</span><span class="o">-</span><span class="n">bd1d</span><span class="o">-</span><span class="n">ac667e677a8a</span><span class="p">]</span>
+
+<span class="p">[</span><span class="mi">2016-12-10</span><span class="w"> </span><span class="mi">13</span><span class="o">:</span><span class="mi">52</span><span class="o">:</span><span class="mo">00</span><span class="p">,</span><span class="mi">948</span><span class="o">:</span><span class="w"> </span><span class="n">INFO</span><span class="o">/</span><span class="n">PoolWorker</span><span class="mi">-3</span><span class="p">]</span><span class="w"> </span><span class="n">Task</span><span class="w"> </span><span class="n">celery_app</span><span class="p">.</span><span class="n">task1</span><span class="p">.</span><span class="n">add</span><span class="p">[</span><span class="mi">9</span><span class="n">ccffad0</span><span class="o">-</span><span class="n">aca4</span><span class="mi">-4875-84</span><span class="n">ce</span><span class="mi">-0</span><span class="n">ccfce5a83aa</span><span class="p">]</span><span class="w"> </span><span class="n">succeeded</span><span class="w"> </span><span class="n">in</span><span class="w"> </span><span class="mf">2.00600231002</span><span class="n">s</span><span class="o">:</span><span class="w"> </span><span class="mi">10</span>
+
+<span class="p">[</span><span class="mi">2016-12-10</span><span class="w"> </span><span class="mi">13</span><span class="o">:</span><span class="mi">52</span><span class="o">:</span><span class="mo">00</span><span class="p">,</span><span class="mi">949</span><span class="o">:</span><span class="w"> </span><span class="n">INFO</span><span class="o">/</span><span class="n">PoolWorker</span><span class="mi">-4</span><span class="p">]</span><span class="w"> </span><span class="n">Task</span><span class="w"> </span><span class="n">celery_app</span><span class="p">.</span><span class="n">task2</span><span class="p">.</span><span class="n">multiply</span><span class="p">[</span><span class="mi">64</span><span class="n">b1f889</span><span class="o">-</span><span class="n">c892</span><span class="mi">-4333</span><span class="o">-</span><span class="n">bd1d</span><span class="o">-</span><span class="n">ac667e677a8a</span><span class="p">]</span><span class="w"> </span><span class="n">succeeded</span><span class="w"> </span><span class="n">in</span><span class="w"> </span><span class="mf">2.00601326401</span><span class="n">s</span><span class="o">:</span><span class="w"> </span><span class="mi">21</span>
+</code></pre></div>
+<h3>delay 和 apply_async</h3>
+<p>在前面的例子中，我们使用 <code>delay()</code> 或 <code>apply_async()</code> 方法来调用任务。事实上，<code>delay</code> 方法封装了<code>apply_async</code>，如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">def</span><span class="w"> </span><span class="n">delay</span><span class="p">(</span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">partial_args</span><span class="p">,</span><span class="w"> </span><span class="o">**</span><span class="n">partial_kwargs</span><span class="p">)</span><span class="o">:</span>
+
+<span class="w">    </span><span class="s">&quot;&quot;&quot;Shortcut to :meth:`apply_async` using star arguments.&quot;&quot;&quot;</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">apply_async</span><span class="p">(</span><span class="n">partial_args</span><span class="p">,</span><span class="w"> </span><span class="n">partial_kwargs</span><span class="p">)</span>
+</code></pre></div>
+<p>也就是说，<code>delay</code> 是使用 <code>apply_async</code> 的快捷方式。<code>apply_async</code> 支持更多的参数，它的一般形式如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">apply_async</span><span class="p">(</span><span class="n">args</span><span class="o">=</span><span class="p">(),</span><span class="w"> </span><span class="n">kwargs</span><span class="o">=</span><span class="p">{},</span><span class="w"> </span><span class="n">route_name</span><span class="o">=</span><span class="n">None</span><span class="p">,</span><span class="w"> </span><span class="o">**</span><span class="n">options</span><span class="p">)</span>
+</code></pre></div>
+<p>apply_async 常用的参数如下：</p>
+<ul>
+<li>countdown：指定多少秒后执行任务</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">task1</span><span class="p">.</span><span class="n">apply_async</span><span class="p">(</span><span class="n">args</span><span class="o">=</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">),</span><span class="w"> </span><span class="n">countdown</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span><span class="w">    </span><span class="err">##</span><span class="mi">5</span><span class="w"> </span><span class="n">秒后执行任务</span>
+</code></pre></div>
+<ul>
+<li>eta (estimated time of arrival)：指定任务被调度的具体时间，参数类型是 datetime</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">from</span><span class="w"> </span><span class="n">datetime</span><span class="w"> </span><span class="n">import</span><span class="w"> </span><span class="n">datetime</span><span class="p">,</span><span class="w"> </span><span class="n">timedelta</span>
+
+<span class="cp">##当前 UTC 时间再加 10 秒后执行任务</span>
+
+<span class="n">task1</span><span class="p">.</span><span class="n">multiply</span><span class="p">.</span><span class="n">apply_async</span><span class="p">(</span><span class="n">args</span><span class="o">=</span><span class="p">[</span><span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="mi">7</span><span class="p">],</span><span class="w"> </span><span class="n">eta</span><span class="o">=</span><span class="n">datetime</span><span class="p">.</span><span class="n">utcnow</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">timedelta</span><span class="p">(</span><span class="n">seconds</span><span class="o">=</span><span class="mi">10</span><span class="p">))</span>
+</code></pre></div>
+<ul>
+<li>expires：任务过期时间，参数类型可以是 int，也可以是 datetime</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">task1</span><span class="p">.</span><span class="n">multiply</span><span class="p">.</span><span class="n">apply_async</span><span class="p">(</span><span class="n">args</span><span class="o">=</span><span class="p">[</span><span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="mi">7</span><span class="p">],</span><span class="w"> </span><span class="n">expires</span><span class="o">=</span><span class="mi">10</span><span class="p">)</span><span class="w">    </span><span class="err">##</span><span class="mi">10</span><span class="w"> </span><span class="n">秒后过期</span>
+</code></pre></div>
+<p>更多的参数列表可以在<a href="http://docs.celeryproject.org/en/latest/reference/celery.app.task.html#celery.app.task.Task.apply_async">官方文档</a>中查看。</p>
+<h2>定时任务</h2>
+<p>Celery 除了可以执行<strong>异步任务</strong>，也支持执行<strong>周期性任务（Periodic Tasks）</strong>，或者说定时任务。Celery Beat进程通过读取配置文件的内容，周期性地将定时任务发往任务队列。</p>
+<p>让我们看看例子，项目结构如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">celery_demo</span><span class="w">                    </span><span class="err">##</span><span class="n">项目根目录</span>
+
+<span class="w">    </span><span class="err">├──</span><span class="w"> </span><span class="n">celery_app</span><span class="w">             </span><span class="err">##</span><span class="n">存放</span><span class="w"> </span><span class="n">celery</span><span class="w"> </span><span class="n">相关文件</span>
+
+<span class="w">        </span><span class="err">├──</span><span class="w"> </span><span class="n">__init__</span><span class="p">.</span><span class="n">py</span>
+
+<span class="w">        </span><span class="err">├──</span><span class="w"> </span><span class="n">celeryconfig</span><span class="p">.</span><span class="n">py</span><span class="w">    </span><span class="err">##</span><span class="n">配置文件</span>
+
+<span class="w">        </span><span class="err">├──</span><span class="w"> </span><span class="n">task1</span><span class="p">.</span><span class="n">py</span><span class="w">           </span><span class="err">##</span><span class="n">任务文件</span>
+
+<span class="w">        </span><span class="err">└──</span><span class="w"> </span><span class="n">task2</span><span class="p">.</span><span class="n">py</span><span class="w">           </span><span class="err">##</span><span class="n">任务文件</span>
+</code></pre></div>
+<p><code>__init__.py</code> 代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="cp">##-*- coding: utf-8 -*-</span>
+
+<span class="n">from</span><span class="w"> </span><span class="n">celery</span><span class="w"> </span><span class="n">import</span><span class="w"> </span><span class="n">Celery</span>
+
+<span class="n">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Celery</span><span class="p">(</span><span class="err">&#39;</span><span class="n">demo</span><span class="err">&#39;</span><span class="p">)</span>
+
+<span class="n">app</span><span class="p">.</span><span class="n">config_from_object</span><span class="p">(</span><span class="err">&#39;</span><span class="n">celery_app</span><span class="p">.</span><span class="n">celeryconfig</span><span class="err">&#39;</span><span class="p">)</span>
+</code></pre></div>
+<p><code>celeryconfig.py</code> 代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="cp"># -*- coding: utf-8 -*-</span>
+<span class="n">from</span><span class="w"> </span><span class="n">datetime</span><span class="w"> </span><span class="n">import</span><span class="w"> </span><span class="n">timedelta</span>
+<span class="n">from</span><span class="w"> </span><span class="n">celery</span><span class="p">.</span><span class="n">schedules</span><span class="w"> </span><span class="n">import</span><span class="w"> </span><span class="n">crontab</span>
+<span class="cp"># Broker and Backend</span>
+<span class="n">BROKER_URL</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">&#39;</span><span class="n">redis</span><span class="o">:</span><span class="c1">//127.0.0.1:6379&#39;</span>
+<span class="n">CELERY_RESULT_BACKEND</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">&#39;</span><span class="n">redis</span><span class="o">:</span><span class="c1">//127.0.0.1:6379/0&#39;</span>
+<span class="cp"># Timezone</span>
+<span class="n">CELERY_TIMEZONE</span><span class="o">=</span><span class="err">&#39;</span><span class="n">Asia</span><span class="o">/</span><span class="n">Shanghai</span><span class="err">&#39;</span><span class="w">    </span><span class="err">#</span><span class="w"> </span><span class="n">指定时区</span><span class="err">，</span><span class="n">不指定默认为</span><span class="w"> </span><span class="err">&#39;</span><span class="n">UTC</span><span class="err">&#39;</span>
+<span class="cp"># CELERY_TIMEZONE=&#39;UTC&#39;</span>
+<span class="cp"># import</span>
+<span class="n">CELERY_IMPORTS</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="err">&#39;</span><span class="n">celery_app</span><span class="p">.</span><span class="n">task1</span><span class="err">&#39;</span><span class="p">,</span>
+<span class="w">    </span><span class="err">&#39;</span><span class="n">celery_app</span><span class="p">.</span><span class="n">task2</span><span class="err">&#39;</span>
+<span class="p">)</span>
+<span class="cp"># schedules</span>
+<span class="n">CELERYBEAT_SCHEDULE</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="err">&#39;</span><span class="n">add</span><span class="o">-</span><span class="n">every</span><span class="mi">-30</span><span class="o">-</span><span class="n">seconds</span><span class="err">&#39;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">         </span><span class="err">&#39;</span><span class="n">task</span><span class="err">&#39;</span><span class="o">:</span><span class="w"> </span><span class="err">&#39;</span><span class="n">celery_app</span><span class="p">.</span><span class="n">task1</span><span class="p">.</span><span class="n">add</span><span class="err">&#39;</span><span class="p">,</span>
+<span class="w">         </span><span class="err">&#39;</span><span class="n">schedule</span><span class="err">&#39;</span><span class="o">:</span><span class="w"> </span><span class="n">timedelta</span><span class="p">(</span><span class="n">seconds</span><span class="o">=</span><span class="mi">30</span><span class="p">),</span><span class="w">       </span><span class="err">#</span><span class="w"> </span><span class="n">每</span><span class="w"> </span><span class="mi">30</span><span class="w"> </span><span class="n">秒执行一次</span>
+<span class="w">         </span><span class="err">&#39;</span><span class="n">args</span><span class="err">&#39;</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="mi">5</span><span class="p">,</span><span class="w"> </span><span class="mi">8</span><span class="p">)</span><span class="w">                           </span><span class="err">#</span><span class="w"> </span><span class="n">任务函数参数</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="err">&#39;</span><span class="n">multiply</span><span class="o">-</span><span class="n">at</span><span class="o">-</span><span class="n">some</span><span class="o">-</span><span class="n">time</span><span class="err">&#39;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="err">&#39;</span><span class="n">task</span><span class="err">&#39;</span><span class="o">:</span><span class="w"> </span><span class="err">&#39;</span><span class="n">celery_app</span><span class="p">.</span><span class="n">task2</span><span class="p">.</span><span class="n">multiply</span><span class="err">&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="err">&#39;</span><span class="n">schedule</span><span class="err">&#39;</span><span class="o">:</span><span class="w"> </span><span class="n">crontab</span><span class="p">(</span><span class="n">hour</span><span class="o">=</span><span class="mi">9</span><span class="p">,</span><span class="w"> </span><span class="n">minute</span><span class="o">=</span><span class="mi">50</span><span class="p">),</span><span class="w">   </span><span class="err">#</span><span class="w"> </span><span class="n">每天早上</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">点</span><span class="w"> </span><span class="mi">50</span><span class="w"> </span><span class="n">分执行一次</span>
+<span class="w">        </span><span class="err">&#39;</span><span class="n">args</span><span class="err">&#39;</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="mi">7</span><span class="p">)</span><span class="w">                            </span><span class="err">#</span><span class="w"> </span><span class="n">任务函数参数</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>task1.py</code> 代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">import</span><span class="w"> </span><span class="n">time</span>
+<span class="n">from</span><span class="w"> </span><span class="n">celery_app</span><span class="w"> </span><span class="n">import</span><span class="w"> </span><span class="n">app</span>
+<span class="err">@</span><span class="n">app</span><span class="p">.</span><span class="n">task</span>
+<span class="n">def</span><span class="w"> </span><span class="n">add</span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="w"> </span><span class="n">y</span><span class="p">)</span><span class="o">:</span>
+<span class="w">    </span><span class="n">time</span><span class="p">.</span><span class="n">sleep</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">y</span>
+</code></pre></div>
+<p><code>task2.py</code> 代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">import</span><span class="w"> </span><span class="n">time</span>
+<span class="n">from</span><span class="w"> </span><span class="n">celery_app</span><span class="w"> </span><span class="n">import</span><span class="w"> </span><span class="n">app</span>
+
+<span class="err">@</span><span class="n">app</span><span class="p">.</span><span class="n">task</span>
+<span class="n">def</span><span class="w"> </span><span class="n">multiply</span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="w"> </span><span class="n">y</span><span class="p">)</span><span class="o">:</span>
+<span class="w">    </span><span class="n">time</span><span class="p">.</span><span class="n">sleep</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">y</span>
+</code></pre></div>
+<p>现在，让我们启动 Celery Worker 进程，在项目的根目录下执行下面命令：</p>
+<div class="highlight"><pre><code><span></span><span class="n">celery_demo</span><span class="w"> </span><span class="n">$</span><span class="w"> </span><span class="n">celery</span><span class="w"> </span><span class="o">-</span><span class="n">A</span><span class="w"> </span><span class="n">celery_app</span><span class="w"> </span><span class="n">worker</span><span class="w"> </span><span class="o">--</span><span class="n">loglevel</span><span class="o">=</span><span class="n">info</span>
+</code></pre></div>
+<p>接着，启动 Celery Beat 进程，定时将任务发送到 Broker，在项目根目录下执行下面命令：</p>
+<div class="highlight"><pre><code><span></span><span class="n">celery_demo</span><span class="w"> </span><span class="n">$</span><span class="w"> </span><span class="n">celery</span><span class="w"> </span><span class="n">beat</span><span class="w"> </span><span class="o">-</span><span class="n">A</span><span class="w"> </span><span class="n">celery_app</span>
+<span class="n">celery</span><span class="w"> </span><span class="n">beat</span><span class="w"> </span><span class="n">v4</span><span class="mf">.0.1</span><span class="w"> </span><span class="p">(</span><span class="n">latentcall</span><span class="p">)</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">starting</span><span class="p">.</span>
+<span class="n">__</span><span class="w">    </span><span class="o">-</span><span class="w">    </span><span class="p">...</span><span class="w"> </span><span class="n">__</span><span class="w">   </span><span class="o">-</span><span class="w">        </span><span class="n">_</span>
+<span class="n">LocalTime</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="mi">2016-12-11</span><span class="w"> </span><span class="mi">09</span><span class="o">:</span><span class="mi">48</span><span class="o">:</span><span class="mi">16</span>
+<span class="n">Configuration</span><span class="w"> </span><span class="o">-&gt;</span>
+<span class="w">    </span><span class="p">.</span><span class="w"> </span><span class="n">broker</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">redis</span><span class="o">:</span><span class="c1">//127.0.0.1:6379//</span>
+<span class="w">    </span><span class="p">.</span><span class="w"> </span><span class="n">loader</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">celery</span><span class="p">.</span><span class="n">loaders</span><span class="p">.</span><span class="n">app</span><span class="p">.</span><span class="n">AppLoader</span>
+<span class="w">    </span><span class="p">.</span><span class="w"> </span><span class="n">scheduler</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">celery</span><span class="p">.</span><span class="n">beat</span><span class="p">.</span><span class="n">PersistentScheduler</span>
+<span class="w">    </span><span class="p">.</span><span class="w"> </span><span class="n">db</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">celerybeat</span><span class="o">-</span><span class="n">schedule</span>
+<span class="w">    </span><span class="p">.</span><span class="w"> </span><span class="n">logfile</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="p">[</span><span class="n">stderr</span><span class="p">]</span><span class="err">@</span><span class="o">%</span><span class="n">WARNING</span>
+<span class="w">    </span><span class="p">.</span><span class="w"> </span><span class="n">maxinterval</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="mf">5.00</span><span class="w"> </span><span class="n">minutes</span><span class="w"> </span><span class="p">(</span><span class="mi">300</span><span class="n">s</span><span class="p">)</span>
+</code></pre></div>
+<p>之后，在 Worker 窗口我们可以看到，任务 <code>task1</code> 每 30 秒执行一次，而 <code>task2</code> 每天早上 9 点 50 分执行一次。</p>
+<p>在上面，我们用两个命令启动了 Worker 进程和 Beat 进程，我们也可以将它们放在一个命令中：</p>
+<div class="highlight"><pre><code><span></span><span class="n">$</span><span class="w"> </span><span class="n">celery</span><span class="w"> </span><span class="o">-</span><span class="n">B</span><span class="w"> </span><span class="o">-</span><span class="n">A</span><span class="w"> </span><span class="n">celery_app</span><span class="w"> </span><span class="n">worker</span><span class="w"> </span><span class="o">--</span><span class="n">loglevel</span><span class="o">=</span><span class="n">info</span>
+</code></pre></div>
+<p>Celery
+周期性任务也有多个配置项，可参考<a href="http://docs.celeryproject.org/en/latest/userguide/periodic-tasks.html">官方文档</a>。</p>
+<h3>参考资料</h3>
+<ul>
+<li><a href="http://docs.celeryproject.org/en/latest/index.html" target="_blank" rel="external">Celery - Distributed Task Queue — Celery 4.0.1 documentation</a></li>
+<li><a href="https://zhuanlan.zhihu.com/p/22304455" target="_blank" rel="external">使用Celery - Python之美</a></li>
+<li><a href="http://www.bjhee.com/celery.html" target="_blank" rel="external">分布式任务队列Celery的介绍 – 思诚之道</a></li>
+<li><a href="http://www.jianshu.com/p/1840035cb510" target="_blank" rel="external">异步任务神器 Celery 简明笔记</a></li>
+</ul><hr>
+
+
+
+
+<h4><p>原文出处：<a href='http://blog.csdn.net/heyuanhao1989/article/details/50766806' target='blank'>Celery任务调度示例</a></p></h4>
+<h3>1.Celery任务调度简单示例</h3>
+<ul>
+<li>环境：Linux，Celery，Flower</li>
+<li>脚本：tasks.py</li>
+<li>功能：任务调度；任务运行状态监控和日志显示</li>
+</ul>
+<p>　tasks.py代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">from</span><span class="w"> </span><span class="n">celery</span><span class="w"> </span><span class="n">import</span><span class="w"> </span><span class="n">Celery</span><span class="p">,</span><span class="n">platforms</span>
+
+<span class="n">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Celery</span><span class="p">(</span><span class="err">&#39;</span><span class="n">tasks</span><span class="err">&#39;</span><span class="p">,</span><span class="n">backend</span><span class="o">=</span><span class="err">&#39;</span><span class="n">amqp</span><span class="err">&#39;</span><span class="p">,</span><span class="err">，</span><span class="n">broker</span><span class="o">=</span><span class="err">&#39;</span><span class="n">amqp</span><span class="o">:</span><span class="c1">//public:qfZjSmJjDs51EyIk@192.168.12.103:5672/&#39;)     </span>
+
+<span class="cp">#backend:消息中间件类型，可无；broker：指定AMQP Broker(Advanced Message Queue Protocal，高级消息队列协议 消息中间件)</span>
+
+<span class="n">platforms</span><span class="p">.</span><span class="n">C_FORCE_ROOT</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">True</span><span class="w">       </span><span class="err">#</span><span class="n">用户解决root用户无法启动worker的问题</span>
+
+<span class="err">@</span><span class="n">app</span><span class="p">.</span><span class="n">task</span><span class="w">                           </span><span class="err">#</span><span class="n">对函数做celery</span><span class="w"> </span><span class="n">task注解</span><span class="w">              </span>
+<span class="n">def</span><span class="w"> </span><span class="n">add</span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="n">y</span><span class="p">)</span><span class="o">:</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">y</span>
+</code></pre></div>
+<p>　　在tasks.py同级目录执行<strong>celery flower -A tasks
+–port=8083</strong>，启动worker，绑定flower监控并设置监控端口；或者开两个进程分别执行<strong>celery -A tasks worker -l
+info</strong>和<strong>celery -A tasks flower –port=8083</strong>，效果也一样。<br>
+　　worker启动后，另开进程进入task.py目录，执行如下代码，会在localhost:8083的监控页面看到tasks运行结果。</p>
+<div class="highlight"><pre><code><span></span><span class="o">&gt;&gt;&gt;</span><span class="w"> </span><span class="n">from</span><span class="w"> </span><span class="n">tasks</span><span class="w"> </span><span class="n">import</span><span class="w"> </span><span class="n">add</span>
+<span class="o">&gt;&gt;&gt;</span><span class="w"> </span><span class="n">add</span><span class="p">.</span><span class="n">delay</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span><span class="mi">34</span><span class="p">)</span>
+<span class="o">&lt;</span><span class="n">AsyncResult</span><span class="o">:</span><span class="w"> </span><span class="mi">61</span><span class="n">df6787</span><span class="o">-</span><span class="n">aa68</span><span class="mi">-4</span><span class="n">c0a</span><span class="mi">-8</span><span class="n">a9d</span><span class="mi">-3</span><span class="n">a9ce52be4df</span><span class="o">&gt;</span>
+<span class="o">&gt;&gt;&gt;</span>
+</code></pre></div>
+<p>参考文献：<a href="http://flower.readthedocs.org/en/latest/install.html#usage">http://flower.readthedocs.org/en/latest/install.html#usage</a></p>
+<h3>二.Celery定时任务示例</h3>
+<ul>
+<li>脚本：tasks.py，config.py（配置文件）</li>
+<li>功能：Crontab定时，Periodic Task<br>
+tasks.py代码如下：</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">from</span><span class="w"> </span><span class="n">celery</span><span class="w"> </span><span class="n">import</span><span class="w"> </span><span class="n">Celery</span><span class="p">,</span><span class="n">platforms</span>
+<span class="n">app</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Celery</span><span class="p">(</span><span class="err">&#39;</span><span class="n">tasks</span><span class="err">&#39;</span><span class="p">)</span>
+<span class="n">app</span><span class="p">.</span><span class="n">config_from_object</span><span class="p">(</span><span class="err">&#39;</span><span class="n">config</span><span class="err">&#39;</span><span class="p">)</span><span class="w">    </span><span class="err">#</span><span class="n">以config</span><span class="p">.</span><span class="n">py作为配置文件导入参数</span>
+<span class="n">platforms</span><span class="p">.</span><span class="n">C_FORCE_ROOT</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">True</span>
+<span class="err">@</span><span class="n">app</span><span class="p">.</span><span class="n">task</span>
+<span class="n">def</span><span class="w"> </span><span class="n">add</span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="n">y</span><span class="p">)</span><span class="o">:</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">y</span>
+</code></pre></div>
+<p>　　config.py代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">from</span><span class="w"> </span><span class="n">__future__</span><span class="w"> </span><span class="n">import</span><span class="w"> </span><span class="n">absolute_import</span><span class="w">          </span><span class="err">#</span><span class="n">如果没有这一行</span><span class="err">，</span><span class="n">下一行可能会出错</span><span class="w">          </span>
+<span class="n">from</span><span class="w"> </span><span class="n">celery</span><span class="p">.</span><span class="n">schedules</span><span class="w"> </span><span class="n">import</span><span class="w"> </span><span class="n">crontab</span>
+<span class="n">from</span><span class="w"> </span><span class="n">datetime</span><span class="w"> </span><span class="n">import</span><span class="w"> </span><span class="n">timedelta</span>
+<span class="n">BROKER_URL</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">&#39;</span><span class="n">amqp</span><span class="o">:</span><span class="c1">//public:qfZjSmJjDs51EyIk@192.168.12.103:5672/&#39;</span>
+<span class="cp">##Crontab定时任务的设置方式</span>
+<span class="cp">##CELERYBEAT_SCHEDULE = {</span>
+<span class="cp">####   &#39;every-minute&#39;: {</span>
+<span class="cp">####       &#39;task&#39;: &#39;tasks.add&#39;,</span>
+<span class="cp">####       &#39;schedule&#39;: crontab(minute=&#39;*/1&#39;),       #crontab的参数设置见后面</span>
+<span class="cp">####       &#39;args&#39;: (1,2),</span>
+<span class="cp">####   },</span>
+<span class="cp">##}</span>
+<span class="cp">##Periodic task的设置方式</span>
+<span class="n">CELERYBEAT_SCHEDULE</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="err">&#39;</span><span class="n">add</span><span class="o">-</span><span class="n">every</span><span class="mi">-2</span><span class="o">-</span><span class="n">seconds</span><span class="err">&#39;</span><span class="o">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="err">&#39;</span><span class="n">task</span><span class="err">&#39;</span><span class="o">:</span><span class="w"> </span><span class="err">&#39;</span><span class="n">tasks</span><span class="p">.</span><span class="n">add</span><span class="err">&#39;</span><span class="p">,</span>
+<span class="w">        </span><span class="err">&#39;</span><span class="n">schedule</span><span class="err">&#39;</span><span class="o">:</span><span class="w"> </span><span class="n">timedelta</span><span class="p">(</span><span class="n">seconds</span><span class="o">=</span><span class="mi">2</span><span class="p">),</span>
+<span class="w">        </span><span class="err">&#39;</span><span class="n">args</span><span class="err">&#39;</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="mi">16</span><span class="p">,</span><span class="w"> </span><span class="mi">10</span><span class="p">),</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="p">}</span>
+<span class="n">CELERY_TIMEZONE</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">&#39;</span><span class="n">UTC</span><span class="err">&#39;</span><span class="w">  </span><span class="err">#</span><span class="n">时区设置</span><span class="err">，</span><span class="n">也可以为</span><span class="err">&#39;</span><span class="n">Europe</span><span class="o">/</span><span class="n">London</span><span class="err">&#39;</span>
+</code></pre></div>
+<p>　　在脚本同级目录执行<strong>celery -A tasks worker -B</strong>，即启动worker和beat服务；或者先用<strong>celery -A proj worker –loglevel=INFO</strong>启动worker，再用<strong>celery -A tasks beat -s celerybeat-schedule </strong>#这里的celerybeat-schedule指定一个记录文件_**_启动beat服务也行。<br>
+　　
+　　定时任务的运行代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">celery</span><span class="w"> </span><span class="n">beat</span><span class="w"> </span><span class="n">v3</span><span class="mf">.1.20</span><span class="w"> </span><span class="p">(</span><span class="n">Cipater</span><span class="p">)</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">starting</span><span class="p">.</span>
+<span class="n">__</span><span class="w">    </span><span class="o">-</span><span class="w">    </span><span class="p">...</span><span class="w"> </span><span class="n">__</span><span class="w">   </span><span class="o">-</span><span class="w">        </span><span class="n">_</span>
+<span class="n">Configuration</span><span class="w"> </span><span class="o">-&gt;</span>
+<span class="w">    </span><span class="p">.</span><span class="w"> </span><span class="n">broker</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">amqp</span><span class="o">:</span><span class="c1">//public:**@192.168.12.103:5672//</span>
+<span class="w">    </span><span class="p">.</span><span class="w"> </span><span class="n">loader</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">celery</span><span class="p">.</span><span class="n">loaders</span><span class="p">.</span><span class="n">app</span><span class="p">.</span><span class="n">AppLoader</span>
+<span class="w">    </span><span class="p">.</span><span class="w"> </span><span class="n">scheduler</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">celery</span><span class="p">.</span><span class="n">beat</span><span class="p">.</span><span class="n">PersistentScheduler</span>
+<span class="w">    </span><span class="p">.</span><span class="w"> </span><span class="n">db</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">celerybeat</span><span class="o">-</span><span class="n">schedule</span>
+<span class="w">    </span><span class="p">.</span><span class="w"> </span><span class="n">logfile</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="p">[</span><span class="n">stderr</span><span class="p">]</span><span class="err">@</span><span class="o">%</span><span class="n">INFO</span>
+<span class="w">    </span><span class="p">.</span><span class="w"> </span><span class="n">maxinterval</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">now</span><span class="w"> </span><span class="p">(</span><span class="mi">0</span><span class="n">s</span><span class="p">)</span>
+<span class="p">[</span><span class="mi">2016</span><span class="mo">-02</span><span class="mi">-29</span><span class="w"> </span><span class="mi">15</span><span class="o">:</span><span class="mi">23</span><span class="o">:</span><span class="mi">48</span><span class="p">,</span><span class="mi">893</span><span class="o">:</span><span class="w"> </span><span class="n">INFO</span><span class="o">/</span><span class="n">MainProcess</span><span class="p">]</span><span class="w"> </span><span class="n">beat</span><span class="o">:</span><span class="w"> </span><span class="n">Starting</span><span class="p">...</span>
+<span class="p">[</span><span class="mi">2016</span><span class="mo">-02</span><span class="mi">-29</span><span class="w"> </span><span class="mi">15</span><span class="o">:</span><span class="mi">24</span><span class="o">:</span><span class="mo">00</span><span class="p">,</span><span class="mo">001</span><span class="o">:</span><span class="w"> </span><span class="n">INFO</span><span class="o">/</span><span class="n">MainProcess</span><span class="p">]</span><span class="w"> </span><span class="n">Scheduler</span><span class="o">:</span><span class="w"> </span><span class="n">Sending</span><span class="w"> </span><span class="n">due</span><span class="w"> </span><span class="n">task</span><span class="w"> </span><span class="n">every</span><span class="o">-</span><span class="n">minute</span><span class="w"> </span><span class="p">(</span><span class="n">tasks</span><span class="p">.</span><span class="n">add</span><span class="p">)</span>
+<span class="p">[</span><span class="mi">2016</span><span class="mo">-02</span><span class="mi">-29</span><span class="w"> </span><span class="mi">15</span><span class="o">:</span><span class="mi">25</span><span class="o">:</span><span class="mo">00</span><span class="p">,</span><span class="mo">052</span><span class="o">:</span><span class="w"> </span><span class="n">INFO</span><span class="o">/</span><span class="n">MainProcess</span><span class="p">]</span><span class="w"> </span><span class="n">Scheduler</span><span class="o">:</span><span class="w"> </span><span class="n">Sending</span><span class="w"> </span><span class="n">due</span><span class="w"> </span><span class="n">task</span><span class="w"> </span><span class="n">every</span><span class="o">-</span><span class="n">minute</span><span class="w"> </span><span class="p">(</span><span class="n">tasks</span><span class="p">.</span><span class="n">add</span><span class="p">)</span>
+<span class="p">[</span><span class="mi">2016</span><span class="mo">-02</span><span class="mi">-29</span><span class="w"> </span><span class="mi">15</span><span class="o">:</span><span class="mi">26</span><span class="o">:</span><span class="mo">00</span><span class="p">,</span><span class="mo">051</span><span class="o">:</span><span class="w"> </span><span class="n">INFO</span><span class="o">/</span><span class="n">MainProcess</span><span class="p">]</span><span class="w"> </span><span class="n">Scheduler</span><span class="o">:</span><span class="w"> </span><span class="n">Sending</span><span class="w"> </span><span class="n">due</span><span class="w"> </span><span class="n">task</span><span class="w"> </span><span class="n">every</span><span class="o">-</span><span class="n">minute</span><span class="w"> </span><span class="p">(</span><span class="n">tasks</span><span class="p">.</span><span class="n">add</span><span class="p">)</span>
+<span class="p">[</span><span class="mi">2016</span><span class="mo">-02</span><span class="mi">-29</span><span class="w"> </span><span class="mi">15</span><span class="o">:</span><span class="mi">27</span><span class="o">:</span><span class="mo">00</span><span class="p">,</span><span class="mo">037</span><span class="o">:</span><span class="w"> </span><span class="n">INFO</span><span class="o">/</span><span class="n">MainProcess</span><span class="p">]</span><span class="w"> </span><span class="n">Scheduler</span><span class="o">:</span><span class="w"> </span><span class="n">Sending</span><span class="w"> </span><span class="n">due</span><span class="w"> </span><span class="n">task</span><span class="w"> </span><span class="n">every</span><span class="o">-</span><span class="n">minute</span><span class="w"> </span><span class="p">(</span><span class="n">tasks</span><span class="p">.</span><span class="n">add</span><span class="p">)</span>
+</code></pre></div>
+<p>　　在localhost:8083查看tasks运行状态与详细日志，如下：<br>
+　　<img src="../vender/image/img_loading.gif" data-src="../file/image/20160229172442670" alt="这里写图片描述"><br>
+　　<img src="../vender/image/img_loading.gif" data-src="../file/image/20160229172459061" alt="这里写图片描述"><br>
+　　Crontab的参数设置如下，详细见<a href="http://docs.celeryproject.org/en/latest/userguide/periodic-tasks.html">Crontab参数设置</a><br>
+　　<img src="../vender/image/img_loading.gif" data-src="../file/image/20160229172727553" alt="这里写图片描述"><br>
+　　此外，如果上一个task执行时间大于任务的时间间隔，则会造成任务重叠（Overlap），如果要避免此现象，除了延长任务的时间间隔，还可以通过锁实现<a href="http://docs.celeryproject.org/en/latest/tutorials/task-cookbook.html#cookbook-task-serial">http://docs.celeryproject.org/en/latest/tutorials/task-cookbook.html#cookbook-task-serial</a></p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "异步任务神器Celery.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

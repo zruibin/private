@@ -1,0 +1,345 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>STL哈希表详解与erase性能优化 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="STL哈希表详解与erase性能优化,C/C++,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="STL哈希表详解与erase性能优化" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>STL哈希表详解与erase性能优化</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2024-01-29 20:00
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://km.woa.com/articles/show/596865' target='blank'>STL哈希表详解与erase性能优化——C++ STL贡献经历</a></p></h4>
+<h2>一、STL哈希表</h2>
+<p>C++程序员使用最频繁的库，大概就是STL了。STL是集成在GNU C++项目里的标准库。该项目提供C++编译器的同时，也提供了STL。另外，该项目提供的C++编译器针对STL库的实现做了很多编译器级别的优化。</p>
+<p>STL里提供很多类型的容器。其中，最常用的KV类型容器就是map与<code>unordered_map</code>。由于<code>unordered_map</code>查找性能是O(1)，所以在不需要排序的高性能场景下，<code>unordered_map</code>更多被使用。</p>
+<p>为什么<code>unorderd_map</code>能查找性能是O(1)，因为其底层实现是哈希表。另外，<code>unorderd_set</code>作为进行了Value为空特化后的KV容器，底层也是相同的哈希表实现。</p>
+<p>下面从教科书上的哈希表开始，介绍STL哈希表的演化过程，以及目前的最终形态。</p>
+<h3>教科书上的哈希表</h3>
+<p>哈希表（hashtable）的原理：使用哈希算法（hash function）将Key映射到定长数组的下标，通过下标访问数组。因此是O(1)时间复杂度。</p>
+<p>然而，数组大小有限，不同Key通过哈希算法得到下标可能相同，从而引发哈希冲突（hash collision）。哈希冲突的处理方式主要分为：开放寻址（open addressing）、拉链（seperate chaining）。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240129-2000-1.png" alt=""></p>
+<p>开放寻址，在发生哈希冲突时，使用固定算法在数组里重新找一个地址，作为item的入口。</p>
+<p>拉链法，将数组槽位内容从单个item，改为链表。由于链表可以存储0～多个item，从而容许出现哈希冲突。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240129-2000-2.png" alt=""></p>
+<p>这两类冲突方法各有所长。由于拥有比较低的cache miss，当哈希算法和开放寻址算法与数据分布合适时，哈希表能表现出非常高的性能。而拉链法，在负载因子（load factor）高时，也不会出现极大的性能恶化，且链表节点在rehash时能够复用，因此在内存与性能的平衡上表现较好。</p>
+<p>STL哈希表为了通用型，选用了拉链法。此外，Redis的数据库表、大型Set类型值、大型Hash类型值，也都是拉链法。</p>
+<h3>STL哈希表的演化过程</h3>
+<h4>数组内仅存指针</h4>
+<p>上文说到，STL哈希表选用拉链法，拉链法哈希表的数组槽位存储的是链表。而这链表有2种实现，一种是数组内存链表的首节点，一种是数组内存链表的首节点的地址。STL哈希表选择了后者。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240129-2000-3.png" alt=""></p>
+<p>数组内仅存指针的优势在于所有item都在链表内。因此，rehash时所有item都保持不动，仅数组部分发生变化，这可以避免item的移动/拷贝构造、析构。同时，这也带来特性——允许保存哈希表的iterator，只要item没删除，iterator就一直有效——这特性在LRU等场景很有用。此外，数组内不存item，避免了空item对内存的浪费，毕竟即使在负载因子为1时，也有约36.8%(=1/e)的空槽。</p>
+<p>但这也牺牲了一定的查找性能——多进行一次会带来cache miss的指针跳转。因此，比如brpc的flatmap，就选择数组内存链表的首节点以加快查找的效率。</p>
+<h4>遍历迭代begin的优化</h4>
+<p>上述哈希表在遍历场景需要遍历整个数组，才能找到每一个item，但数组内空槽占比最少也在约36.8%以上，存在浪费。尤其在负载因子低的时候，影响突出。</p>
+<p>首先考虑查找begin的优化。上述哈希表在查找begin，需要从头遍历数组，最大O(N)时间复杂度。</p>
+<p>STL哈希表采用缓存begin所在的数组下标的方式进行优化。而begin所在的数组下标，可以在每次插入的时候，增加O(1)时间复杂度进行更新；删除begin并导致其链表清空时，增加最大O(N)时间复杂度进行更新。</p>
+<p>演化至此，这就是<strong>GCC V4.6之前的STL哈希表</strong>实现。</p>
+<h4>遍历迭代过程的优化</h4>
+<p>然后考虑遍历过程的优化。考虑到每个链表尾item的next都为空，比较浪费，可以用来加快遍历性能。最朴素的想法，就是将尾item的next指向下一个有item的链表的首item，这样就可加快遍历。然而，这在删除链表首item时，会出现问题。如下图，删除C时，需要更新B的next。而要找到B，必须进行哈希表遍历，开销较大。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240129-2000-4.png" alt=""></p>
+<p>既然删除无头节点的单链表的首item会导致问题，那么把链表改成<strong>带头节点的单链表</strong>不就好了。正好数组里存放的指针可以当作头节点，那么将尾item的next指向下一个有item的链表在数组里的地址。如下图，删除C时，将C所在数组里的指针指向C的next。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240129-2000-5.png" alt=""></p>
+<p>这确实能解决上面遇到的问题，但又会带来2个小问题：</p>
+<ol>
+<li>额外的标记：数组里在存放指针的同时，需要标记链表是否为空（非空但有），并标记这是数组里的指针（遍历时遇到该标记则继续next）。</li>
+<li>无用的中继：每当删除链表里唯一item（且item不是哈希表的最后item）时，都会造成该链表所在数组的指针变成一个无用的中继（如上图，删除C后，B的next本可直接指向D在数组里的地址，但却需要通过C这个中继）。随着中继变多，会让遍历效率退化成优化前。</li>
+</ol>
+<p>使用数组里存放的指针当作头节点会造成以上问题，那么直接把每个链表的尾item当作下一个链表的头节点，怎么样？</p>
+<p>这就是GCC v4.7以后，STL哈希表的做法。</p>
+<h3>STL哈希表的最终形态</h3>
+<p>当前线上广泛使用的STL哈希表是GCC v4.7之后实现的版本。</p>
+<p>其实现的主要完成时间是2011～2012年，发布则是在2014年。</p>
+<h4>整体结构</h4>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240129-2000-6.png" alt=""></p>
+<p>分为2部分，hash buckets（数组）与一个带头节点的总链表。</p>
+<p>总链表的头节点，叫before begin node，不存储数据。其余节点叫item node，存储KV数据等。</p>
+<p>区分总链表，属于每个bucket的链表称呼为分链表。如上文所述，bucket指向属于该bucket的首item的前置节点，作为分链表的头节点。</p>
+<p>这个设计，因为不需要利用hash buckets做每个分链表的头节点，所以可以解决上面遇到2个问题。并且，遍历操作等同于总链表的遍历，在拉链式哈希表中属效率最高。</p>
+<p>然而，这再次牺牲查找性能——又增加了一次指针跳转。另外，由于所有分链表之间没有分段，需要通过判断item node的hash值是否属于当前bucket，来确定是否已经遍历完当前分链表。</p>
+<h4>节点结构</h4>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240129-2000-7.png" alt=""></p>
+<p>分为next、key、value、hash code。</p>
+<p>因为before begin node只有next，所以item node里也将next字段放在节点头部。</p>
+<p>item node在next后紧接着是存放数据的字段。<code>unordered_set</code>只存Key；<code>unordered_map</code>存储一个std::pair，里面包含Key与Value。</p>
+<p>最后，因为需要频繁使用hash值来判断当前分链表的结尾，所以在一些时候需要存储hash值结果。（但如果key是整数，且哈希算法是std::hash，因为哈希计算结果就是本身，所以不需要记录。）</p>
+<h4>插入</h4>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240129-2000-8.png" alt=""></p>
+<p>插入的item所在bucket非空时。</p>
+<p>更新链表：只需要在分链表的头部插入即可。如上图，E节点所属分链表，其头节点是B，所以在头节点B后面插入E。</p>
+<p>更新buckets：由于在分链表头部插入，不会增加分链表，也不会修改其他分链表的头节点。所以无需操作。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240129-2000-9.png" alt=""></p>
+<p>插入的item所在bucket为空时。</p>
+<p>更新链表：因为需要产生新的分链表，所以直接在总链表的头部插入item，得到以before begin node为头节点的分链表。如上图，在before begin node后插入E。</p>
+<p>更新buckets：新增了分链表，所以item所在的bucket，指向其分链表的头节点，即before begin node。同时，还要更新原来以before begin node为分链表头节点的bucket，指向新的头节点，即刚插入的item node。如上图，E所在bucket指向before beigin node，而A所在bucket则指向E。</p>
+<h4>删除</h4>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240129-2000-10.png" alt=""></p>
+<p>更新链表：直接在总链表里删除item即可。如图，因为不需改变buckets时，所以只在总链表里删除A。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20240129-2000-11.png" alt=""></p>
+<p>更新buckets：当item是分链表唯一元素时，删除后分链表消失，所以需要更新item所在bucket，指向空；当item是分链表尾item时，因为item会是其他分链表的头节点，所以需要更新其所在bucket指向item的前置，作为新的头节点。如图，因为C是分链表唯一元素，所以C所在bucket更新为空；同时，C也是分链表尾item，所以更新C的next，即D，所在bucket指向C的前置，即B。</p>
+<h4>查找</h4>
+<p>通过hash值，得到bucket，从而找到分链表的头节点，然后遍历分链表。</p>
+<p>遍历分链表的结束条件：节点的hash值并不属于当前bucket（或链表结束）。</p>
+<h3>STL哈希表特点总结</h3>
+<p>哈希冲突的应对：拉链法</p>
+<p>相比数组内存储item的教科书上的哈希表，STL哈希表有如下优劣势。</p>
+<p>优势：</p>
+<ol>
+<li>数据节点地址稳定，迭代器不会因为rehash而失效  </li>
+<li>节约内存（拉链法，数组内无空item）</li>
+<li>遍历性能极佳（等同于遍历链表）</li>
+<li>rehash性能好（无item的构造与析构，遍历性能好，hash值缓存）</li>
+</ol>
+<p>劣势：</p>
+<ol>
+<li>查找性能较弱（多2次指针跳转，需要通过hash值判断分链表结尾）</li>
+<li>在空bucket里进行插入时，需要额外修改其他bucket。</li>
+<li>删除分链表尾item时，需要额外修改其他bucket。</li>
+</ol>
+<h2>二、erase实现的性能bug</h2>
+<p>删除item时，如果item是分链表的首item，会有不必要的判断和赋值。</p>
+<h3>bug代码</h3>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span>
+<span class="n">_Hashtable</span><span class="o">&lt;</span><span class="n">_Key</span><span class="p">,</span><span class="w"> </span><span class="n">_Value</span><span class="p">,</span><span class="w"> </span><span class="n">_Alloc</span><span class="p">,</span><span class="w"> </span><span class="n">_ExtractKey</span><span class="p">,</span><span class="w"> </span><span class="n">_Equal</span><span class="p">,</span>
+<span class="w">           </span><span class="n">_H1</span><span class="p">,</span><span class="w"> </span><span class="n">_H2</span><span class="p">,</span><span class="w"> </span><span class="n">_Hash</span><span class="p">,</span><span class="w"> </span><span class="n">_RehashPolicy</span><span class="p">,</span><span class="w"> </span><span class="n">_Traits</span><span class="o">&gt;::</span>
+<span class="n">_M_remove_bucket_begin</span><span class="p">(</span><span class="n">size_type</span><span class="w"> </span><span class="n">__bkt</span><span class="p">,</span><span class="w"> </span><span class="n">__node_type</span><span class="o">*</span><span class="w"> </span><span class="n">__next</span><span class="p">,</span>
+<span class="w">                       </span><span class="n">size_type</span><span class="w"> </span><span class="n">__next_bkt</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">__next</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">__next_bkt</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">__bkt</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Bucket is now empty</span>
+<span class="w">      </span><span class="c1">// First update next bucket if any</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">__next</span><span class="p">)</span>
+<span class="w">        </span><span class="n">_M_buckets</span><span class="p">[</span><span class="n">__next_bkt</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_M_buckets</span><span class="p">[</span><span class="n">__bkt</span><span class="p">];</span>
+
+<span class="w">      </span><span class="c1">// Second update before begin node if necessary</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">&amp;</span><span class="n">_M_before_begin</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">_M_buckets</span><span class="p">[</span><span class="n">__bkt</span><span class="p">])</span>
+<span class="w">        </span><span class="n">_M_before_begin</span><span class="p">.</span><span class="n">_M_nxt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__next</span><span class="p">;</span>
+<span class="w">      </span><span class="n">_M_buckets</span><span class="p">[</span><span class="n">__bkt</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<div class="highlight"><pre><code><span></span><span class="k">template</span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">_Key</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">_Value</span><span class="p">,</span>
+<span class="w">           </span><span class="k">typename</span><span class="w"> </span><span class="nc">_Alloc</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">_ExtractKey</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">_Equal</span><span class="p">,</span>
+<span class="w">           </span><span class="k">typename</span><span class="w"> </span><span class="nc">_H1</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">_H2</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">_Hash</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">_RehashPolicy</span><span class="p">,</span>
+<span class="w">           </span><span class="k">typename</span><span class="w"> </span><span class="nc">_Traits</span><span class="o">&gt;</span>
+<span class="k">auto</span>
+<span class="n">_Hashtable</span><span class="o">&lt;</span><span class="n">_Key</span><span class="p">,</span><span class="w"> </span><span class="n">_Value</span><span class="p">,</span><span class="w"> </span><span class="n">_Alloc</span><span class="p">,</span><span class="w"> </span><span class="n">_ExtractKey</span><span class="p">,</span><span class="w"> </span><span class="n">_Equal</span><span class="p">,</span>
+<span class="w">           </span><span class="n">_H1</span><span class="p">,</span><span class="w"> </span><span class="n">_H2</span><span class="p">,</span><span class="w"> </span><span class="n">_Hash</span><span class="p">,</span><span class="w"> </span><span class="n">_RehashPolicy</span><span class="p">,</span><span class="w"> </span><span class="n">_Traits</span><span class="o">&gt;::</span>
+<span class="n">_M_erase</span><span class="p">(</span><span class="n">size_type</span><span class="w"> </span><span class="n">__bkt</span><span class="p">,</span><span class="w"> </span><span class="n">__node_base</span><span class="o">*</span><span class="w"> </span><span class="n">__prev_n</span><span class="p">,</span><span class="w"> </span><span class="n">__node_type</span><span class="o">*</span><span class="w"> </span><span class="n">__n</span><span class="p">)</span>
+<span class="o">-&gt;</span><span class="w"> </span><span class="n">iterator</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">__prev_n</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">_M_buckets</span><span class="p">[</span><span class="n">__bkt</span><span class="p">])</span>
+<span class="w">    </span><span class="n">_M_remove_bucket_begin</span><span class="p">(</span><span class="n">__bkt</span><span class="p">,</span><span class="w"> </span><span class="n">__n</span><span class="o">-&gt;</span><span class="n">_M_next</span><span class="p">(),</span>
+<span class="w">       </span><span class="n">__n</span><span class="o">-&gt;</span><span class="n">_M_nxt</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">_M_bucket_index</span><span class="p">(</span><span class="n">__n</span><span class="o">-&gt;</span><span class="n">_M_next</span><span class="p">())</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+<span class="w">  </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">__n</span><span class="o">-&gt;</span><span class="n">_M_nxt</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">size_type</span><span class="w"> </span><span class="n">__next_bkt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_M_bucket_index</span><span class="p">(</span><span class="n">__n</span><span class="o">-&gt;</span><span class="n">_M_next</span><span class="p">());</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">__next_bkt</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">__bkt</span><span class="p">)</span>
+<span class="w">        </span><span class="n">_M_buckets</span><span class="p">[</span><span class="n">__next_bkt</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__prev_n</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">  </span><span class="n">__prev_n</span><span class="o">-&gt;</span><span class="n">_M_nxt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__n</span><span class="o">-&gt;</span><span class="n">_M_nxt</span><span class="p">;</span>
+<span class="w">  </span><span class="n">iterator</span><span class="w"> </span><span class="nf">__result</span><span class="p">(</span><span class="n">__n</span><span class="o">-&gt;</span><span class="n">_M_next</span><span class="p">());</span>
+<span class="w">  </span><span class="k">this</span><span class="o">-&gt;</span><span class="n">_M_deallocate_node</span><span class="p">(</span><span class="n">__n</span><span class="p">);</span>
+<span class="w">  </span><span class="o">--</span><span class="n">_M_element_count</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">__result</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>其中，如下代码，是一个多余的判断。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// Second update before begin node if necessary</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">&amp;</span><span class="n">_M_before_begin</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">_M_buckets</span><span class="p">[</span><span class="n">__bkt</span><span class="p">])</span>
+<span class="w">  </span><span class="n">_M_before_begin</span><span class="p">.</span><span class="n">_M_nxt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__next</span><span class="p">;</span>
+</code></pre></div>
+<p><code>_M_remove_bucket_begin</code>是一个辅助函数，<code>_M_erase</code>和<code>_M_extract</code>里，当正在删除节点是分链表首item时，调用此函数。此函数里，会在当前bucket要被清空时，判断当前分链表是否以before begin node为头节点。如果是，则需要更新before begin node为下一个分链表的头节点。</p>
+<p>然而，这个操作是多余的。因为，前文中讲述过，删除item对于总链表来说，永远都是从总链表里删除这一种操作。所以，<code>_M_erase</code>和<code>_M_extract</code>里集中从总链表删除了item，如下代码。</p>
+<div class="highlight"><pre><code><span></span><span class="n">__prev_n</span><span class="o">-&gt;</span><span class="n">_M_nxt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__n</span><span class="o">-&gt;</span><span class="n">_M_nxt</span><span class="p">;</span>
+</code></pre></div>
+<p>即使这个item是begin也不例外——这时<code>__prev_n</code>就是before begin node。所以，从单链表里删除item，已经涵盖了before begin node的修改。因而无需在<code>_M_remove_bucket_begin</code>里再做一次判断。</p>
+<h3>bug考察</h3>
+<h4>引入时间</h4>
+<p>该Bug在2012年1月13日，由该版本的哈希表作者François Dumont在实现时就引入了，并12年来未被发现。</p>
+<p><a href="https://github.com/gcc-mirror/gcc/commit/f86b266c7cc7e5704f3e6f3260cde43c511bb178">https://github.com/gcc-mirror/gcc/commit/f86b266c7cc7e5704f3e6f3260cde43c511bb178</a></p>
+<h4>引入原因</h4>
+<p>该bug的引入原因，与GCC V4.6之前的哈希表实现有一定关系。</p>
+<p>前文说过，GCC V4.6之前的哈希表，通过记录begin所在的数组下标，来优化begin的性能。</p>
+<p>这个值，在删除item，且删除之后item所在bucket被清空时，需要判断当前bucket是不是就是begin所在的bucket。如果是，则更新begin所在的数组下标为下一个非空bucket的下标。如下代码。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// If _M_begin_bucket_index no longer indexes the first non-empty</span>
+<span class="c1">// bucket - its single node is being erased - update it.</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">_M_buckets</span><span class="p">[</span><span class="n">_M_begin_bucket_index</span><span class="p">])</span>
+<span class="w">  </span><span class="n">_M_begin_bucket_index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__result</span><span class="p">.</span><span class="n">_M_cur_bucket</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">_M_buckets</span><span class="p">;</span>
+</code></pre></div>
+<p>在实现新版哈希表的过程中，这段逻辑做了平移，就变成前文指出的多余判断。因为新版哈希表实际并不需要这一步骤。</p>
+<h4>12年未被发现的原因——可读性 &amp; 注释</h4>
+<p>首先，必须说<code>_M_erase</code>代码的可读性比较差。</p>
+<p>if-else语句里，判断成功的代码抽成了<code>_M_remove_bucket_begin</code>函数，判断失败的代码却是具体实现。另外，if-else语句后续也都是具体实现。这是抽象层级不一致的可读性问题。</p>
+<p>如果把判断失败的代码块抽成<code>_M_remove_bucket_not_begin</code>函数，把if-else后续的代码抽成函数<code>_M_remove_item_from_list</code>函数。那么，可以通过对比<code>_M_remove_bucket_not_begin</code>函数与<code>_M_remove_bucket_begin</code>函数，发现<code>_M_remove_bucket_begin</code>会进行链表的更新；再看到<code>_M_remove_item_from_list</code>函数，就能发现<code>_M_remove_bucket_begin</code>函数里并不需要对链表进行更新。</p>
+<p>然后，注释模糊也是问题。</p>
+<p>"if necessary"这句话非常模糊，具体什么是"necessary"？如果像GCC V4.6之前那样，注释详细，改成"if before begin node is the prev-node, update it"。那就能发现，这个修改和<code>_M_erase</code>里对prev-node的修改重复。</p>
+<p>另外，注释模糊比没有注释更容易隐藏问题。在有注释的时候，读者会更在意注释，而不是代码。</p>
+<h3>修复方法</h3>
+<h4>修复代码</h4>
+<p>直接删除多余的判断。我修改后的代码：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span>
+<span class="nf">_M_remove_bucket_begin</span><span class="p">(</span><span class="n">size_type</span><span class="w"> </span><span class="n">__bkt</span><span class="p">,</span><span class="w"> </span><span class="n">__node_type</span><span class="o">*</span><span class="w"> </span><span class="n">__next</span><span class="p">,</span>
+<span class="w">                       </span><span class="n">size_type</span><span class="w"> </span><span class="n">__next_bkt</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">__next</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">__next_bkt</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">__bkt</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="c1">// Bucket is now empty</span>
+<span class="w">      </span><span class="c1">// Update next bucket if any</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">__next</span><span class="p">)</span>
+<span class="w">        </span><span class="n">_M_buckets</span><span class="p">[</span><span class="n">__next_bkt</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_M_buckets</span><span class="p">[</span><span class="n">__bkt</span><span class="p">];</span>
+
+<span class="w">      </span><span class="n">_M_buckets</span><span class="p">[</span><span class="n">__bkt</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>提交给官方后，官方的合作者Théo Papadopoulo发现并认为<code>__next</code>不需要判断2次。于是继续做了简化，最终修改的代码：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span>
+<span class="nf">_M_remove_bucket_begin</span><span class="p">(</span><span class="n">size_type</span><span class="w"> </span><span class="n">__bkt</span><span class="p">,</span><span class="w"> </span><span class="n">__node_ptr</span><span class="w"> </span><span class="n">__next_n</span><span class="p">,</span>
+<span class="w">                       </span><span class="n">size_type</span><span class="w"> </span><span class="n">__next_bkt</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">__next_n</span><span class="p">)</span>
+<span class="w">    </span><span class="n">_M_buckets</span><span class="p">[</span><span class="n">__bkt</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">  </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">__next_bkt</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">__bkt</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="n">_M_buckets</span><span class="p">[</span><span class="n">__next_bkt</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_M_buckets</span><span class="p">[</span><span class="n">__bkt</span><span class="p">];</span>
+<span class="w">      </span><span class="n">_M_buckets</span><span class="p">[</span><span class="n">__bkt</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>最终官方修复的commit：<a href="https://github.com/gcc-mirror/gcc/commit/ec0a68b9ee3e4b3de84816ea22c82214f8a8ceb0">https://github.com/gcc-mirror/gcc/commit/ec0a68b9ee3e4b3de84816ea22c82214f8a8ceb0</a></p>
+<h4>如何在生产环境中修复</h4>
+<p>上述修复只会在官方GCC里修复，应用到生产环境，又不想升级编译环境的GCC，可以采用如下方式手动修复。</p>
+<p>由于所有改动都只涉及_Hashtable模版类的修改，所以只需要修改编译环境中C++库的头文件，即可生效。</p>
+<p>以采取编译镜像作为编译环境的情况为例，具体方法如下：</p>
+<ol>
+<li>进入编译镜像，找到C++库里hashtable.h文件（一般在 /usr/include/c++/8/bits/hashtable.h ）</li>
+<li>按照 <a href="https://github.com/gcc-mirror/gcc/commit/ec0a68b9ee3e4b3de84816ea22c82214f8a8ceb0">修复commit</a> 里的方式，进行修改，生成修复后的hashtable.h文件并导出</li>
+<li>修改编译镜像，在最后一步拉取修复后的hashtable.h文件，替换原文件</li>
+<li>使用新的编译镜像编译业务代码。</li>
+</ol>
+<h3>性能影响</h3>
+<p>影响<code>unordered_map</code>、<code>unordered_set</code>的erase（或extract）操作。</p>
+<p>性能数据显示，对单元素进行erase（或extract）耗时下降0.6~1.2%，对连续iter进行erase耗时下降1.2%～2.4%。</p>
+<h2>三、贡献C++ STL的流程</h2>
+<p>C++ STL属于GNU GCC仓库，该仓库由GNU GCC的官方组织进行管理，github上的仓库是个只读镜像，不接受修改。另外，GNU GCC仓库只有官方认证的维护者有写权限，所以要么成为维护者，要么把Patch发邮件给维护者，由维护者帮忙提交。</p>
+<p>贡献GNU GCC仓库的方法：<a href="https://gcc.gnu.org/wiki/GettingStarted">https://gcc.gnu.org/wiki/GettingStarted</a></p>
+<p>C++ STL仓库有额外的家规，参考：<a href="https://gcc.gnu.org/onlinedocs/libstdc++/manual/appendix_contributing.html">https://gcc.gnu.org/onlinedocs/libstdc++/manual/appendix_contributing.html</a></p>
+<h3>编译GCC</h3>
+<p>参考：<a href="https://gcc.gnu.org/wiki/InstallingGCC">https://gcc.gnu.org/wiki/InstallingGCC</a></p>
+<p>编译过程中遇到过的问题：</p>
+<ol>
+<li>找不到一些库文件。这些库文件在/usr/lib64/下，在/usr/lib/下没有。解决方法：运行configure时增加选项 --disable-multilib，这样只编译64位版本。</li>
+<li>找不到一些执行命令。解决方法：安装dejagnu.noarch。</li>
+</ol>
+<h3>修改并运行单测</h3>
+<p>在编译GCC的流程中，configure后，不直接执行make，而是执行make check。</p>
+<p>STL的单测结果在 ./x86_64-pc-linux-gnu/libstdc++-v3/testsuite/libstdc++.sum</p>
+<p>本Bug修复已被现有单测覆盖。通过故意将修改部分改成报错，可以发现单测执行失败，具体见<a href="https://gcc.gnu.org/pipermail/gcc-patches/2024-January/643208.html">https://gcc.gnu.org/pipermail/gcc-patches/2024-January/643208.html</a></p>
+<p>因为已被现有单测覆盖，所以修改后的单测结果与修改前一样就代表单测通过。</p>
+<h3>发送邮件</h3>
+<h4>收件人</h4>
+<p>gcc-patches@gcc.gnu.org——所有PATCH都需要发此邮箱</p>
+<p>libstdc++@gcc.gnu.org——STL的PATCH需要带上此邮箱</p>
+<h4>内容</h4>
+<p>需要包含说明、单测结果、Change Log、Patch（Diff）。Change Log的格式可以直接从其他人邮件里拷贝。Patch内容通过git diff命令生成。</p>
+<p>可以通过查看其他人发的邮件，做为参考。</p>
+<p>发给gcc-patches的邮件列表：<a href="https://gcc.gnu.org/pipermail/gcc-patches/2024-January/subject.html">https://gcc.gnu.org/pipermail/gcc-patches/2024-January/subject.html</a></p>
+<p>发给libstdc++的邮件列表：<a href="https://gcc.gnu.org/pipermail/libstdc++/2024-January/subject.html">https://gcc.gnu.org/pipermail/libstdc++/2024-January/subject.html</a></p>
+<p>我的邮件：<a href="https://gcc.gnu.org/pipermail/gcc-patches/2024-January/643208.html">https://gcc.gnu.org/pipermail/gcc-patches/2024-January/643208.html</a></p>
+<h3>邮件沟通</h3>
+<p>发送完邮件后，相关代码的作者或者管理者会进行回复，需要进行沟通。</p>
+<p>我的修改得到作者的肯定，并期望给个性能数据。于是做了个简易的性能测试，并回复。</p>
+<p>我的邮件沟通记录，可以查看上一节里的邮件列表。</p>
+<h3>等待通知</h3>
+<p>最后会收到邮件通知。如果通过，可以在git仓库上查看到维护者帮忙做的提交，提交内容是邮件中的Change Log（可能被维护者修改）。</p>
+<p>我收到了已经提交的<a href="https://gcc.gnu.org/pipermail/libstdc++/2024-January/058162.html">通知</a>，并在github上的只读镜像里查到了<a href="https://github.com/gcc-mirror/gcc/commit/ec0a68b9ee3e4b3de84816ea22c82214f8a8ceb0">维护者帮忙做的提交</a>。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "STL哈希表详解与erase性能优化.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>

@@ -1,0 +1,775 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head> 
+<title>WebRTC的connection管理 - Ruibin.Chow</title>
+
+
+<link rel="shortcut icon" href="../vender/image/me.png" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="keywords" content="WebRTC的connection管理,C/C++,WebRTC,Ruibin.Chow,zruibin,ruibin,RBCHOW" />
+<meta name="description" content="WebRTC的connection管理<br>WebRTC点对点会话建立过程分析<br>WebRTC的CreateOffer" />
+<meta name="COPYRIGHT" content="版权所有2010,http://private.zruibin.cn" />
+
+<script type="text/javascript" charset="UTF-8">
+var sourcePrefix = "../";
+</script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/sea.js"></script>
+<script type="text/javascript" charset="UTF-8" src="../vender/js/seajs/seajs-css.js"></script>
+
+</head>
+
+<body style="visibility: hidden;">
+
+
+<div id="navbar" >
+    <div id="menu" class="container">
+    <ul>
+    <!-- <li><a href="#" class="item">Ruibin.Chow</a></li> -->
+    <li><a href="../about.html" class="item">About Me</a></li>
+    <li><a href="./index.html" class="item">Blog</a></li>
+    <li><a class="item" href="../article/tags.html">Tags</a>
+        &nbsp;
+        <div class="subs" id="tags"></div> 
+    </li>
+    <li><a href="./archives.html" class="item">Archives</a></li>
+
+    </ul>
+    </div>
+</div> 
+<p></p>
+
+
+<div class="container" id="content">
+
+<div id='header'>
+    <h2>WebRTC的connection管理</h2>
+    <footer>
+        Date:<span id='create_time'>
+            2021-01-10 13:50
+        </span>
+        &nbsp;
+        Tags: 
+<span id='article_tags'>
+         
+<a href='../article/tag_cc++.html' class='article_tag'>C/C++</a>
+
+<a href='../article/tag_webrtc.html' class='article_tag'>WebRTC</a>
+
+</span>
+
+    </footer>
+    <hr/>
+</div>
+
+<h4><p>原文出处：<a href='https://blog.csdn.net/zhuiyuanqingya/article/details/84182385' target='blank'>WebRTC的connection管理</a></p></h4>
+<p>webrtc connection 的管理，是建立 p2p 连接的关键，关于 webrtc 的 connection 有几个问题需要弄清楚，下面记录下来，以加深理解。webrtc 粗略的 connection 管理流程如下图所示：<br>
+<img src="../vender/image/img_loading.gif" data-src="../file/image/20210110-135000-1.png" alt="在这里插入图片描述"></p>
+<p>connection 的管理，从connection 的创建开始，经历更新 connection 集合，到最后选择一个最优的 connection 来传输数据。以及在传输数据的过程中，仍然要按照某种规则来对 connection 集合执行 ping，以应对网络状况的变化，动态的选择最优的 connection 来传输数据。</p>
+<h2>1. connection 相关的概念</h2>
+<h3>1.1 connection 的概念以及属性</h3>
+<p>Connection 代表了本地客户端的端口和远端客户端的端口之间建立的通信链路。源码中的解释如下：</p>
+<blockquote><p>// Represents a communication link between a port on the local client and a port on the remote client.</p>
+</blockquote>
+<p>类原型部分方法和属性如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">class</span><span class="w"> </span><span class="nc">Connection</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">CandidatePairInterface</span><span class="p">,</span>
+<span class="w">                    </span><span class="k">public</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">MessageHandler</span><span class="p">,</span>
+<span class="w">                    </span><span class="k">public</span><span class="w"> </span><span class="n">sigslot</span><span class="o">::</span><span class="n">has_slots</span><span class="o">&lt;&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">public</span><span class="o">:</span>
+<span class="w">  </span><span class="c1">// Implementation of virtual methods in CandidatePairInterface.</span>
+<span class="w">  </span><span class="c1">// Returns the description of the local port</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">Candidate</span><span class="o">&amp;</span><span class="w"> </span><span class="n">local_candidate</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="k">override</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// Returns the description of the remote port to which we communicate.</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">Candidate</span><span class="o">&amp;</span><span class="w"> </span><span class="nf">remote_candidate</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="k">override</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// The connection can send and receive packets asynchronously.  This matches</span>
+<span class="w">  </span><span class="c1">// the interface of AsyncPacketSocket, which may use UDP or TCP under the</span>
+<span class="w">  </span><span class="c1">// covers.</span>
+<span class="w">  </span><span class="k">virtual</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="nf">Send</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">,</span>
+<span class="w">                    </span><span class="k">const</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">PacketOptions</span><span class="o">&amp;</span><span class="w"> </span><span class="n">options</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">  </span><span class="c1">// Called when a packet is received on this connection.</span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">OnReadPacket</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">size</span><span class="p">,</span>
+<span class="w">                    </span><span class="k">const</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">PacketTime</span><span class="o">&amp;</span><span class="w"> </span><span class="n">packet_time</span><span class="p">);</span>
+</code></pre></div>
+<p>上面给出的函数原型能够很好的代表一个 connectin 的两端以及发送和接收数据的能力，更具体的信息，可以查看源码。connection 还有很多属性参数，代表了这个链接能否 ping 通，超时时间、平均往返时间以及丢包率等各种信息，因为太多就不列出来了。</p>
+<h3>1.2 connection 状态</h3>
+<h4>1.2.1 pingable</h4>
+<p>一个 connection 能否被选中用于传递数据，需要进行大量的检查和试探，connection 支持的检查状态如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">enum</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">IceCandidatePairState</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">WAITING</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w">  </span><span class="c1">// Check has not been performed, Waiting pair on CL.</span>
+<span class="w">  </span><span class="n">IN_PROGRESS</span><span class="p">,</span><span class="w">  </span><span class="c1">// Check has been sent, transaction is in progress.</span>
+<span class="w">  </span><span class="n">SUCCEEDED</span><span class="p">,</span><span class="w">    </span><span class="c1">// Check already done, produced a successful result.</span>
+<span class="w">  </span><span class="n">FAILED</span><span class="p">,</span><span class="w">       </span><span class="c1">// Check for this connection failed.</span>
+<span class="w">  </span><span class="c1">// According to spec there should also be a frozen state, but nothing is ever</span>
+<span class="w">  </span><span class="c1">// frozen because we have not implemented ICE freezing logic.</span>
+<span class="p">};</span>
+</code></pre></div>
+<ol>
+<li>一个 connection 被创建的时候，检查状态置为 <code>IceCandidatePairState::WAITING</code>，也就是处于等待被检查的状态；  </li>
+<li>当我们对一个 connection 执行 <code>Ping()</code> 动作时，检查状态被置为<code>IceCandidatePairState::IN_PROGRESS</code> ，表示正在被检查；  </li>
+<li>当我们发出的 ping 消息成功收到响应后，检查状态被置为<code>IceCandidatePairState::SUCCEEDED</code>；如果超时没有收到响应，检查状态被置为<code>IceCandidatePairState::FAILED</code>；  </li>
+</ol>
+<p>一个 connection 只有调用 <code>IsPingable()</code> 返回 <code>true</code> 的条件下，才会执行 <code>Ping()</code> ，而 <code>Pingable</code> 的判断条件比较多，其中一条就是如果检查状态为 <code>IceCandidatePairState::FAILED</code> ，那么 <code>IsPingable()</code> 将返回<code>false</code>。</p>
+<h4>1.2.2 writable</h4>
+<p>一个 connection 是否能够执行 Ping ，与其当前所处的写入状态有关。connection 支持的写入状态如下：</p>
+<div class="highlight"><pre><code><span></span><span class="k">enum</span><span class="w"> </span><span class="nc">WriteState</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">STATE_WRITABLE</span><span class="w">          </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w">  </span><span class="c1">// we have received ping responses recently</span>
+<span class="w">  </span><span class="n">STATE_WRITE_UNRELIABLE</span><span class="w">  </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w">  </span><span class="c1">// we have had a few ping failures</span>
+<span class="w">  </span><span class="n">STATE_WRITE_INIT</span><span class="w">        </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w">  </span><span class="c1">// we have yet to receive a ping response</span>
+<span class="w">  </span><span class="n">STATE_WRITE_TIMEOUT</span><span class="w">     </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span><span class="w">  </span><span class="c1">// we have had a large number of ping failures</span>
+<span class="p">};</span>
+</code></pre></div>
+<ol>
+<li>当一个 connection 被创建时，其写入状态被初始化为 <code>STATE_WRITE_INIT</code>；  </li>
+<li>如果一个 connection 因为某些原因被剪枝(prune)，其装态被设置为 <code>STATE_WRITE_TIMEOUT</code>；  </li>
+<li>如果一个 connection 之前处于 <code>STATE_WRITABLE</code>，而之后 ping 失败的次数太多且很长时间没有收到响应，其状态被设置为<code>STATE_WRITE_UNRELIABLE</code>；  </li>
+<li>如果一个 connection 在 ping 之后成功收到响应，那么其状态被设置为 <code>STATE_WRITABLE</code>。</li>
+</ol>
+<h4>1.2.3 prune</h4>
+<p>在 webrtc 需要建立连接的每一端，都可能会有多个网卡，并且每一端还有 TCP 和 UDP 端口，因此在 webrtc 的两端会创建较多的 connection。这些 connection 良莠不齐，有的网络稳定延时小，而有的根本走不通，因此增加新的 connection 时，会执行剪枝动作，将那些较差的 connection 标志位 pruned。剪枝的具体依据，可以看<code>P2PTransportChannel::PruneConnections()</code>。</p>
+<h4>1.2.4 ICE_ROLE</h4>
+<p>在看 webrtc 代码的过程中，会频繁看到 <code>ice_role_</code> 身影，这是一个枚举变量，用来决定建立连接的两端谁掌握主动权。其定义如下：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// Whether our side of the call is driving the negotiation, or the other side.</span>
+<span class="k">enum</span><span class="w"> </span><span class="nc">IceRole</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">ICEROLE_CONTROLLING</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="n">ICEROLE_CONTROLLED</span><span class="p">,</span>
+<span class="w">  </span><span class="n">ICEROLE_UNKNOWN</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>如果一端的<code>ice_role_</code> 值为 <code>ICEROLE_CONTROLLING</code> ，表示该端掌握会话协商的主动权，否则，表示这一端属于被控制的。</p>
+<p>offer/answer 和 controlling/controlled 是否存在某种关联呢？根据代码中的注释，两者之间并没有关联关系。下面给出位于<code>src\third_party\webrtc\pc\[transportcontroller.cc](http://transportcontroller.cc)</code>中的一段注释：</p>
+<blockquote><p>// The initial offer side may use ICE Lite, in which case, per RFC5245 Section 5.1.1, the answer side should take the controlling role if it is in the full ICE mode. 
+// 
+// When both sides use ICE Lite, the initial offer side must take the controlling role, and this is the default logic implemented in SetLocalDescription in PeerConnection.</p>
+</blockquote>
+<p>根据注释，如果 offer 端采用了精简模式的 ICE，那么 answer 端将担任 controlling 角色，如果两端都采用精简模式的 ICE ，那么PeerConnection 的默认实现逻辑是让 offer 端担任 controlling 角色。</p>
+<h2>2. 创建 connection</h2>
+<p><strong>（1）CreateConnection</strong></p>
+<p>在已经获得了远端的 <code>Candidates</code> 和本地的 <code>Candidate</code> 后，那这两者是怎么关联起来的呢？</p>
+<p>这里就要提到 <code>SignalPortReady</code>了，当本地的 <code>Candidate</code> 准备好之后，就会发送这个信号。在<code>P2PTransportChannel</code> 中，有对应的信号响应函数 <code>P2PTransportChannel::OnPortReady()</code>，部分代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// A new port is available, attempt to make connections for it</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">P2PTransportChannel::OnPortReady</span><span class="p">(</span><span class="n">PortAllocatorSession</span><span class="w"> </span><span class="o">*</span><span class="n">session</span><span class="p">,</span>
+<span class="w">                                      </span><span class="n">PortInterface</span><span class="o">*</span><span class="w"> </span><span class="n">port</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="p">...</span>
+<span class="w">  </span><span class="c1">// Attempt to create a connection from this new port to all of the remote</span>
+<span class="w">  </span><span class="c1">// candidates that we were given so far.</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">RemoteCandidate</span><span class="o">&gt;::</span><span class="n">iterator</span><span class="w"> </span><span class="n">iter</span><span class="p">;</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">iter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">remote_candidates_</span><span class="p">.</span><span class="n">begin</span><span class="p">();</span><span class="w"> </span><span class="n">iter</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">remote_candidates_</span><span class="p">.</span><span class="n">end</span><span class="p">();</span>
+<span class="w">        </span><span class="o">++</span><span class="n">iter</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">CreateConnection</span><span class="p">(</span><span class="n">port</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">iter</span><span class="p">,</span><span class="w"> </span><span class="n">iter</span><span class="o">-&gt;</span><span class="n">origin_port</span><span class="p">());</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">SortConnectionsAndUpdateState</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>remote_candidates_</code> 成员变量保存了所有的远端 <code>Candidates</code> ，其中的值是在 <code>AddIceCandidate</code>时保存下来的，针对本地创建的 Port ( Candidate 是从 Port 创建的，具有对应的关系)，循环遍历 <code>remote_candidates_</code>，用 Port 与每一个远端 Candidate 建立一个 Connection 。</p>
+<p><strong>（2）AddConnection</strong></p>
+<p>创建 connection 之后，会将其保存到 P2PTransportChannel 的<code>connections_</code>，<code>unpinged_connections_</code>两个成员中，并且给这个 connection 添加很多信号处理函数。</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">P2PTransportChannel::AddConnection</span><span class="p">(</span><span class="n">Connection</span><span class="o">*</span><span class="w"> </span><span class="n">connection</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">connections_</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">connection</span><span class="p">);</span>
+<span class="w">  </span><span class="n">unpinged_connections_</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">connection</span><span class="p">);</span>
+<span class="w">  </span><span class="n">connection</span><span class="o">-&gt;</span><span class="n">set_remote_ice_mode</span><span class="p">(</span><span class="n">remote_ice_mode_</span><span class="p">);</span>
+<span class="w">  </span><span class="n">connection</span><span class="o">-&gt;</span><span class="n">set_receiving_timeout</span><span class="p">(</span><span class="n">config_</span><span class="p">.</span><span class="n">receiving_timeout</span><span class="p">);</span>
+<span class="w">  </span><span class="n">connection</span><span class="o">-&gt;</span><span class="n">SignalReadPacket</span><span class="p">.</span><span class="n">connect</span><span class="p">(</span>
+<span class="w">      </span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">P2PTransportChannel</span><span class="o">::</span><span class="n">OnReadPacket</span><span class="p">);</span>
+<span class="p">...</span>
+<span class="w">  </span><span class="n">had_connection_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<h2>3. 选择合适的 connection</h2>
+<h3>3.1 P2PTransportChannel 与 connection 之间的关系</h3>
+<p>一个 P2PTransportChannel 管理着很多的 connection，在传输数据时，需要根据各个 connection 的状态来选择其中最好的connection 来使用。P2PTransportChannel 与 connection 之间的关系见下图：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210110-135000-2.gif" alt="在这里插入图片描述"></p>
+<p>图片来自：<a href="https://blog.csdn.net/banyao2006/article/details/9320513">libjingle翻译之《Important Concepts（重要概念）之Transports, Channels, and Connecti ons（传输、通道、链接）》</a></p>
+<h3>3.2 如何选择合适的 connection</h3>
+<p>在前面创建 connection 的过程中提到本地的端口创建完毕后，会调用 <code>P2PTransportChannel::OnPortReady()</code>这个方法来针对这个端口创建 connection，在 connection 创建完毕后会调用<code>SortConnectionsAndUpdateState()</code> ，来对所有的 connection 进行排序并更新状态，以找到最合适的 connection 来传递音视频数据。</p>
+<h4>3.2.1 比较两个 connection</h4>
+<p>当存在多个 connection 时，如何比较 connection（其中一个为 a，另一个为 b） 的优劣呢，下面给出<code>P2PTransportChannel::CompareConnections()</code> 中两个 connection 之间的比较逻辑。</p>
+<p>（1）比较两个 connection 之间的状态：</p>
+<ul>
+<li>如果两者之间一个可写一个不可写，那么可写的那个胜出；</li>
+<li>如果两者都可写或不可写，那么再比较两者的具体状态（可写包括几种子状态），可写的状态值越小表明可写度越高，可写值较小的那个胜出；</li>
+<li>如果上面两步还是无法分出胜负，那么接下来比较接收状态，如果一个接收过数据而另一个没有接收过数据，那么接收过数据的胜出；</li>
+<li>如果是TCP 类型的 connection ，那么会比较其是否处于 connected() 状态，处于连接状态的好于断开状态的，对于 UDP 类型的 connection ， connected() 始终返回 true；</li>
+</ul>
+<p>（2）经过（1）中的比较还是无法分出哪个 connection 比较好，进一步判断如果这一端是 controlled 的（参见前面介绍的<code>ICE_ROLE</code>）：</p>
+<ul>
+<li>如果 controlling 端给这个 connection 分配的提名值（remote_nomination）越高，那么这个 connection 就较好；</li>
+<li>还是无法比较，那么判断两个 connection 最近收到数据的时刻，越晚（表示越临近当前时刻）收到数据的越好；</li>
+</ul>
+<p>（3）经过（1）和（2）还是无法区分，那么进行下一步比较：</p>
+<ul>
+<li>两个 connection 中网络代价低的胜出，网络代价比较很简单，有线网和环回网络代价最低，蜂窝网络代价最高；</li>
+<li>还是无法区分，则进一步比较连接两端的 generation 标识之和，generation 标识之和越大表明这个 connection 越新，越新的越好；</li>
+<li>还是无法区分，则比较 connection 的两端端口是否有被剪枝，一个 connection 的任何一端被剪枝，都表明这个 connection 较差，没有被剪枝的 connection 好于被剪枝过的 connection；</li>
+</ul>
+<p>（4）如果经过上面的一系列比较还是无法区分，则比较两个 connection 的 RTT（平均往返时间），RTT 小的胜出。</p>
+<p>上面的步骤就是比较 connection 的全部流程。</p>
+<h4>3.2.2 是否切换选中的 connection</h4>
+<p>在 <code>SortConnectionsAndUpdateState()</code> 后会执行 <code>MaybeSwitchSelectedConnection()</code> 以在可以切换 <code>selected_connection_</code> 时进行切换。判断是否切换的流程如下：</p>
+<ol>
+<li>如果对 <code>new_connection</code> 调用 ReadyToSend() 返回 false，或者 <code>new_connection</code> 等于<code>selected_connection_</code> 时，不执行切换；  </li>
+<li>如果 <code>selected_connection_</code> 为空，那么执行切换动作；  </li>
+<li>如果 <code>new_connection</code> 的网络代价比 <code>selected_connection_</code> 更大，并且 <code>new_connection</code> 还没有收到响应，那么不执行切换；  </li>
+<li>如果通过调用 <code>CompareConnections()</code> 比较两个 connection，如果 <code>new_connection</code> 比 <code>selected_connection_</code> 更好，那么执行切换；  </li>
+<li>如果 <code>new_connection</code> 的 RTT 相比 <code>selected_connection_</code> 要小，且差值达到 10ms，就执行切换。</li>
+</ol>
+<p>如果因为从上一次收到响应数据到当前的时间长度超过阈值导致无法切换，那么会抛出一个延时任务，过一段时间后再重新执行
+<code>SortConnectionsAndUpdateState()</code> ，以进一步判断是否需要切换。</p>
+<h4>3.2.3 如何选择下一步执行 ping 的 connection</h4>
+<p>在执行 <code>P2PTransportChannel::MaybeStartPinging()</code> 时，会抛出一个消息 <code>MSG_CHECK_AND_PING</code>，这个消息的处理函数 <code>P2PTransportChannel::OnCheckAndPing()</code> 在距离上一次 ping 的间隔达到一定时间后会选择一个 connection 来执行下一次 ping。关于如何选择执行下一次 ping 的 connection，流程如下：</p>
+<ol>
+<li>如果 <code>selected_connection_</code> 不为空，并且 connected() 函数返回 true，<code>selected_connection_</code>是可写的，距离上一次在该 connection 上执行 ping 的时间间隔大于阈值，那么 <code>selected_connection_</code> 将被选择作为下次执行 ping 的 connection；  </li>
+<li>如果 P2PTransportChannel 是 weak 的（<code>selected_connection_</code> 为空或者<code>selected_connection_</code> 是 weak 的），那么会针对每一个网络（可能多个网卡多个网络）选出一个最好的并且可写的 connection 集合 A，进一步选出其中距离该 connection 上次 ping 的时间间隔超过一个阈值的集合 B，最后从集合 B 中选择距离上一次 ping 过去最长时间的 connection 作为下一次 ping 的执行对象；  </li>
+<li>第二步可能无法找到可以执行 ping 的 connection，因此进入第三步，接下来从所有接收到 ping 但是还没有发送 ping（<code>last_ping_received &gt; last_ping_sent</code>）的 connection 集合中选择 <code>last_ping_received</code> 最小的 connection，也就是从上一次接收到 ping 到现在过去最久的，优先执行 ping；  </li>
+<li>所有 pingable 但还没有 ping 过的 connection 集合优先于已经 ping 过的集合，如果还没有 ping 过的集合都是不可 ping 的，那么将所有 ping 过的集合加入到没有 ping 过的集合中，进行统一筛选；  </li>
+<li>从第（4）步中得到的没有 ping 过的集合中选出 pingable 的集合，再将集合按照 <code>MorePingable()</code> 进行排序，选出其中最 pingable 的 connection；  </li>
+<li>如果经过前面几步还是无法找到一个合适的 connection ，那么返回 nullptr。</li>
+</ol>
+<p>两个 connection ，谁更加 pingable，会经过如下的比较流程：</p>
+<ol>
+<li>如果 <code>config_.prioritize_most_likely_candidate_pairs</code> 被设置为 true（默认为false），那么首先会比较 connection 两端的端口类型，如果一个 connection 的两端端口类型都是<code>cricket::RELAY_PORT_TYPE</code> ，而另一个不是，那么前者是 more pingable，如果两个 connection 的两端端口类型都是 <code>cricket::RELAY_PORT_TYPE</code> ，那么 UDP 类型的 connection 将 more pingable；  </li>
+<li>如果第（1）步无法比较，那么判断 connection 的 last_ping_sent 时间，也就是上一次发送 ping 的时间戳，时间戳越小越 pingable；  </li>
+<li>在初始状态下，还没有任何一个 connection 被 ping 过，上面几步的比较没有意义，因此进入第（3）步，两个 connection 在有序（参考3.2.1 比较两个 connection）的 <code>connections_</code> 中越靠前的越 pingable。</li>
+</ol>
+<h2>4. 小结</h2>
+<p>webrtc 中的 connection 管理，属于 webrtc 中比较重要的模块，通过分析 connection 管理过程，能够比较好的了解 webrtc 如何选择最优的 connection ，以及如何应对网络变化动态切换 connection 等。</p>
+<hr>
+
+<h4><p>原文出处：<a href='https://blog.csdn.net/zhuiyuanqingya/article/details/84108763' target='blank'>WebRTC点对点会话建立过程分析</a></p></h4>
+<p>关于 webrtc 建立点对点连接的文章很多，其中都提到了如何利用 stun 服务器获取本机的公网地址，本文侧重<strong>局域网</strong>(两台设备之间可以直接
+ping 通)下webrtc 点对点连接建立问题分析。</p>
+<h2>1.局域网内连接建立过程</h2>
+<p>了解过 webrtc 的都知道，要在公网上使用 webrtc 建立 p2p 连接，必须要有 stun 服务器的支持才行，但在局域网内使用 webrtc 建立 p2p 连接，可以不需要 stun 服务器，但是信令服务器还是必须的。在局域网内，要获取 IceCandidate，只需要获取本机的地址和端口即可。除此之外，与在公网上建立 p2p 连接没有什么区别。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210110-153000-0.png" alt="webrtc 局域网p2p连接"></p>
+<p>本文是通过 chromium 浏览器中的前端应用，来调起浏览器中内嵌的 webrtc，所以在分析过程中，会有涉及 chromium 和 webrtc 两部分的代码。接下来会对 CreateAnswer 和 OnIceCandidate 的流程进行分析。</p>
+<h2>2. webrtc 信号机制</h2>
+<p>webrtc 中大量采用了信号机制，类似 QT
+的信号槽。后面的代码分析中不会显示指出调用是否由信号串起流程，所以这里会先介绍信号机制，后面很多地方都有用到。信号机制举例如下：</p>
+<ul>
+<li>（1）定义信号</li>
+</ul>
+<blockquote><p><code>D:\chromium\code\src\third_party\webrtc\p2p\base\portallocator.h</code></p>
+</blockquote>
+<div class="highlight"><pre><code><span></span><span class="n">sigslot</span><span class="o">::</span><span class="n">signal2</span><span class="o">&lt;</span><span class="n">PortAllocatorSession</span><span class="o">*</span><span class="p">,</span>
+<span class="w">                    </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">Candidate</span><span class="o">&gt;&amp;&gt;</span><span class="w"> </span><span class="n">SignalCandidatesReady</span><span class="p">;</span>
+</code></pre></div>
+<ul>
+<li>（2）绑定信号  </li>
+</ul>
+<p>执行 SignalCandidatesReady.connect() 会将信号和指定的处理函数进行绑定，当接收到信号时，就会调用对应的处理函数。</p>
+<blockquote><p><code>D:\chromium\code\src\third_party\webrtc\p2p\base\[p2ptransportchannel.cc](http://p2ptransportchannel.cc)</code></p>
+</blockquote>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">P2PTransportChannel::AddAllocatorSession</span><span class="p">(</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">PortAllocatorSession</span><span class="o">&gt;</span><span class="w"> </span><span class="n">session</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="p">...</span>
+<span class="w">  </span><span class="n">session</span><span class="o">-&gt;</span><span class="n">SignalCandidatesReady</span><span class="p">.</span><span class="n">connect</span><span class="p">(</span>
+<span class="w">      </span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">P2PTransportChannel</span><span class="o">::</span><span class="n">OnCandidatesReady</span><span class="p">);</span>
+<span class="w">  </span><span class="p">...</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">allocator_sessions_</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">session</span><span class="p">));</span>
+<span class="w">  </span><span class="c1">// We now only want to apply new candidates that we receive to the ports</span>
+<span class="w">  </span><span class="c1">// created by this new session because these are replacing those of the</span>
+<span class="w">  </span><span class="c1">// previous sessions.</span>
+<span class="w">  </span><span class="n">PruneAllPorts</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在这个函数中声明了 SignalCandidatesReady 的处理函数为 P2PTransportChannel::OnCandidatesReady()。当然，一个信号可以有多个处理函数，也就是可以在多处进行绑定，一旦发送信号，多处的处理函数都会被调起。</p>
+<ul>
+<li>（3）发送信号  </li>
+</ul>
+<p>在需要发送信号时，调用 <code>SignalCandidatesReady(this, candidates);</code>即可，需要传入信号处理函数需要的参数。</p>
+<blockquote><p><code>D:\chromium\code\src\third_party\webrtc\p2p\client\[basicportallocator.cc](http://basicportallocator.cc)</code></p>
+</blockquote>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">BasicPortAllocatorSession::OnCandidateReady</span><span class="p">(</span>
+<span class="w">    </span><span class="n">Port</span><span class="o">*</span><span class="w"> </span><span class="n">port</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">Candidate</span><span class="o">&amp;</span><span class="w"> </span><span class="n">c</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="p">...</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">data</span><span class="o">-&gt;</span><span class="n">ready</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">CheckCandidateFilter</span><span class="p">(</span><span class="n">c</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">Candidate</span><span class="o">&gt;</span><span class="w"> </span><span class="n">candidates</span><span class="p">;</span>
+<span class="w">    </span><span class="n">candidates</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">SanitizeRelatedAddress</span><span class="p">(</span><span class="n">c</span><span class="p">));</span>
+<span class="w">    </span><span class="n">SignalCandidatesReady</span><span class="p">(</span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="n">candidates</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">RTC_LOG</span><span class="p">(</span><span class="n">LS_INFO</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Discarding candidate because it doesn&#39;t match filter.&quot;</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">...</span>
+<span class="p">}</span>
+</code></pre></div>
+<h2>3. CreateAnswer 流程</h2>
+<p>CreateAnswer 这个动作是应答端执行，用于生成该端的会话描述信息，会话描述信息主要包括：媒体类型、编解码器、带宽等元数据，下面给出一个 SDP 的示例：</p>
+<div class="highlight"><pre><code><span></span><span class="n">v</span><span class="o">=</span><span class="mi">0</span>
+<span class="n">o</span><span class="o">=-</span><span class="w"> </span><span class="mi">6220557467521116672</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="n">IN</span><span class="w"> </span><span class="n">IP4</span><span class="w"> </span><span class="mf">127.0.0.1</span>
+<span class="n">s</span><span class="o">=-</span>
+<span class="n">t</span><span class="o">=</span><span class="mi">0</span><span class="w"> </span><span class="mi">0</span>
+<span class="n">a</span><span class="o">=</span><span class="n">group</span><span class="o">:</span><span class="n">BUNDLE</span><span class="w"> </span><span class="n">audio</span><span class="w"> </span><span class="n">video</span>
+<span class="n">a</span><span class="o">=</span><span class="n">msid</span><span class="o">-</span><span class="n">semantic</span><span class="o">:</span><span class="w"> </span><span class="n">WMS</span>
+<span class="n">m</span><span class="o">=</span><span class="n">audio</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">111</span><span class="w"> </span><span class="mi">103</span><span class="w"> </span><span class="mi">104</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">106</span><span class="w"> </span><span class="mi">105</span><span class="w"> </span><span class="mi">13</span><span class="w"> </span><span class="mi">110</span><span class="w"> </span><span class="mi">112</span><span class="w"> </span><span class="mi">113</span><span class="w"> </span><span class="mi">126</span>
+<span class="n">c</span><span class="o">=</span><span class="n">IN</span><span class="w"> </span><span class="n">IP4</span><span class="w"> </span><span class="mf">0.0.0.0</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">:</span><span class="mi">9</span><span class="w"> </span><span class="n">IN</span><span class="w"> </span><span class="n">IP4</span><span class="w"> </span><span class="mf">0.0.0.0</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ice</span><span class="o">-</span><span class="n">ufrag</span><span class="o">:</span><span class="n">LjWt</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ice</span><span class="o">-</span><span class="n">pwd</span><span class="o">:</span><span class="mi">1</span><span class="o">/</span><span class="n">eNkEa0sLVOz0wm0krK7sot</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ice</span><span class="o">-</span><span class="n">options</span><span class="o">:</span><span class="n">trickle</span>
+<span class="n">a</span><span class="o">=</span><span class="n">fingerprint</span><span class="o">:</span><span class="n">sha</span><span class="mi">-256</span><span class="w"> </span><span class="mi">85</span><span class="o">:</span><span class="mi">2</span><span class="n">D</span><span class="o">:</span><span class="n">B2</span><span class="o">:</span><span class="mi">69</span><span class="o">:</span><span class="mi">9</span><span class="n">C</span><span class="o">:</span><span class="mi">85</span><span class="o">:</span><span class="mi">26</span><span class="o">:</span><span class="mi">82</span><span class="o">:</span><span class="mi">96</span><span class="o">:</span><span class="n">D5</span><span class="o">:</span><span class="mi">87</span><span class="o">:</span><span class="n">C6</span><span class="o">:</span><span class="mi">40</span><span class="o">:</span><span class="mi">4</span><span class="n">B</span><span class="o">:</span><span class="n">DE</span><span class="o">:</span><span class="n">C5</span><span class="o">:</span><span class="n">CB</span><span class="o">:</span><span class="mi">47</span><span class="o">:</span><span class="mi">4</span><span class="n">E</span><span class="o">:</span><span class="mo">06</span><span class="o">:</span><span class="mi">57</span><span class="o">:</span><span class="mi">20</span><span class="o">:</span><span class="mi">88</span><span class="o">:</span><span class="mf">1F</span><span class="o">:</span><span class="mi">11</span><span class="o">:</span><span class="n">C4</span><span class="o">:</span><span class="n">B9</span><span class="o">:</span><span class="mi">5</span><span class="n">A</span><span class="o">:</span><span class="mi">7</span><span class="n">B</span><span class="o">:</span><span class="n">EB</span><span class="o">:</span><span class="n">D3</span><span class="o">:</span><span class="mi">9</span><span class="n">A</span>
+<span class="n">a</span><span class="o">=</span><span class="n">setup</span><span class="o">:</span><span class="n">active</span>
+<span class="n">a</span><span class="o">=</span><span class="n">mid</span><span class="o">:</span><span class="n">audio</span>
+<span class="n">a</span><span class="o">=</span><span class="n">extmap</span><span class="o">:</span><span class="mi">1</span><span class="w"> </span><span class="n">urn</span><span class="o">:</span><span class="n">ietf</span><span class="o">:</span><span class="n">params</span><span class="o">:</span><span class="n">rtp</span><span class="o">-</span><span class="n">hdrext</span><span class="o">:</span><span class="n">ssrc</span><span class="o">-</span><span class="n">audio</span><span class="o">-</span><span class="n">level</span>
+<span class="n">a</span><span class="o">=</span><span class="n">recvonly</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">mux</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">111</span><span class="w"> </span><span class="n">opus</span><span class="o">/</span><span class="mi">48000</span><span class="o">/</span><span class="mi">2</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">111</span><span class="w"> </span><span class="n">transport</span><span class="o">-</span><span class="n">cc</span>
+<span class="n">a</span><span class="o">=</span><span class="n">fmtp</span><span class="o">:</span><span class="mi">111</span><span class="w"> </span><span class="n">minptime</span><span class="o">=</span><span class="mi">10</span><span class="p">;</span><span class="n">useinbandfec</span><span class="o">=</span><span class="mi">1</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">103</span><span class="w"> </span><span class="n">ISAC</span><span class="o">/</span><span class="mi">16000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">104</span><span class="w"> </span><span class="n">ISAC</span><span class="o">/</span><span class="mi">32000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">9</span><span class="w"> </span><span class="n">G722</span><span class="o">/</span><span class="mi">8000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">0</span><span class="w"> </span><span class="n">PCMU</span><span class="o">/</span><span class="mi">8000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">8</span><span class="w"> </span><span class="n">PCMA</span><span class="o">/</span><span class="mi">8000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">106</span><span class="w"> </span><span class="n">CN</span><span class="o">/</span><span class="mi">32000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">105</span><span class="w"> </span><span class="n">CN</span><span class="o">/</span><span class="mi">16000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">13</span><span class="w"> </span><span class="n">CN</span><span class="o">/</span><span class="mi">8000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">110</span><span class="w"> </span><span class="n">telephone</span><span class="o">-</span><span class="n">event</span><span class="o">/</span><span class="mi">48000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">112</span><span class="w"> </span><span class="n">telephone</span><span class="o">-</span><span class="n">event</span><span class="o">/</span><span class="mi">32000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">113</span><span class="w"> </span><span class="n">telephone</span><span class="o">-</span><span class="n">event</span><span class="o">/</span><span class="mi">16000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">126</span><span class="w"> </span><span class="n">telephone</span><span class="o">-</span><span class="n">event</span><span class="o">/</span><span class="mi">8000</span>
+<span class="n">m</span><span class="o">=</span><span class="n">video</span><span class="w"> </span><span class="mi">9</span><span class="w"> </span><span class="n">UDP</span><span class="o">/</span><span class="n">TLS</span><span class="o">/</span><span class="n">RTP</span><span class="o">/</span><span class="n">SAVPF</span><span class="w"> </span><span class="mi">96</span><span class="w"> </span><span class="mi">97</span><span class="w"> </span><span class="mi">98</span><span class="w"> </span><span class="mi">99</span><span class="w"> </span><span class="mi">100</span><span class="w"> </span><span class="mi">101</span><span class="w"> </span><span class="mi">127</span><span class="w"> </span><span class="mi">123</span><span class="w"> </span><span class="mi">125</span>
+<span class="n">c</span><span class="o">=</span><span class="n">IN</span><span class="w"> </span><span class="n">IP4</span><span class="w"> </span><span class="mf">0.0.0.0</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">:</span><span class="mi">9</span><span class="w"> </span><span class="n">IN</span><span class="w"> </span><span class="n">IP4</span><span class="w"> </span><span class="mf">0.0.0.0</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ice</span><span class="o">-</span><span class="n">ufrag</span><span class="o">:</span><span class="n">LjWt</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ice</span><span class="o">-</span><span class="n">pwd</span><span class="o">:</span><span class="mi">1</span><span class="o">/</span><span class="n">eNkEa0sLVOz0wm0krK7sot</span>
+<span class="n">a</span><span class="o">=</span><span class="n">ice</span><span class="o">-</span><span class="n">options</span><span class="o">:</span><span class="n">trickle</span>
+<span class="n">a</span><span class="o">=</span><span class="n">fingerprint</span><span class="o">:</span><span class="n">sha</span><span class="mi">-256</span><span class="w"> </span><span class="mi">85</span><span class="o">:</span><span class="mi">2</span><span class="n">D</span><span class="o">:</span><span class="n">B2</span><span class="o">:</span><span class="mi">69</span><span class="o">:</span><span class="mi">9</span><span class="n">C</span><span class="o">:</span><span class="mi">85</span><span class="o">:</span><span class="mi">26</span><span class="o">:</span><span class="mi">82</span><span class="o">:</span><span class="mi">96</span><span class="o">:</span><span class="n">D5</span><span class="o">:</span><span class="mi">87</span><span class="o">:</span><span class="n">C6</span><span class="o">:</span><span class="mi">40</span><span class="o">:</span><span class="mi">4</span><span class="n">B</span><span class="o">:</span><span class="n">DE</span><span class="o">:</span><span class="n">C5</span><span class="o">:</span><span class="n">CB</span><span class="o">:</span><span class="mi">47</span><span class="o">:</span><span class="mi">4</span><span class="n">E</span><span class="o">:</span><span class="mo">06</span><span class="o">:</span><span class="mi">57</span><span class="o">:</span><span class="mi">20</span><span class="o">:</span><span class="mi">88</span><span class="o">:</span><span class="mf">1F</span><span class="o">:</span><span class="mi">11</span><span class="o">:</span><span class="n">C4</span><span class="o">:</span><span class="n">B9</span><span class="o">:</span><span class="mi">5</span><span class="n">A</span><span class="o">:</span><span class="mi">7</span><span class="n">B</span><span class="o">:</span><span class="n">EB</span><span class="o">:</span><span class="n">D3</span><span class="o">:</span><span class="mi">9</span><span class="n">A</span>
+<span class="n">a</span><span class="o">=</span><span class="n">setup</span><span class="o">:</span><span class="n">active</span>
+<span class="n">a</span><span class="o">=</span><span class="n">mid</span><span class="o">:</span><span class="n">video</span>
+<span class="n">a</span><span class="o">=</span><span class="n">extmap</span><span class="o">:</span><span class="mi">2</span><span class="w"> </span><span class="n">urn</span><span class="o">:</span><span class="n">ietf</span><span class="o">:</span><span class="n">params</span><span class="o">:</span><span class="n">rtp</span><span class="o">-</span><span class="n">hdrext</span><span class="o">:</span><span class="n">toffset</span>
+<span class="n">a</span><span class="o">=</span><span class="n">extmap</span><span class="o">:</span><span class="mi">3</span><span class="w"> </span><span class="n">http</span><span class="o">:</span><span class="c1">//www.webrtc.org/experiments/rtp-hdrext/abs-send-time</span>
+<span class="n">a</span><span class="o">=</span><span class="n">extmap</span><span class="o">:</span><span class="mi">4</span><span class="w"> </span><span class="n">urn</span><span class="o">:</span><span class="mi">3</span><span class="n">gpp</span><span class="o">:</span><span class="n">video</span><span class="o">-</span><span class="n">orientation</span>
+<span class="n">a</span><span class="o">=</span><span class="n">extmap</span><span class="o">:</span><span class="mi">5</span><span class="w"> </span><span class="n">http</span><span class="o">:</span><span class="c1">//www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01</span>
+<span class="n">a</span><span class="o">=</span><span class="n">extmap</span><span class="o">:</span><span class="mi">6</span><span class="w"> </span><span class="n">http</span><span class="o">:</span><span class="c1">//www.webrtc.org/experiments/rtp-hdrext/playout-delay</span>
+<span class="n">a</span><span class="o">=</span><span class="n">extmap</span><span class="o">:</span><span class="mi">7</span><span class="w"> </span><span class="n">http</span><span class="o">:</span><span class="c1">//www.webrtc.org/experiments/rtp-hdrext/video-content-type</span>
+<span class="n">a</span><span class="o">=</span><span class="n">extmap</span><span class="o">:</span><span class="mi">8</span><span class="w"> </span><span class="n">http</span><span class="o">:</span><span class="c1">//www.webrtc.org/experiments/rtp-hdrext/video-timing</span>
+<span class="n">a</span><span class="o">=</span><span class="n">recvonly</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">mux</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">rsize</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">VP8</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">goog</span><span class="o">-</span><span class="n">remb</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">transport</span><span class="o">-</span><span class="n">cc</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">ccm</span><span class="w"> </span><span class="n">fir</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">nack</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">96</span><span class="w"> </span><span class="n">nack</span><span class="w"> </span><span class="n">pli</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">97</span><span class="w"> </span><span class="n">rtx</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">fmtp</span><span class="o">:</span><span class="mi">97</span><span class="w"> </span><span class="n">apt</span><span class="o">=</span><span class="mi">96</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">98</span><span class="w"> </span><span class="n">VP9</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">98</span><span class="w"> </span><span class="n">goog</span><span class="o">-</span><span class="n">remb</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">98</span><span class="w"> </span><span class="n">transport</span><span class="o">-</span><span class="n">cc</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">98</span><span class="w"> </span><span class="n">ccm</span><span class="w"> </span><span class="n">fir</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">98</span><span class="w"> </span><span class="n">nack</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">98</span><span class="w"> </span><span class="n">nack</span><span class="w"> </span><span class="n">pli</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">99</span><span class="w"> </span><span class="n">rtx</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">fmtp</span><span class="o">:</span><span class="mi">99</span><span class="w"> </span><span class="n">apt</span><span class="o">=</span><span class="mi">98</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">100</span><span class="w"> </span><span class="n">H264</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">100</span><span class="w"> </span><span class="n">goog</span><span class="o">-</span><span class="n">remb</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">100</span><span class="w"> </span><span class="n">transport</span><span class="o">-</span><span class="n">cc</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">100</span><span class="w"> </span><span class="n">ccm</span><span class="w"> </span><span class="n">fir</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">100</span><span class="w"> </span><span class="n">nack</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtcp</span><span class="o">-</span><span class="n">fb</span><span class="o">:</span><span class="mi">100</span><span class="w"> </span><span class="n">nack</span><span class="w"> </span><span class="n">pli</span>
+<span class="n">a</span><span class="o">=</span><span class="n">fmtp</span><span class="o">:</span><span class="mi">100</span><span class="w"> </span><span class="n">level</span><span class="o">-</span><span class="n">asymmetry</span><span class="o">-</span><span class="n">allowed</span><span class="o">=</span><span class="mi">1</span><span class="p">;</span><span class="n">packetization</span><span class="o">-</span><span class="n">mode</span><span class="o">=</span><span class="mi">1</span><span class="p">;</span><span class="n">profile</span><span class="o">-</span><span class="n">level</span><span class="o">-</span><span class="n">id</span><span class="o">=</span><span class="mi">420032</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">101</span><span class="w"> </span><span class="n">rtx</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">fmtp</span><span class="o">:</span><span class="mi">101</span><span class="w"> </span><span class="n">apt</span><span class="o">=</span><span class="mi">100</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">127</span><span class="w"> </span><span class="n">red</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">123</span><span class="w"> </span><span class="n">rtx</span><span class="o">/</span><span class="mi">90000</span>
+<span class="n">a</span><span class="o">=</span><span class="n">fmtp</span><span class="o">:</span><span class="mi">123</span><span class="w"> </span><span class="n">apt</span><span class="o">=</span><span class="mi">127</span>
+<span class="n">a</span><span class="o">=</span><span class="n">rtpmap</span><span class="o">:</span><span class="mi">125</span><span class="w"> </span><span class="n">ulpfec</span><span class="o">/</span><span class="mi">90000</span>
+</code></pre></div>
+<p>CreateAnswer 生成会话描述信息的流程如下图所示：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210110-153000-1.png" alt="在这里插入图片描述"></p>
+<p>从流程可以看出， CreateAnswer 是由 js 代码发起的，其中 RTCPeerConnection 是浏览器提供的前端 api，之后传入 webkit 处理，再进入浏览器的 renderer 进程处理，最后还是到了 webrtc 代码中执行真正的生成 SDP 的动作。在<code>src\third_party\webrtc\pc\[mediasession.cc](http://mediasession.cc)</code>这个文件的 CreateAnswer 函数中，会确定本地支持的音视频编解码等具体信息。<br>
+CreateOffer 执行的流程与上图类似。</p>
+<p>关于 SDP 可以参考: <a href="https://blog.csdn.net/qq_21358401/article/details/79341031">WebRTC SDP协议</a></p>
+<h2>4. AddIceCandidate 流程</h2>
+<p>AddIceCandidate 是在对端发来了 Candidate 后，本地来添加保存这些 candidate，candidate 信息主要包括 IP 和端口号，以及所采用的协议类型等。Candidate 从前端发起添加流程到真正被保存，这个过程的流程图如下：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210110-153000-2.png" alt="在这里插入图片描述"></p>
+<p>整个流程很长，最终远端传来的 Candidate 被保存 P2PTransportChannel 中。</p>
+<h2>5. OnIceCandidate 流程</h2>
+<p>OnIceCandidate 代表收集本地 Candidate 的过程，起始于<code>PeerConnection::SetLocalDescription()</code> 函数，具体启动代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">transport_controller_</span><span class="o">-&gt;</span><span class="n">MaybeStartGathering</span><span class="p">();</span>
+</code></pre></div>
+<p>收集本地 Candidate 的执行流程如下，过程比较长，其中有些环节比较难以连贯起来，对这些环节后面会做简单介绍。</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210110-153000-3.png" alt="在这里插入图片描述"></p>
+<p>在函数 <code>UDPPort::OnLocalAddressReady()</code> 中，会执行函数<code>UDPPort::MaybePrepareStunCandidate()</code>，这个函数会尝试获取 STUN 类型的 candidates，具体代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">UDPPort::MaybePrepareStunCandidate</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// Sending binding request to the STUN server if address is available to</span>
+<span class="w">  </span><span class="c1">// prepare STUN candidate.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">server_addresses_</span><span class="p">.</span><span class="n">empty</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">SendStunBindingRequests</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Port is done allocating candidates.</span>
+<span class="w">    </span><span class="n">MaybeSetPortCompleteOrError</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>函数 <code>UDPPort::SendStunBindingRequests()</code> 执行具体的发送 stun 请求的过程，如果设置了 stun server 地址，那么就会发送请求，否则就会跳过请求 stun 地址的步骤：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">UDPPort::SendStunBindingRequests</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// We will keep pinging the stun server to make sure our NAT pin-hole stays</span>
+<span class="w">  </span><span class="c1">// open until the deadline (specified in SendStunBindingRequest).</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">requests_</span><span class="p">.</span><span class="n">empty</span><span class="p">());</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">ServerAddresses</span><span class="o">::</span><span class="n">const_iterator</span><span class="w"> </span><span class="n">it</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">server_addresses_</span><span class="p">.</span><span class="n">begin</span><span class="p">();</span>
+<span class="w">        </span><span class="n">it</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">server_addresses_</span><span class="p">.</span><span class="n">end</span><span class="p">();</span><span class="w"> </span><span class="o">++</span><span class="n">it</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">SendStunBindingRequest</span><span class="p">(</span><span class="o">*</span><span class="n">it</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>分配端口</strong></p>
+<blockquote><p><code>src\third_party\webrtc\p2p\client\[basicportallocator.cc](http://basicportallocator.cc)</code></p>
+</blockquote>
+<p>在 <code>void BasicPortAllocatorSession::DoAllocate()</code> 中的 sequence-&gt;Start() 这句代码启动针对某个网卡的 Candidate 进行收集，Start() 函数如下：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">AllocationSequence::Start</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">state_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">kRunning</span><span class="p">;</span>
+<span class="w">  </span><span class="n">session_</span><span class="o">-&gt;</span><span class="n">network_thread</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">Post</span><span class="p">(</span><span class="n">RTC_FROM_HERE</span><span class="p">,</span><span class="w"> </span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="n">MSG_ALLOCATION_PHASE</span><span class="p">);</span>
+<span class="w">  </span><span class="c1">// Take a snapshot of the best IP, so that when DisableEquivalentPhases is</span>
+<span class="w">  </span><span class="c1">// called next time, we enable all phases if the best IP has since changed.</span>
+<span class="w">  </span><span class="n">previous_best_ip_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">network_</span><span class="o">-&gt;</span><span class="n">GetBestIP</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>其中post 的原型位于文件 <code>src\jingle\glue\thread_wrapper.cc</code> ：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="n">JingleThreadWrapper</span><span class="o">::</span><span class="n">Post</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">Location</span><span class="o">&amp;</span><span class="w"> </span><span class="n">posted_from</span><span class="p">,</span>
+<span class="w">                                </span><span class="n">rtc</span><span class="o">::</span><span class="n">MessageHandler</span><span class="o">*</span><span class="w"> </span><span class="n">handler</span><span class="p">,</span>
+<span class="w">                                </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">message_id</span><span class="p">,</span>
+<span class="w">                                </span><span class="n">rtc</span><span class="o">::</span><span class="n">MessageData</span><span class="o">*</span><span class="w"> </span><span class="n">data</span><span class="p">,</span>
+<span class="w">                                </span><span class="kt">bool</span><span class="w"> </span><span class="n">time_sensitive</span><span class="p">)</span>
+</code></pre></div>
+<p>在 <code>AllocationSequence::Start()</code> 中调用 Post 设置的 MessageHandler 为 this 指针，也就是AllocationSequence 对象本身，因此调用会进入到 <code>AllocationSequence::OnMessage()</code>函数中，AllocationSequence 的 phase_ 成员在对象创建时初始化为 0， 等于 PHASE_UDP ，所以首先会进入<code>PHASE_UDP</code>的处理过程，在处理完毕后，会调用：</p>
+<div class="highlight"><pre><code><span></span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">state</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">kRunning</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="o">++</span><span class="n">phase_</span><span class="p">;</span>
+<span class="w">  </span><span class="n">session_</span><span class="o">-&gt;</span><span class="n">network_thread</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">PostDelayed</span><span class="p">(</span><span class="n">RTC_FROM_HERE</span><span class="p">,</span>
+<span class="w">                                          </span><span class="n">session_</span><span class="o">-&gt;</span><span class="n">allocator</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">step_delay</span><span class="p">(),</span>
+<span class="w">                                          </span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="n">MSG_ALLOCATION_PHASE</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>之后，会进入下一个 phase，也就是 PHASE_RELAY 。</p>
+<p>上面的流程执行到最后，会一路回调 <code>OnIceCandidate()</code> ，最终通过 webkit 传递到前端代码中。</p>
+<h2>6.小结</h2>
+<p>本文对 webrtc 建立连接过程中的一些步骤进行了具体分析，但还有较多的东西没有弄清楚，例如，两端协商 sdp 的过程等，后续再补充吧。</p>
+<hr>
+
+<h4><p>原文出处：<a href='https://blog.csdn.net/zhuiyuanqingya/article/details/84314487' target='blank'>WebRTC的CreateOffer</a></p></h4>
+<p>通过<a href="https://blog.csdn.net/zhuiyuanqingya/article/details/84108763">webrtc 点对点会话建立过程分析</a>可以知道 CreateOffer 的具体实现位置在<code>src\third_party\webrtc\pc\[mediasession.cc](http://mediasession.cc)</code>，但是 CreateOffer 执行过程中具体经历了什么，还没有进行介绍，接下来将介绍 CreateOffer 究竟创建了什么内容。</p>
+<h2>1. 总体介绍</h2>
+<p>在 CreateOffer 中，会获取本地所支持的音视频编码格式，以及传输相关参数信息。函数原型如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">SessionDescription</span><span class="o">*</span><span class="w"> </span><span class="nf">MediaSessionDescriptionFactory::CreateOffer</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">MediaSessionOptions</span><span class="o">&amp;</span><span class="w"> </span><span class="n">session_options</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">SessionDescription</span><span class="o">*</span><span class="w"> </span><span class="n">current_description</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+</code></pre></div>
+<p>参数 <code>session_options</code> 是上层传入的约束，譬如，是否需要音频描述，以及是否加密等。<code>current_description</code> 是当前的会话描述内容，如果是第一次 CreateOffer ，这个值为 nullptr，如果中途因为某些原因需要再次协商会话描述信息，这个值就是有意义的。</p>
+<h2>2.获取编码参数</h2>
+<h3>2.1 获取编码的总流程</h3>
+<p>在 CreateOffer 的过程中，我们需要获取本地支持的编码格式，以传递给对端进行协商。获取编码格式的代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">AudioCodecs</span><span class="w"> </span><span class="n">offer_audio_codecs</span><span class="p">;</span>
+<span class="n">VideoCodecs</span><span class="w"> </span><span class="n">offer_video_codecs</span><span class="p">;</span>
+<span class="n">DataCodecs</span><span class="w"> </span><span class="n">offer_data_codecs</span><span class="p">;</span>
+<span class="n">GetCodecsForOffer</span><span class="p">(</span><span class="n">current_description</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">offer_audio_codecs</span><span class="p">,</span>
+<span class="w">                  </span><span class="o">&amp;</span><span class="n">offer_video_codecs</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">offer_data_codecs</span><span class="p">);</span>
+</code></pre></div>
+<p>GetCodecsForOffer 的具体实现如下：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">MediaSessionDescriptionFactory::GetCodecsForOffer</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">SessionDescription</span><span class="o">*</span><span class="w"> </span><span class="n">current_description</span><span class="p">,</span>
+<span class="w">    </span><span class="n">AudioCodecs</span><span class="o">*</span><span class="w"> </span><span class="n">audio_codecs</span><span class="p">,</span>
+<span class="w">    </span><span class="n">VideoCodecs</span><span class="o">*</span><span class="w"> </span><span class="n">video_codecs</span><span class="p">,</span>
+<span class="w">    </span><span class="n">DataCodecs</span><span class="o">*</span><span class="w"> </span><span class="n">data_codecs</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">UsedPayloadTypes</span><span class="w"> </span><span class="n">used_pltypes</span><span class="p">;</span>
+<span class="w">  </span><span class="n">audio_codecs</span><span class="o">-&gt;</span><span class="n">clear</span><span class="p">();</span>
+<span class="w">  </span><span class="n">video_codecs</span><span class="o">-&gt;</span><span class="n">clear</span><span class="p">();</span>
+<span class="w">  </span><span class="n">data_codecs</span><span class="o">-&gt;</span><span class="n">clear</span><span class="p">();</span>
+<span class="w">  </span><span class="c1">// First - get all codecs from the current description if the media type</span>
+<span class="w">  </span><span class="c1">// is used. Add them to |used_pltypes| so the payload type is not reused if a</span>
+<span class="w">  </span><span class="c1">// new media type is added.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">current_description</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">MergeCodecsFromDescription</span><span class="p">(</span><span class="n">current_description</span><span class="p">,</span><span class="w"> </span><span class="n">audio_codecs</span><span class="p">,</span><span class="w"> </span><span class="n">video_codecs</span><span class="p">,</span>
+<span class="w">                                </span><span class="n">data_codecs</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">used_pltypes</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// Add our codecs that are not in |current_description|.</span>
+<span class="w">  </span><span class="n">MergeCodecs</span><span class="o">&lt;</span><span class="n">AudioCodec</span><span class="o">&gt;</span><span class="p">(</span><span class="n">all_audio_codecs_</span><span class="p">,</span><span class="w"> </span><span class="n">audio_codecs</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">used_pltypes</span><span class="p">);</span>
+<span class="w">  </span><span class="n">MergeCodecs</span><span class="o">&lt;</span><span class="n">VideoCodec</span><span class="o">&gt;</span><span class="p">(</span><span class="n">video_codecs_</span><span class="p">,</span><span class="w"> </span><span class="n">video_codecs</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">used_pltypes</span><span class="p">);</span>
+<span class="w">  </span><span class="n">MergeCodecs</span><span class="o">&lt;</span><span class="n">DataCodec</span><span class="o">&gt;</span><span class="p">(</span><span class="n">data_codecs_</span><span class="p">,</span><span class="w"> </span><span class="n">data_codecs</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">used_pltypes</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>第一步，执行 <code>clear()</code> 的动作，避免指针指向了无效数据；</p>
+<p>第二步，如果 <code>current_description</code> 不为空，也就是不是第一次执行 CreateOffer ，那么执行<code>MergeCodecsFromDescription</code> ，将<code>current_description</code> 中记录的编码信息存入<code>offer_xxx_codecs</code>；</p>
+<p>第三步，执行 <code>MergeCodecs</code>，将本地支持的编码格式存入<code>offer_xxx_codecs</code>。</p>
+<h3>2.2 获取本地支持的编码格式</h3>
+<p>上面提到本地支持的编码格式，那么这些信息是如何获取的呢？下面会按照调用堆栈的思路来介绍，一直到获取编码格式的源头。</p>
+<ul>
+<li>（1）在构建 <code>MediaSessionDescriptionFactory</code> 对象时，会获取本地支持的编码格式：</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">MediaSessionDescriptionFactory</span><span class="o">::</span><span class="n">MediaSessionDescriptionFactory</span><span class="p">(</span>
+<span class="w">    </span><span class="n">ChannelManager</span><span class="o">*</span><span class="w"> </span><span class="n">channel_manager</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">TransportDescriptionFactory</span><span class="o">*</span><span class="w"> </span><span class="n">transport_desc_factory</span><span class="p">)</span>
+<span class="w">    </span><span class="o">:</span><span class="w"> </span><span class="n">transport_desc_factory_</span><span class="p">(</span><span class="n">transport_desc_factory</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">channel_manager</span><span class="o">-&gt;</span><span class="n">GetSupportedAudioSendCodecs</span><span class="p">(</span><span class="o">&amp;</span><span class="n">audio_send_codecs_</span><span class="p">);</span>
+<span class="w">  </span><span class="n">channel_manager</span><span class="o">-&gt;</span><span class="n">GetSupportedAudioReceiveCodecs</span><span class="p">(</span><span class="o">&amp;</span><span class="n">audio_recv_codecs_</span><span class="p">);</span>
+<span class="w">  </span><span class="n">channel_manager</span><span class="o">-&gt;</span><span class="n">GetSupportedAudioRtpHeaderExtensions</span><span class="p">(</span><span class="o">&amp;</span><span class="n">audio_rtp_extensions_</span><span class="p">);</span>
+<span class="w">  </span><span class="n">channel_manager</span><span class="o">-&gt;</span><span class="n">GetSupportedVideoCodecs</span><span class="p">(</span><span class="o">&amp;</span><span class="n">video_codecs_</span><span class="p">);</span>
+<span class="w">  </span><span class="n">channel_manager</span><span class="o">-&gt;</span><span class="n">GetSupportedVideoRtpHeaderExtensions</span><span class="p">(</span><span class="o">&amp;</span><span class="n">video_rtp_extensions_</span><span class="p">);</span>
+<span class="w">  </span><span class="n">channel_manager</span><span class="o">-&gt;</span><span class="n">GetSupportedDataCodecs</span><span class="p">(</span><span class="o">&amp;</span><span class="n">data_codecs_</span><span class="p">);</span>
+<span class="w">  </span><span class="n">ComputeAudioCodecsIntersectionAndUnion</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>这里获取了<code>audio_send_codecs_</code>，<code>audio_recv_codecs_</code>，<code>video_codecs_</code>，<code>data_codecs_</code>，然而并没有<code>all_audio_codecs_</code>，这个参数是 <code>audio_send_codecs_</code> 和 <code>audio_recv_codecs_</code> 的并集，通过函数<code>MediaSessionDescriptionFactory::ComputeAudioCodecsIntersectionAndUnion()</code>求取的，这个函数用于求取<code>audio_send_codecs_</code>和<code>audio_recv_codecs_</code>的交集和并集。</p>
+<ul>
+<li>（2）MediaSessionDescriptionFactory 的<code>channel_manager</code>参数来自哪里呢</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="n">WebRtcSessionDescriptionFactory</span><span class="o">::</span><span class="n">WebRtcSessionDescriptionFactory</span><span class="p">(</span>
+<span class="w">    </span><span class="n">rtc</span><span class="o">::</span><span class="n">Thread</span><span class="o">*</span><span class="w"> </span><span class="n">signaling_thread</span><span class="p">,</span>
+<span class="w">    </span><span class="n">cricket</span><span class="o">::</span><span class="n">ChannelManager</span><span class="o">*</span><span class="w"> </span><span class="n">channel_manager</span><span class="p">,</span>
+<span class="w">    </span><span class="n">PeerConnection</span><span class="o">*</span><span class="w"> </span><span class="n">pc</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&amp;</span><span class="w"> </span><span class="n">session_id</span><span class="p">,</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">rtc</span><span class="o">::</span><span class="n">RTCCertificateGeneratorInterface</span><span class="o">&gt;</span><span class="w"> </span><span class="n">cert_generator</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">scoped_refptr</span><span class="o">&lt;</span><span class="n">rtc</span><span class="o">::</span><span class="n">RTCCertificate</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">certificate</span><span class="p">)</span>
+<span class="w">    </span><span class="o">:</span><span class="w"> </span><span class="n">signaling_thread_</span><span class="p">(</span><span class="n">signaling_thread</span><span class="p">),</span>
+<span class="w">      </span><span class="n">session_desc_factory_</span><span class="p">(</span><span class="n">channel_manager</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">transport_desc_factory_</span><span class="p">),</span>
+</code></pre></div>
+<p><code>session_desc_factory_</code> 是 <code>MediaSessionDescriptionFactory</code> 的实例，其构造用的<code>channel_manager</code> 来自 <code>WebRtcSessionDescriptionFactory</code> 的构造函数参数。在<code>PeerConnection::Initialize()</code> 函数中，执行了以下代码：</p>
+<div class="highlight"><pre><code><span></span><span class="n">webrtc_session_desc_factory_</span><span class="p">.</span><span class="n">reset</span><span class="p">(</span><span class="k">new</span><span class="w"> </span><span class="n">WebRtcSessionDescriptionFactory</span><span class="p">(</span>
+<span class="w">    </span><span class="n">signaling_thread</span><span class="p">(),</span><span class="w"> </span><span class="n">channel_manager</span><span class="p">(),</span><span class="w"> </span><span class="k">this</span><span class="p">,</span><span class="w"> </span><span class="n">session_id</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">cert_generator</span><span class="p">),</span><span class="w"> </span><span class="n">certificate</span><span class="p">));</span>
+</code></pre></div>
+<p><code>channel_manager()</code>函数的原型如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">cricket</span><span class="o">::</span><span class="n">ChannelManager</span><span class="o">*</span><span class="w"> </span><span class="nf">PeerConnection::channel_manager</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">factory_</span><span class="o">-&gt;</span><span class="n">channel_manager</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>factory_</code> 是 <code>PeerConnectionFactory</code> 的类实例，在<code>PeerConnectionFactory::Initialize()</code> 函数内部，有如下代码：</p>
+<div class="highlight"><pre><code><span></span><span class="n">channel_manager_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">MakeUnique</span><span class="o">&lt;</span><span class="n">cricket</span><span class="o">::</span><span class="n">ChannelManager</span><span class="o">&gt;</span><span class="p">(</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">media_engine_</span><span class="p">),</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">MakeUnique</span><span class="o">&lt;</span><span class="n">cricket</span><span class="o">::</span><span class="n">RtpDataEngine</span><span class="o">&gt;</span><span class="p">(),</span>
+<span class="w">    </span><span class="n">worker_thread_</span><span class="p">,</span><span class="w"> </span><span class="n">network_thread_</span><span class="p">);</span>
+</code></pre></div>
+<p>到此为止，我们已经看到了 <code>ChannelManager</code> 的构造位置，接下来分析其获取编码参数的代码。</p>
+<ul>
+<li>（3）音频、视频和数据获取编码参数的方法类似，因此以音频为例：</li>
+</ul>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">ChannelManager::GetSupportedAudioSendCodecs</span><span class="p">(</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">AudioCodec</span><span class="o">&gt;*</span><span class="w"> </span><span class="n">codecs</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">media_engine_</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="o">*</span><span class="n">codecs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">media_engine_</span><span class="o">-&gt;</span><span class="n">audio_send_codecs</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>可以看到是通过 <code>media_engine_</code> 这个变量来获取编码参数的，接下来分析这个变量。<code>media_engine_</code>是<code>MediaEngineInterface</code> 类型的智能指针，<code>MediaEngineInterface</code> 是一个纯虚类，根据代码搜索只有<code>CompositeMediaEngine</code> 继承了这个类，所以<code>media_engine_</code>的真实类型必然是<code>CompositeMediaEngine</code>。</p>
+<div class="highlight"><pre><code><span></span><span class="n">MediaEngineInterface</span><span class="o">*</span><span class="w"> </span><span class="nf">CreateWebRtcMediaEngine</span><span class="p">(...</span>
+<span class="p">...</span>
+<span class="k">return</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">CompositeMediaEngine</span><span class="o">&lt;</span><span class="n">WebRtcVoiceEngine</span><span class="p">,</span><span class="w"> </span><span class="n">VideoEngine</span><span class="o">&gt;</span><span class="p">(</span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">forward_as_tuple</span><span class="p">(</span><span class="n">adm</span><span class="p">,</span><span class="w"> </span><span class="n">audio_encoder_factory</span><span class="p">,</span><span class="w"> </span><span class="n">audio_decoder_factory</span><span class="p">,</span>
+<span class="w">                            </span><span class="n">audio_mixer</span><span class="p">,</span><span class="w"> </span><span class="n">audio_processing</span><span class="p">),</span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">video_args</span><span class="p">));</span>
+</code></pre></div>
+<p><code>CompositeMediaEngine</code>是一个类模板，需要传入音频引擎和视频引擎才能成为成为可以构造对象的类，<code>std::pair&lt;VOICE, VIDEO&gt;</code> 分别记录了对应的音频和视频引擎。</p>
+<div class="highlight"><pre><code><span></span><span class="k">virtual</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">AudioCodec</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">audio_send_codecs</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">voice</span><span class="p">().</span><span class="n">send_codecs</span><span class="p">();</span>
+<span class="p">}</span>
+<span class="n">VOICE</span><span class="o">&amp;</span><span class="w"> </span><span class="n">voice</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">engines_</span><span class="p">.</span><span class="n">first</span><span class="p">;</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p>所以最终是通过音频引擎来执行 <code>send_codecs()</code> 来获取对应的编码参数。</p>
+<ul>
+<li>（4）音频引擎  </li>
+</ul>
+<p>从上面给出的代码得知，音频引擎是 <code>WebRtcVoiceEngine</code> ，该类的 <code>send_codecs()</code>函数返回的 <code>send_codecs_</code>获取如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">send_codecs_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">CollectCodecs</span><span class="p">(</span><span class="n">encoder_factory_</span><span class="o">-&gt;</span><span class="n">GetSupportedEncoders</span><span class="p">());</span>
+</code></pre></div>
+<p>其中，<code>encoder_factory_-&gt;GetSupportedEncoders()</code> 的调用堆栈如图：</p>
+<p><img src="../vender/image/img_loading.gif" data-src="../file/image/20210110-155000-0.png" alt="在这里插入图片描述"></p>
+<p><code>encoder_factory_</code>依次获取每一个音频编码格式的编码器，其中获取 ISAC 编码器参数的代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">AudioEncoderIsacFloat::AppendSupportedEncoders</span><span class="p">(</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">AudioCodecSpec</span><span class="o">&gt;*</span><span class="w"> </span><span class="n">specs</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">sample_rate_hz</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="mi">16000</span><span class="p">,</span><span class="w"> </span><span class="mi">32000</span><span class="p">})</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">SdpAudioFormat</span><span class="w"> </span><span class="n">fmt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="s">&quot;ISAC&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">sample_rate_hz</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">};</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">AudioCodecInfo</span><span class="w"> </span><span class="n">info</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">QueryAudioEncoder</span><span class="p">(</span><span class="o">*</span><span class="n">SdpToConfig</span><span class="p">(</span><span class="n">fmt</span><span class="p">));</span>
+<span class="w">    </span><span class="n">specs</span><span class="o">-&gt;</span><span class="n">push_back</span><span class="p">({</span><span class="n">fmt</span><span class="p">,</span><span class="w"> </span><span class="n">info</span><span class="p">});</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="n">AudioCodecInfo</span><span class="w"> </span><span class="nf">AudioEncoderIsacFloat::QueryAudioEncoder</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">AudioEncoderIsacFloat</span><span class="o">::</span><span class="n">Config</span><span class="o">&amp;</span><span class="w"> </span><span class="n">config</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">config</span><span class="p">.</span><span class="n">IsOk</span><span class="p">());</span>
+<span class="w">  </span><span class="k">constexpr</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">min_bitrate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10000</span><span class="p">;</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">max_bitrate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">config</span><span class="p">.</span><span class="n">sample_rate_hz</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">16000</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mi">32000</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">56000</span><span class="p">;</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">default_bitrate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">max_bitrate</span><span class="p">;</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="n">config</span><span class="p">.</span><span class="n">sample_rate_hz</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">default_bitrate</span><span class="p">,</span><span class="w"> </span><span class="n">min_bitrate</span><span class="p">,</span><span class="w"> </span><span class="n">max_bitrate</span><span class="p">};</span>
+<span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>（5）CollectCodecs  </li>
+</ul>
+<p>将 <code>encoder_factory_-&gt;GetSupportedEncoders()</code>获取得到的 AudioCodecSpec 信息，转换成对应的音频编码器，然后会根据音频 AudioCodecSpec 信息，对编码器做一些设置，然后将编码器保存起来。</p>
+<div class="highlight"><pre><code><span></span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">spec</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">specs</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// We need to do some extra stuff before adding the main codecs to out.</span>
+<span class="w">  </span><span class="n">rtc</span><span class="o">::</span><span class="n">Optional</span><span class="o">&lt;</span><span class="n">AudioCodec</span><span class="o">&gt;</span><span class="w"> </span><span class="n">opt_codec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">map_format</span><span class="p">(</span><span class="n">spec</span><span class="p">.</span><span class="n">format</span><span class="p">,</span><span class="w"> </span><span class="k">nullptr</span><span class="p">);</span>
+<span class="w">  </span><span class="p">...</span>
+<span class="w">    </span><span class="n">out</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">codec</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>将舒适噪声(Comfort Noise) 编码添加到普通音频编码之后。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// Add CN codecs after &quot;proper&quot; audio codecs.</span>
+<span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">cn</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">generate_cn</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">cn</span><span class="p">.</span><span class="n">second</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">map_format</span><span class="p">({</span><span class="n">kCnCodecName</span><span class="p">,</span><span class="w"> </span><span class="n">cn</span><span class="p">.</span><span class="n">first</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">},</span><span class="w"> </span><span class="o">&amp;</span><span class="n">out</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>将电话事件的编码放在音频编码的最后。</p>
+<div class="highlight"><pre><code><span></span><span class="c1">// Add telephone-event codecs last.</span>
+<span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">dtmf</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">generate_dtmf</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">dtmf</span><span class="p">.</span><span class="n">second</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">map_format</span><span class="p">({</span><span class="n">kDtmfCodecName</span><span class="p">,</span><span class="w"> </span><span class="n">dtmf</span><span class="p">.</span><span class="n">first</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">},</span><span class="w"> </span><span class="o">&amp;</span><span class="n">out</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>到这里，本端所有的音频发送编码信息就收集完毕了。</p>
+<h3>2.3 编码信息的后续处理</h3>
+<p>到这一步，就完成了本地支持的音频发送编码的收集工作。收集完后，CreateOffer 还有对编码的进一步处理。</p>
+<div class="highlight"><pre><code><span></span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">session_options</span><span class="p">.</span><span class="n">vad_enabled</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="c1">// If application doesn&#39;t want CN codecs in offer.</span>
+<span class="w">  </span><span class="n">StripCNCodecs</span><span class="p">(</span><span class="o">&amp;</span><span class="n">offer_audio_codecs</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="n">FilterDataCodecs</span><span class="p">(</span><span class="o">&amp;</span><span class="n">offer_data_codecs</span><span class="p">,</span><span class="w"> </span><span class="n">session_options</span><span class="p">.</span><span class="n">data_channel_type</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">DCT_SCTP</span><span class="p">);</span>
+</code></pre></div>
+<p>上面的代码在应用不需要舒适噪声编码时，会将其从 <code>offer_audio_codecs</code> 中删除。</p>
+<p>如果 <code>session_options.data_channel_type</code> 的类型为 DCT_SCTP 则从 <code>offer_data_codecs</code>中过滤删除 名字为kGoogleRtpDataCodecName 的编码，否则删除编码名字为 kGoogleSctpDataCodecName 的编码。</p>
+<h2>3.获取 RTP 包头的扩展选项</h2>
+<p>RTP 头扩展信息也是在 <code>MediaSessionDescriptionFactory</code>对象的构造过程中获取的，具体过程类似音频编码的获取，这里就不再赘述了。音频的 RTP 头扩展信息构造如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">RtpCapabilities</span><span class="w"> </span><span class="nf">WebRtcVoiceEngine::GetCapabilities</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RTC_DCHECK</span><span class="p">(</span><span class="n">signal_thread_checker_</span><span class="p">.</span><span class="n">CalledOnValidThread</span><span class="p">());</span>
+<span class="w">  </span><span class="n">RtpCapabilities</span><span class="w"> </span><span class="n">capabilities</span><span class="p">;</span>
+<span class="w">  </span><span class="n">capabilities</span><span class="p">.</span><span class="n">header_extensions</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span>
+<span class="w">      </span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="p">(</span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="o">::</span><span class="n">kAudioLevelUri</span><span class="p">,</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="o">::</span><span class="n">kAudioLevelDefaultId</span><span class="p">));</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">webrtc</span><span class="o">::</span><span class="n">field_trial</span><span class="o">::</span><span class="n">IsEnabled</span><span class="p">(</span><span class="s">&quot;WebRTC-Audio-SendSideBwe&quot;</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">capabilities</span><span class="p">.</span><span class="n">header_extensions</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="p">(</span>
+<span class="w">        </span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="o">::</span><span class="n">kTransportSequenceNumberUri</span><span class="p">,</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="o">::</span><span class="n">kTransportSequenceNumberDefaultId</span><span class="p">));</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">capabilities</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="n">RtpExtension</span><span class="o">::</span><span class="n">kAudioLevelUri</span><span class="p">[]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">&quot;urn:ietf:params:rtp-hdrext:ssrc-audio-level&quot;</span><span class="p">;</span>
+<span class="k">const</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">RtpExtension</span><span class="o">::</span><span class="n">kAudioLevelDefaultId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="n">RtpExtension</span><span class="o">::</span><span class="n">kTransportSequenceNumberUri</span><span class="p">[]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">&quot;http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01&quot;</span><span class="p">;</span>
+<span class="k">const</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">RtpExtension</span><span class="o">::</span><span class="n">kTransportSequenceNumberDefaultId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span><span class="p">;</span>
+</code></pre></div>
+<p>视频部分的 RTP 头扩展信息构造如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">RtpCapabilities</span><span class="w"> </span><span class="nf">WebRtcVideoEngine::GetCapabilities</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">RtpCapabilities</span><span class="w"> </span><span class="n">capabilities</span><span class="p">;</span>
+<span class="w">  </span><span class="n">capabilities</span><span class="p">.</span><span class="n">header_extensions</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span>
+<span class="w">      </span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="p">(</span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="o">::</span><span class="n">kTimestampOffsetUri</span><span class="p">,</span><span class="w">  </span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="o">::</span><span class="n">kTimestampOffsetDefaultId</span><span class="p">));</span>
+<span class="w">  </span><span class="n">capabilities</span><span class="p">.</span><span class="n">header_extensions</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span>
+<span class="w">      </span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="p">(</span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="o">::</span><span class="n">kAbsSendTimeUri</span><span class="p">,</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="o">::</span><span class="n">kAbsSendTimeDefaultId</span><span class="p">));</span>
+<span class="w">  </span><span class="n">capabilities</span><span class="p">.</span><span class="n">header_extensions</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span>
+<span class="w">      </span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="p">(</span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="o">::</span><span class="n">kVideoRotationUri</span><span class="p">,</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="o">::</span><span class="n">kVideoRotationDefaultId</span><span class="p">));</span>
+<span class="w">  </span><span class="n">capabilities</span><span class="p">.</span><span class="n">header_extensions</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="p">(</span>
+<span class="w">      </span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="o">::</span><span class="n">kTransportSequenceNumberUri</span><span class="p">,</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="o">::</span><span class="n">kTransportSequenceNumberDefaultId</span><span class="p">));</span>
+<span class="w">  </span><span class="n">capabilities</span><span class="p">.</span><span class="n">header_extensions</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span>
+<span class="w">      </span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="p">(</span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="o">::</span><span class="n">kPlayoutDelayUri</span><span class="p">,</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="o">::</span><span class="n">kPlayoutDelayDefaultId</span><span class="p">));</span>
+<span class="w">  </span><span class="n">capabilities</span><span class="p">.</span><span class="n">header_extensions</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span>
+<span class="w">      </span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="p">(</span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="o">::</span><span class="n">kVideoContentTypeUri</span><span class="p">,</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="o">::</span><span class="n">kVideoContentTypeDefaultId</span><span class="p">));</span>
+<span class="w">  </span><span class="n">capabilities</span><span class="p">.</span><span class="n">header_extensions</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span>
+<span class="w">        </span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="p">(</span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="o">::</span><span class="n">kVideoTimingUri</span><span class="p">,</span><span class="w"> </span><span class="n">webrtc</span><span class="o">::</span><span class="n">RtpExtension</span><span class="o">::</span><span class="n">kVideoTimingDefaultId</span><span class="p">));</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">capabilities</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>在 MediaSessionDescriptionFactory::CreateOffer() 函数中，GetRtpHdrExtsToOffer()获取音频和视频 RTP 头扩展信息，作为 offer 端会话描述 的一部分。</p>
+<h2>4.为offer sdp 添加音视频内容</h2>
+<p>接下来将所有与音频、视频和数据相关的描述信息添加到 offer 端会话描述中。下面以 <code>AddAudioContentForOffer()</code> 为例分析：</p>
+<div class="highlight"><pre><code><span></span><span class="kt">bool</span><span class="w"> </span><span class="nf">MediaSessionDescriptionFactory::AddAudioContentForOffer</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">MediaDescriptionOptions</span><span class="o">&amp;</span><span class="w"> </span><span class="n">media_description_options</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">MediaSessionOptions</span><span class="o">&amp;</span><span class="w"> </span><span class="n">session_options</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">ContentInfo</span><span class="o">*</span><span class="w"> </span><span class="n">current_content</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">SessionDescription</span><span class="o">*</span><span class="w"> </span><span class="n">current_description</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">RtpHeaderExtensions</span><span class="o">&amp;</span><span class="w"> </span><span class="n">audio_rtp_extensions</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">AudioCodecs</span><span class="o">&amp;</span><span class="w"> </span><span class="n">audio_codecs</span><span class="p">,</span>
+<span class="w">    </span><span class="n">StreamParamsVec</span><span class="o">*</span><span class="w"> </span><span class="n">current_streams</span><span class="p">,</span>
+<span class="w">    </span><span class="n">SessionDescription</span><span class="o">*</span><span class="w"> </span><span class="n">desc</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+</code></pre></div>
+<p>函数执行步骤大致如下：</p>
+<p>（1）<code>GetAudioCodecsForOffer()</code> 函数根据接收还是发送的方向信息，返回音频发送编码或是音频接收编码，或者两者的并集；</p>
+<p>（2）根据 <code>current_content</code> 和 <code>supported_audio_codecs</code> 来对 <code>audio_codecs</code> 进行过滤，将<code>audio_codecs</code> 中同时匹配前面两个条件的音频编码存入 <code>filtered_codecs</code>；</p>
+<p>（3）获取支持的音频会话描述加密套件名字，<code>GetSupportedAudioSdesCryptoSuiteNames()</code>;</p>
+<div class="highlight"><pre><code><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">GetSupportedAudioSdesCryptoSuites</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">CryptoOptions</span><span class="o">&amp;</span><span class="w"> </span><span class="n">crypto_options</span><span class="p">,</span>
+<span class="w">                                        </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;*</span><span class="w"> </span><span class="n">crypto_suites</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">crypto_options</span><span class="p">.</span><span class="n">enable_gcm_crypto_suites</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">crypto_suites</span><span class="o">-&gt;</span><span class="n">push_back</span><span class="p">(</span><span class="n">rtc</span><span class="o">::</span><span class="n">SRTP_AEAD_AES_256_GCM</span><span class="p">);</span>
+<span class="w">    </span><span class="n">crypto_suites</span><span class="o">-&gt;</span><span class="n">push_back</span><span class="p">(</span><span class="n">rtc</span><span class="o">::</span><span class="n">SRTP_AEAD_AES_128_GCM</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">crypto_suites</span><span class="o">-&gt;</span><span class="n">push_back</span><span class="p">(</span><span class="n">rtc</span><span class="o">::</span><span class="n">SRTP_AES128_CM_SHA1_32</span><span class="p">);</span>
+<span class="w">  </span><span class="n">crypto_suites</span><span class="o">-&gt;</span><span class="n">push_back</span><span class="p">(</span><span class="n">rtc</span><span class="o">::</span><span class="n">SRTP_AES128_CM_SHA1_80</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>（4）将前面过滤得到的 <code>filtered_codecs</code> 、加密套件名字以及其他信息，通过 <code>CreateMediaContentOffer()</code> 组装到<code>AudioContentDescription</code> 对象中；</p>
+<p>（5）通过 <code>desc-&gt;AddContent()</code> 将<code>AudioContentDescription</code> 对象添加到 SessionDescription对象 desc 中；</p>
+<p>（6）通过 <code>AddTransportOffer()</code> 将传输相关的描述信息加入到 offer端的描述信息中，其中核心函数是<code>TransportDescriptionFactory::CreateOffer()</code>，具体代码如下：</p>
+<div class="highlight"><pre><code><span></span><span class="n">TransportDescription</span><span class="o">*</span><span class="w"> </span><span class="nf">TransportDescriptionFactory::CreateOffer</span><span class="p">(</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">TransportOptions</span><span class="o">&amp;</span><span class="w"> </span><span class="n">options</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">TransportDescription</span><span class="o">*</span><span class="w"> </span><span class="n">current_description</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">TransportDescription</span><span class="o">&gt;</span><span class="w"> </span><span class="n">desc</span><span class="p">(</span><span class="k">new</span><span class="w"> </span><span class="n">TransportDescription</span><span class="p">());</span>
+<span class="w">  </span><span class="c1">// Generate the ICE credentials if we don&#39;t already have them.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">current_description</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">options</span><span class="p">.</span><span class="n">ice_restart</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">desc</span><span class="o">-&gt;</span><span class="n">ice_ufrag</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">CreateRandomString</span><span class="p">(</span><span class="n">ICE_UFRAG_LENGTH</span><span class="p">);</span>
+<span class="w">    </span><span class="n">desc</span><span class="o">-&gt;</span><span class="n">ice_pwd</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rtc</span><span class="o">::</span><span class="n">CreateRandomString</span><span class="p">(</span><span class="n">ICE_PWD_LENGTH</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">desc</span><span class="o">-&gt;</span><span class="n">ice_ufrag</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">current_description</span><span class="o">-&gt;</span><span class="n">ice_ufrag</span><span class="p">;</span>
+<span class="w">    </span><span class="n">desc</span><span class="o">-&gt;</span><span class="n">ice_pwd</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">current_description</span><span class="o">-&gt;</span><span class="n">ice_pwd</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="n">desc</span><span class="o">-&gt;</span><span class="n">AddOption</span><span class="p">(</span><span class="n">ICE_OPTION_TRICKLE</span><span class="p">);</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">options</span><span class="p">.</span><span class="n">enable_ice_renomination</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">desc</span><span class="o">-&gt;</span><span class="n">AddOption</span><span class="p">(</span><span class="n">ICE_OPTION_RENOMINATION</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="c1">// If we are trying to establish a secure transport, add a fingerprint.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">secure_</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">SEC_ENABLED</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">secure_</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">SEC_REQUIRED</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Fail if we can&#39;t create the fingerprint.</span>
+<span class="w">    </span><span class="c1">// If we are the initiator set role to &quot;actpass&quot;.</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">SetSecurityInfo</span><span class="p">(</span><span class="n">desc</span><span class="p">.</span><span class="n">get</span><span class="p">(),</span><span class="w"> </span><span class="n">CONNECTIONROLE_ACTPASS</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">desc</span><span class="p">.</span><span class="n">release</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>到这里就把所有音频相关的会话描述信息添加到 offer 端的会话描述信息里了。</p>
+<h2>5.更新传输参数</h2>
+<p>如果 <code>session_options.bundle_enabled</code> 为 true，通过 <code>UpdateTransportInfoForBundle()</code>和 <code>UpdateCryptoParamsForBundle()</code>更新传输描述信息。所谓 bundle 就是将多条信息捆绑起来，也可以理解成合并。</p>
+<div class="highlight"><pre><code><span></span><span class="k">static</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="nf">UpdateTransportInfoForBundle</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">ContentGroup</span><span class="o">&amp;</span><span class="w"> </span><span class="n">bundle_group</span><span class="p">,</span><span class="w"> </span><span class="n">SessionDescription</span><span class="o">*</span><span class="w"> </span><span class="n">sdesc</span><span class="p">);</span>
+</code></pre></div>
+<p>这个函数所做的工作就是，根据 <code>bundle_group</code> 更新 sdesc 中的 transport infos 。更新规则是：如果 transport info 的 content name 属于 <code>bundle_group</code>，那么这个 transport info 的 ufrag, pwd and DTLS role 信息需要被修改为 <code>bundle_group</code> 第一个元素对应的sdesc 中的 transport info 的对应值。</p>
+<p>简单来说，就是将多组 ufrag, pwd and DTLS role 信息根据 bundle_group 合并到一组，部分 transport info 的 ufrag, pwd and DTLS role 信息会被选定 transport info 的信息覆盖。</p>
+<p>至此，offer 端的会话描述信息就已经全部创建完毕。</p>
+<h2>6.小结</h2>
+<p>会话描述信息的收集过程比较繁杂，前面介绍了发送端会话描述信息创建的大致过程，其中有些细节被忽略了，有疏漏的地方以后再完善。</p>
+
+
+<br/>
+<br/>
+<p></p>
+
+
+<!-- Share BEGIN -->
+<div id="share"></div>
+<!-- Share END -->
+
+
+<br/>
+
+
+<!-- 评论 start -->
+<div id="comment"></div>
+<!-- 评论 end -->
+
+<!-- CopyRight BEGIN -->
+<div id="copyright" ></div>
+<!-- CopyRight END -->
+
+
+</body>
+
+<script>
+var sourceFile = "WebRTC的connection管理.md";
+</script>
+
+<script charset="UTF-8" src="../vender/js/loaded.js"></script>
+
+</html>
